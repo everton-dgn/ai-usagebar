@@ -28,7 +28,8 @@ Each release is also published at
   shares) and, when the account has a Desktop profile, Claude Desktop; a Codex
   switch moves `~/.codex/auth.json`, which the Codex CLI, desktop app and IDE
   extension all read. The star spins while the switch runs and turns red with
-  the reason when it fails.
+  the reason when it fails. The tray binary runs the switch itself, so it
+  needs no separately built `ai-usagebar` beside it.
 - **`ai-usagebar account switch <label> --codex`.** The Codex counterpart of the
   Claude CLI switch: the outgoing login is saved back into its own account
   before the target's `auth.json` is moved into `~/.codex/auth.json`, so the

@@ -13,12 +13,15 @@ use objc2::Message;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, Bool};
 use objc2_app_kit::{
-    NSApplication, NSBezierPath, NSButton, NSColor, NSEvent, NSImage, NSImageScaling, NSScreen,
-    NSView, NSWindow,
+    NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+    NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSColor, NSEvent,
+    NSGlassEffectView, NSGlassEffectViewStyle, NSImage, NSImageScaling, NSScreen, NSView,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindow, NSWindowOrderingMode,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use objc2_quartz_core::kCACornerCurveContinuous;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
@@ -26,7 +29,6 @@ use tao::platform::macos::{
     ActivationPolicy, EventLoopExtMacOS, WindowBuilderExtMacOS, WindowExtMacOS,
 };
 use tao::window::{Window, WindowBuilder};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use wry::http::{Request, Response, StatusCode, header::CONTENT_TYPE};
 use wry::{WebView, WebViewBuilder, WebViewBuilderExtDarwin};
@@ -34,12 +36,14 @@ use wry::{WebView, WebViewBuilder, WebViewBuilderExtDarwin};
 use super::browse;
 use super::hotkey::{self, HotkeyBinding};
 use super::icon::{Severity, tray_icon_rgba};
+use super::menu_bar::{self, UsageWindow};
 use super::panel::{
-    CLICK_LOCK_MS, CORNER_RADIUS, CocoaRect, DARK_BACKGROUND, FALLBACK_WORK_AREA_HEIGHT,
-    LIGHT_BACKGROUND, PopoverPlacement, WINDOW_HEIGHT, WINDOW_WIDTH, clamp_popover_height,
-    cocoa_popover_frame, menu_bar_bottom_y,
+    CLICK_LOCK_MS, CORNER_RADIUS, CocoaRect, FALLBACK_WORK_AREA_HEIGHT, PopoverPlacement,
+    WINDOW_HEIGHT, WINDOW_WIDTH, clamp_popover_height, cocoa_popover_frame, menu_bar_bottom_y,
 };
-use super::payload::{HostFacts, UpdateFact, fact_after_check, host_payload, wrap_report};
+use super::payload::{
+    AccountSwitchFact, HostFacts, UpdateFact, fact_after_check, host_payload, wrap_report,
+};
 use super::strip::{
     BARS_PIXEL_SIDE, BARS_POINT_SIDE, Stars, StripStyle, bar_fill, bars_layout, bars_rgba,
     content_from_payload, parse_strip_ipc,
@@ -54,7 +58,6 @@ const POPOVER_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/popover/popover
 
 enum UserEvent {
     Tray(TrayIconEvent),
-    Menu(MenuEvent),
     Ipc(String),
     Report(Value),
     Entry(Value),
@@ -97,28 +100,12 @@ impl Theme {
             _ => None,
         }
     }
-
-    fn background(self) -> (u8, u8, u8, u8) {
-        match self {
-            Self::Light => LIGHT_BACKGROUND,
-            Self::Dark => DARK_BACKGROUND,
-        }
-    }
-}
-
-struct MenuItems {
-    refresh: MenuItem,
-    detect: MenuItem,
-    open_tui: MenuItem,
-    startup: CheckMenuItem,
-    quit: MenuItem,
 }
 
 struct TrayState {
     window: Window,
     webview: Option<WebView>,
     tray: TrayIcon,
-    menu: MenuItems,
     worker: mpsc::Sender<WorkerCmd>,
     proxy: EventLoopProxy<UserEvent>,
     payload: Value,
@@ -137,6 +124,14 @@ struct TrayState {
     strip_style: StripStyle,
     stars: Stars,
     strip_order: Vec<String>,
+    strip_order_known: bool,
+    menu_bar_provider: String,
+    menu_bar_show_all: bool,
+    menu_bar_hide_value: bool,
+    menu_bar_window: UsageWindow,
+    menu_bar_chart: bool,
+    notifications_enabled: bool,
+    notifications_threshold: u8,
 }
 
 pub fn run() -> i32 {
@@ -161,13 +156,6 @@ fn run_loop() -> Result<(), String> {
             let _ = proxy.send_event(UserEvent::Tray(event));
         }));
     }
-    {
-        let proxy = proxy.clone();
-        MenuEvent::set_event_handler(Some(move |event| {
-            let _ = proxy.send_event(UserEvent::Menu(event));
-        }));
-    }
-
     let window = WindowBuilder::new()
         .with_title("AI Usage")
         .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
@@ -200,19 +188,21 @@ fn run_loop() -> Result<(), String> {
     let _ = cmd_tx.send(WorkerCmd::Refresh);
 
     let empty = wrap_report("{}", &facts_snapshot(&facts), now_ms(), None);
-    let menu = build_menu(startup::is_enabled());
-    let context_menu = make_menu(&menu);
-    let tray = build_tray(context_menu)?;
+    let menu_bar_window =
+        UsageWindow::parse(config.tray.menu_bar_window.as_deref().unwrap_or("auto"));
+    let menu_bar_chart = config.tray.menu_bar_style.as_deref() == Some("bars");
+    let menu_bar_show_all = config.tray.menu_bar_show_all();
+    let tray = build_tray()?;
 
     let theme = Theme::Light;
-    let webview = build_webview(&window, proxy.clone(), theme).ok();
+    let webview = build_webview(&window, proxy.clone()).ok();
     round_corners(&window);
+    install_glass_background(&window);
 
     let mut state = TrayState {
         window,
         webview,
         tray,
-        menu,
         worker: cmd_tx,
         proxy: proxy.clone(),
         payload: empty,
@@ -227,6 +217,18 @@ fn run_loop() -> Result<(), String> {
         strip_style: StripStyle::Bars,
         stars: Stars::new(),
         strip_order: Vec::new(),
+        strip_order_known: false,
+        menu_bar_provider: config
+            .tray
+            .menu_bar_provider
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| menu_bar::HIGHEST_PROVIDER.into()),
+        menu_bar_show_all,
+        menu_bar_hide_value: config.tray.menu_bar_hide_value,
+        menu_bar_window,
+        menu_bar_chart,
+        notifications_enabled: config.notifications.enabled,
+        notifications_threshold: config.notifications.threshold,
     };
     apply_strip_icon(&mut state);
 
@@ -234,9 +236,6 @@ fn run_loop() -> Result<(), String> {
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(UserEvent::Tray(tray_event)) => handle_tray(&mut state, tray_event),
-            Event::UserEvent(UserEvent::Menu(menu_event)) => {
-                handle_menu(&mut state, &menu_event, control_flow);
-            }
             Event::UserEvent(UserEvent::Ipc(body)) => handle_ipc(&mut state, &body, control_flow),
             Event::UserEvent(UserEvent::Report(payload)) => apply_payload(&mut state, payload),
             Event::UserEvent(UserEvent::Entry(entry)) => apply_entry(&mut state, entry),
@@ -320,10 +319,127 @@ fn run_detection(force: bool) {
 fn host_facts(config: &Config) -> HostFacts {
     let mut facts = HostFacts::new(env!("CARGO_PKG_VERSION"), startup::is_enabled());
     facts.refresh_secs = config.tray.refresh_minutes() * 60;
+    facts.accounts = account_facts(config);
     facts
 }
 
+/// Which Claude CLI and Codex logins are active, for the switch control on
+/// each account's card. Read fresh on every report, so a switch made from the
+/// terminal shows up too.
+fn account_facts(config: &Config) -> Vec<AccountSwitchFact> {
+    let mut out = Vec::new();
+    let claude = config.anthropic.all_accounts();
+    if config.anthropic.enabled && !claude.is_empty() {
+        let active = crate::anthropic::cli_account::home_claude_json()
+            .ok()
+            .and_then(|home| crate::anthropic::cli_account::resolve_active_label(&home, &claude));
+        out.push(AccountSwitchFact {
+            vendor: "anthropic".into(),
+            active,
+            labels: claude.iter().map(|account| account.label.clone()).collect(),
+            ..AccountSwitchFact::default()
+        });
+    }
+    let codex = &config.openai.accounts;
+    if config.openai.enabled && !codex.is_empty() {
+        let active = config
+            .openai
+            .resolve_auth_path(None)
+            .ok()
+            .and_then(|default| crate::openai::account::resolve_active_label(&default, codex));
+        out.push(AccountSwitchFact {
+            vendor: "openai".into(),
+            active,
+            labels: codex.iter().map(|account| account.label.clone()).collect(),
+            ..AccountSwitchFact::default()
+        });
+    }
+    out
+}
+
+/// Replace the account facts with a fresh read, keeping any running switch
+/// and the last error attached to their vendor.
+fn refresh_account_facts(facts: &SharedFacts) {
+    let fresh = account_facts(&Config::load().unwrap_or_default());
+    with_facts(facts, |f| {
+        f.accounts = fresh
+            .into_iter()
+            .map(|mut fact| {
+                if let Some(old) = f.accounts.iter().find(|old| old.vendor == fact.vendor) {
+                    fact.target.clone_from(&old.target);
+                    fact.switching = old.switching;
+                    fact.error.clone_from(&old.error);
+                }
+                fact
+            })
+            .collect();
+    });
+}
+
+/// Run `ai-usagebar account switch` out of process, exactly as a terminal
+/// would: the Claude half may quit and reopen the Desktop app, and its errors
+/// arrive on stderr, which becomes the card's message. Runs on its own thread,
+/// so a slow switch never holds up the refresh worker; the switch is a
+/// transaction with its own rollback, so it is left to finish rather than
+/// killed on a timer.
+fn run_account_switch(facts: &SharedFacts, vendor: &str, label: &str) {
+    let error = match resolve_cli() {
+        Some(cli) => switch_with(&cli, vendor, label),
+        None => "the ai-usagebar CLI was not found next to the tray or in ~/.cargo/bin".into(),
+    };
+    with_facts(facts, |f| {
+        for fact in f.accounts.iter_mut().filter(|fact| fact.vendor == vendor) {
+            fact.switching = false;
+            fact.error.clone_from(&error);
+        }
+    });
+}
+
+/// The switch itself; returns the error to show, or empty on success.
+fn switch_with(cli: &std::path::Path, vendor: &str, label: &str) -> String {
+    let mut command = std::process::Command::new(cli);
+    command.args(["account", "switch", "--yes"]);
+    if vendor == "openai" {
+        command.arg("--codex");
+    }
+    command.arg("--").arg(label);
+    match command.stdin(std::process::Stdio::null()).output() {
+        Ok(output) if output.status.success() => String::new(),
+        Ok(output) => String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty())
+            .map(|line| {
+                line.trim_start_matches("ai-usagebar account switch: ")
+                    .to_string()
+            })
+            .unwrap_or_else(|| format!("account switch exited with {}", output.status)),
+        Err(error) => format!("could not run ai-usagebar: {error}"),
+    }
+}
+
+/// The `ai-usagebar` CLI next to this tray binary, then `~/.cargo/bin`.
+/// Never a `PATH` lookup: this runs a command that moves logins, so the
+/// binary must not be an ambient choice.
+fn resolve_cli() -> Option<std::path::PathBuf> {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let sibling = dir.join("ai-usagebar");
+        if sibling.is_file() {
+            return Some(sibling);
+        }
+    }
+    let cargo = crate::cache::home_dir()
+        .ok()?
+        .join(".cargo")
+        .join("bin")
+        .join("ai-usagebar");
+    cargo.is_file().then_some(cargo)
+}
+
 async fn push_report(proxy: &EventLoopProxy<UserEvent>, facts: &SharedFacts) {
+    refresh_account_facts(facts);
     let mut snapshot = facts_snapshot(facts);
     snapshot.startup_enabled = startup::is_enabled();
     let now = now_ms();
@@ -400,6 +516,7 @@ fn stamp_facts(state: &mut TrayState) {
         "update_checked_at",
         "repository",
         "version",
+        "accounts",
     ] {
         obj.insert(key.into(), stamped[key].clone());
     }
@@ -438,6 +555,17 @@ fn apply_entry(state: &mut TrayState, entry: Value) {
 
 fn apply_strip_icon(state: &mut TrayState) {
     let content = content_from_payload(&state.payload, &state.stars, &state.strip_order);
+    let visible = state
+        .strip_order_known
+        .then_some(state.strip_order.as_slice());
+    let tooltip = menu_bar::tooltip(
+        &state.payload,
+        &state.menu_bar_provider,
+        state.menu_bar_show_all,
+        state.menu_bar_window,
+        visible,
+    );
+    let _ = state.tray.set_tooltip(Some(tooltip.as_str()));
     match state.strip_style {
         StripStyle::Bars => {
             let fractions: Vec<f64> = content.bars.iter().map(|m| m.fraction).collect();
@@ -448,7 +576,21 @@ fn apply_strip_icon(state: &mut TrayState) {
                 let _ = state.tray.set_icon(Some(icon));
             }
             state.tray.set_icon_as_template(true);
-            state.tray.set_title(None::<&str>);
+            if state.menu_bar_chart {
+                // tray-icon's macOS set_title(None) leaves the old title in
+                // NSStatusBarButton. An empty title actually clears it.
+                state.tray.set_title(Some(""));
+            } else {
+                let title = menu_bar::title(
+                    &state.payload,
+                    &state.menu_bar_provider,
+                    state.menu_bar_show_all,
+                    !state.menu_bar_hide_value,
+                    state.menu_bar_window,
+                    visible,
+                );
+                state.tray.set_title(Some(title.as_str()));
+            }
             if let Some(image) = template_bars_image(&fractions) {
                 set_status_button_image(&image);
             }
@@ -571,38 +713,123 @@ fn push_to_webview(state: &TrayState) {
     let Some(webview) = state.webview.as_ref() else {
         return;
     };
-    let json = host_payload(&state.payload);
+    let json = popover_payload(state);
     let script = format!("window.__AIUB_APPLY__ && window.__AIUB_APPLY__({json})");
     let _ = webview.evaluate_script(&script);
 }
 
+fn popover_payload(state: &TrayState) -> String {
+    let mut payload = state.payload.clone();
+    payload["menu_bar_show_all"] = json!(state.menu_bar_show_all);
+    payload["menu_bar_hide_value"] = json!(state.menu_bar_hide_value);
+    payload["menu_bar_window"] = json!(state.menu_bar_window.as_str());
+    payload["menu_bar_provider"] = json!(state.menu_bar_provider);
+    payload["menu_bar_chart"] = json!(state.menu_bar_chart);
+    payload["notifications_enabled"] = json!(state.notifications_enabled);
+    payload["notifications_threshold"] = json!(state.notifications_threshold);
+    host_payload(&payload)
+}
+
 fn handle_tray(state: &mut TrayState, event: TrayIconEvent) {
     if let TrayIconEvent::Click {
-        button: MouseButton::Left,
+        button,
         button_state: MouseButtonState::Up,
         ..
     } = event
     {
-        if state.popover_open {
-            hide_popover(state);
-        } else {
-            state.last_anchor = Some(cocoa_mouse());
-            show_popover(state);
+        match button {
+            MouseButton::Left | MouseButton::Right => {
+                if state.popover_open {
+                    hide_popover(state);
+                } else {
+                    state.last_anchor = Some(cocoa_mouse());
+                    show_popover(state);
+                }
+            }
+            MouseButton::Middle => next_menu_bar_provider(state),
         }
     }
 }
 
-fn handle_menu(state: &mut TrayState, event: &MenuEvent, control_flow: &mut ControlFlow) {
-    if event.id == state.menu.refresh.id() {
-        let _ = state.worker.send(WorkerCmd::Refresh);
-    } else if event.id == state.menu.detect.id() {
-        let _ = state.worker.send(WorkerCmd::Detect);
-    } else if event.id == state.menu.open_tui.id() {
-        tui_launch::open();
-    } else if event.id == state.menu.startup.id() {
-        toggle_startup(state);
-    } else if event.id == state.menu.quit.id() {
-        *control_flow = ControlFlow::Exit;
+fn persist_menu_bar_value(key: &str, value: toml_edit::Value) {
+    if let Some(path) = config_path() {
+        let _ = crate::config::set_tray_value(&path, key, Some(value));
+    }
+}
+
+fn next_menu_bar_provider(state: &mut TrayState) {
+    let visible = state
+        .strip_order_known
+        .then_some(state.strip_order.as_slice());
+    if let Some(id) = menu_bar::next_id(
+        &state.payload,
+        &state.menu_bar_provider,
+        state.menu_bar_window,
+        visible,
+    ) {
+        state.menu_bar_provider = id.clone();
+        persist_menu_bar_value("menu_bar_provider", id.into());
+        // A cycle must visibly change the strip even when Show All was on.
+        if state.menu_bar_show_all {
+            state.menu_bar_show_all = false;
+            persist_menu_bar_value("menu_bar_show_all", false.into());
+        }
+        apply_strip_icon(state);
+    }
+}
+
+fn set_menu_bar_window(state: &mut TrayState, window: UsageWindow) {
+    state.menu_bar_window = window;
+    persist_menu_bar_value("menu_bar_window", window.as_str().into());
+    apply_strip_icon(state);
+}
+
+/// Start a switch the popover asked for. Only a vendor and label the host
+/// itself reported are accepted, and never while one is already running.
+fn request_account_switch(state: &mut TrayState, value: &Value) {
+    let vendor = value.get("vendor").and_then(Value::as_str).unwrap_or("");
+    let label = value.get("label").and_then(Value::as_str).unwrap_or("");
+    let allowed = facts_snapshot(&state.facts).accounts.iter().any(|fact| {
+        fact.vendor == vendor
+            && !fact.switching
+            && fact.active.as_deref() != Some(label)
+            && fact.labels.iter().any(|known| known == label)
+    });
+    if !allowed {
+        return;
+    }
+    with_facts(&state.facts, |f| {
+        for fact in f.accounts.iter_mut().filter(|fact| fact.vendor == vendor) {
+            fact.target = label.to_string();
+            fact.switching = true;
+            fact.error.clear();
+        }
+    });
+    apply_facts(state);
+    let facts = state.facts.clone();
+    let proxy = state.proxy.clone();
+    let worker = state.worker.clone();
+    let failed_vendor = vendor.to_string();
+    let (vendor, label) = (vendor.to_string(), label.to_string());
+    let spawned = std::thread::Builder::new()
+        .name("ai-usagebar-tray-account-switch".into())
+        .spawn(move || {
+            run_account_switch(&facts, &vendor, &label);
+            let _ = proxy.send_event(UserEvent::Facts);
+            let _ = worker.send(WorkerCmd::Refresh);
+        });
+    if spawned.is_err() {
+        with_facts(&state.facts, |f| {
+            for fact in f
+                .accounts
+                .iter_mut()
+                .filter(|fact| fact.vendor == failed_vendor)
+            {
+                fact.switching = false;
+                fact.error = "could not start the account switch".into();
+            }
+        });
+        apply_facts(state);
     }
 }
 
@@ -626,6 +853,7 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
         "close" => hide_popover(state),
         "quit" => *control_flow = ControlFlow::Exit,
         "toggle-startup" => toggle_startup(state),
+        "switch-account" => request_account_switch(state, &value),
         "resize" => handle_resize(state, &value),
         "refresh-entry" => {
             if let Some(id) = value.get("id").and_then(Value::as_str) {
@@ -641,11 +869,99 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
                 set_refresh(state, minutes);
             }
         }
+        "set-notifications-enabled" => {
+            if let Some(enabled) = value.get("value").and_then(Value::as_bool)
+                && let Some(path) = config_path()
+                && crate::config::set_notification_value(&path, "enabled", enabled.into()).is_ok()
+            {
+                state.notifications_enabled = enabled;
+                push_to_webview(state);
+            }
+        }
+        "set-notifications-threshold" => {
+            if let Some(threshold) = value.get("value").and_then(Value::as_u64)
+                && (1..=100).contains(&threshold)
+                && let Some(path) = config_path()
+                && crate::config::set_notification_value(
+                    &path,
+                    "threshold",
+                    (threshold as i64).into(),
+                )
+                .is_ok()
+            {
+                state.notifications_threshold = threshold as u8;
+                push_to_webview(state);
+            }
+        }
+        "next-menu-bar-provider" => {
+            next_menu_bar_provider(state);
+            push_to_webview(state);
+        }
+        "set-menu-bar-provider" => {
+            if let Some(id) = value.get("value").and_then(Value::as_str) {
+                let eligible = id == menu_bar::HIGHEST_PROVIDER
+                    || state
+                        .payload
+                        .get("entries")
+                        .and_then(Value::as_array)
+                        .is_some_and(|entries| {
+                            entries
+                                .iter()
+                                .any(|entry| entry.get("id").and_then(Value::as_str) == Some(id))
+                        })
+                        && (!state.strip_order_known
+                            || state.strip_order.iter().any(|shown| shown == id));
+                if eligible {
+                    state.menu_bar_provider = id.to_owned();
+                    persist_menu_bar_value("menu_bar_provider", id.into());
+                    if state.menu_bar_show_all {
+                        state.menu_bar_show_all = false;
+                        persist_menu_bar_value("menu_bar_show_all", false.into());
+                    }
+                    apply_strip_icon(state);
+                    push_to_webview(state);
+                }
+            }
+        }
+        "set-menu-bar-show-all" => {
+            if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
+                state.menu_bar_show_all = enabled;
+                persist_menu_bar_value("menu_bar_show_all", enabled.into());
+                apply_strip_icon(state);
+                push_to_webview(state);
+            }
+        }
+        "set-menu-bar-hide-value" => {
+            if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
+                state.menu_bar_hide_value = enabled;
+                persist_menu_bar_value("menu_bar_hide_value", enabled.into());
+                apply_strip_icon(state);
+                push_to_webview(state);
+            }
+        }
+        "set-menu-bar-window" => {
+            if let Some(window) = value.get("value").and_then(Value::as_str) {
+                set_menu_bar_window(state, UsageWindow::parse(window));
+                push_to_webview(state);
+            }
+        }
+        "set-menu-bar-chart" => {
+            if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
+                state.menu_bar_chart = enabled;
+                persist_menu_bar_value(
+                    "menu_bar_style",
+                    (if enabled { "bars" } else { "provider" }).into(),
+                );
+                apply_strip_icon(state);
+                push_to_webview(state);
+            }
+        }
         "strip" => {
             let (style, stars, order) = parse_strip_ipc(&value);
             state.strip_style = style;
             state.stars = stars;
             state.strip_order = order;
+            state.strip_order_known = true;
             apply_strip_icon(state);
         }
         "open-url" => {
@@ -686,12 +1002,20 @@ fn handle_resize(state: &mut TrayState, value: &Value) {
 }
 
 fn apply_theme(state: &mut TrayState, theme: Theme) {
-    if state.theme == theme {
-        return;
-    }
     state.theme = theme;
-    if let Some(webview) = state.webview.as_ref() {
-        let _ = webview.set_background_color(theme.background());
+    let ptr = state.window.ns_window() as *mut NSWindow;
+    if let Some(window) = unsafe { ptr.as_ref() } {
+        // SAFETY: AppKit exports these immutable appearance names for the
+        // lifetime of the process.
+        let name = unsafe {
+            match theme {
+                Theme::Light => NSAppearanceNameAqua,
+                Theme::Dark => NSAppearanceNameDarkAqua,
+            }
+        };
+        if let Some(appearance) = NSAppearance::appearanceNamed(name) {
+            window.setAppearance(Some(&appearance));
+        }
     }
 }
 
@@ -705,15 +1029,12 @@ fn anchor_visible_height(anchor: Option<(f64, f64)>) -> f64 {
 fn toggle_startup(state: &mut TrayState) {
     let next = !startup::is_enabled();
     if startup::set_enabled(next).is_ok() {
-        state.menu.startup.set_checked(next);
         if let Some(obj) = state.payload.as_object_mut() {
             obj.insert("startup_enabled".into(), Value::Bool(next));
         }
         if state.js_ready {
             push_to_webview(state);
         }
-    } else {
-        state.menu.startup.set_checked(startup::is_enabled());
     }
 }
 
@@ -798,46 +1119,21 @@ fn position_popover(state: &TrayState) {
     apply_cocoa_frame(&state.window, frame);
 }
 
-fn build_menu(startup_enabled: bool) -> MenuItems {
-    MenuItems {
-        refresh: MenuItem::with_id("refresh", "Refresh", true, None),
-        detect: MenuItem::with_id("detect", "Detect Providers", true, None),
-        open_tui: MenuItem::with_id("open-tui", "Open TUI", true, None),
-        startup: CheckMenuItem::with_id("startup", "Start at Login", true, startup_enabled, None),
-        quit: MenuItem::with_id("quit", "Quit", true, None),
-    }
-}
-
-fn make_menu(items: &MenuItems) -> Menu {
-    let menu = Menu::new();
-    let sep = PredefinedMenuItem::separator();
-    let _ = menu.append_items(&[
-        &items.refresh,
-        &items.detect,
-        &items.open_tui,
-        &sep,
-        &items.startup,
-        &items.quit,
-    ]);
-    menu
-}
-
-fn build_tray(menu: Menu) -> Result<TrayIcon, String> {
+fn build_tray() -> Result<TrayIcon, String> {
     let icon = static_icon().map_err(|error| error.to_string())?;
+    // NSStatusItem.setMenu intercepts clicks even when the tray-icon menu-on-
+    // click flags are false. Keep the status item menu-free so both mouse
+    // buttons reach handle_tray and open the WKWebView panel.
     TrayIconBuilder::new()
         .with_icon(icon)
         .with_icon_as_template(true)
-        .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
+        .with_menu_on_right_click(false)
         .build()
         .map_err(|error| error.to_string())
 }
 
-fn build_webview(
-    window: &Window,
-    proxy: EventLoopProxy<UserEvent>,
-    theme: Theme,
-) -> Result<WebView, String> {
+fn build_webview(window: &Window, proxy: EventLoopProxy<UserEvent>) -> Result<WebView, String> {
     // Stable WKWebsiteDataStore so Customize layout / stars survive restarts
     // (wry has no data_directory on macOS; this is the Darwin stand-in).
     const STORE: [u8; 16] = [
@@ -856,7 +1152,7 @@ fn build_webview(
             let _ = proxy.send_event(UserEvent::Ipc(body));
         })
         .with_transparent(true)
-        .with_background_color(theme.background())
+        .with_background_color((0, 0, 0, 0))
         .with_accept_first_mouse(true)
         .with_data_store_identifier(STORE)
         .build(window)
@@ -965,6 +1261,41 @@ fn round_corners(window: &Window) {
     let ns_view = window.ns_view() as *mut NSView;
     if !ns_view.is_null() {
         round_view(unsafe { &*ns_view });
+    }
+}
+
+/// Put AppKit's material behind WKWebView. On systems with Liquid Glass, use
+/// NSGlassEffectView; older macOS versions use the semantic popover material.
+fn install_glass_background(window: &Window) {
+    let ptr = window.ns_window() as *mut NSWindow;
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(ns_window) = (unsafe { ptr.as_ref() }) else {
+        return;
+    };
+    let Some(content) = ns_window.contentView() else {
+        return;
+    };
+    let sizing =
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable;
+
+    if AnyClass::get(c"NSGlassEffectView").is_some() {
+        let glass = NSGlassEffectView::new(mtm);
+        glass.setStyle(NSGlassEffectViewStyle::Regular);
+        glass.setFrame(content.bounds());
+        glass.setAutoresizingMask(sizing);
+        round_view(&glass);
+        content.addSubview_positioned_relativeTo(&glass, NSWindowOrderingMode::Below, None);
+    } else {
+        let material = NSVisualEffectView::new(mtm);
+        material.setMaterial(NSVisualEffectMaterial::Popover);
+        material.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        material.setState(NSVisualEffectState::Active);
+        material.setFrame(content.bounds());
+        material.setAutoresizingMask(sizing);
+        round_view(&material);
+        content.addSubview_positioned_relativeTo(&material, NSWindowOrderingMode::Below, None);
     }
 }
 

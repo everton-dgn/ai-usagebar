@@ -37,6 +37,13 @@ export function emptyPayload(hostError) {
     nextRefreshAt: 0,
     startupEnabled: false,
     hostError: hostError || "",
+    menuBarShowAll: true,
+    menuBarHideValue: false,
+    menuBarProvider: "highest",
+    menuBarWindow: "auto",
+    menuBarChart: false,
+    notificationsEnabled: true,
+    notificationsThreshold: 97,
     os: "",
     primary: "",
     entries: [],
@@ -47,6 +54,7 @@ export function emptyPayload(hostError) {
     update: null,
     updateCheckedAt: 0,
     repository: "",
+    accounts: {},
   };
 }
 
@@ -74,6 +82,13 @@ function normalizePayload(parsed) {
     nextRefreshAt: Number(parsed.next_refresh_at) || 0,
     startupEnabled: parsed.startup_enabled === true,
     hostError: clean(parsed.host_error, 1200),
+    menuBarShowAll: parsed.menu_bar_show_all !== false,
+    menuBarHideValue: parsed.menu_bar_hide_value === true,
+    menuBarProvider: clean(parsed.menu_bar_provider || "highest", 180),
+    menuBarWindow: ["session", "weekly", "monthly"].includes(parsed.menu_bar_window) ? parsed.menu_bar_window : "auto",
+    menuBarChart: parsed.menu_bar_chart === true,
+    notificationsEnabled: parsed.notifications_enabled !== false,
+    notificationsThreshold: Number.isInteger(parsed.notifications_threshold) && parsed.notifications_threshold >= 1 && parsed.notifications_threshold <= 100 ? parsed.notifications_threshold : 97,
     os: normalizeOs(parsed.os),
     primary: clean(parsed.primary, 180),
     entries,
@@ -84,6 +99,56 @@ function normalizePayload(parsed) {
     update: normalizeUpdate(parsed.update),
     updateCheckedAt: finiteNumber(parsed.update_checked_at),
     repository: githubPage(parsed.repository),
+    accounts: normalizeAccounts(parsed.accounts),
+  };
+}
+
+const SWITCHABLE_VENDORS = ["anthropic", "openai"];
+
+// Switchable logins per vendor. Only the macOS host sends any; anything absent
+// or malformed means no switch control at all rather than a guessed one.
+function normalizeAccounts(value) {
+  const out = {};
+  if (!isPlainObject(value)) return out;
+  for (const vendor of SWITCHABLE_VENDORS) {
+    const raw = value[vendor];
+    if (!isPlainObject(raw) || !Array.isArray(raw.labels)) continue;
+    // Labels are matched against card ids verbatim, so they are never
+    // shortened: a truncated label would silently match no card.
+    const labels = raw.labels.slice(0, 32).map((label) => clean(label, 4096)).filter(Boolean);
+    if (labels.length === 0) continue;
+    out[vendor] = {
+      active: clean(raw.active, 4096),
+      labels,
+      target: clean(raw.target, 4096),
+      switching: raw.switching === true,
+      error: clean(raw.error, 300),
+    };
+  }
+  return out;
+}
+
+/**
+ * The switch control for one card: a `vendor@label` entry whose label the host
+ * listed as switchable. Null for every other card, including the unnamed default.
+ * @returns {import("./lib/types").CardAccount | null}
+ */
+export function accountSwitchFor(cardId, accounts) {
+  const id = String(cardId || "");
+  const at = id.indexOf("@");
+  if (at <= 0) return null;
+  const vendor = id.slice(0, at);
+  const label = id.slice(at + 1);
+  const info = accounts && Object.prototype.hasOwnProperty.call(accounts, vendor) ? accounts[vendor] : null;
+  if (!info || !info.labels.includes(label)) return null;
+  const mine = info.target === label;
+  return {
+    vendor,
+    label,
+    active: info.active === label,
+    switching: info.switching && mine,
+    busy: info.switching && !mine,
+    error: mine && !info.switching && info.active !== label ? info.error : "",
   };
 }
 
@@ -229,8 +294,8 @@ function normalizeSection(raw) {
   return null;
 }
 
-export function formatDuration(milliseconds) {
-  if (!(milliseconds > 0)) return "now";
+export function formatDuration(milliseconds, locale) {
+  if (!(milliseconds > 0)) return locale === "pt-BR" ? "agora" : "now";
   const minutes = Math.floor(milliseconds / 60000);
   const hours = Math.floor(minutes / 60);
   const days = Math.floor(hours / 24);
@@ -358,12 +423,12 @@ export function formatResetExact(atMs, nowMs, opts) {
   // fold it to a plain space so the string is stable across runtimes.
   const time = new Intl.DateTimeFormat(locale, timeOptions).format(at).replace(/ /g, " ");
   const atDay = dayKey(atMs, locale, timeZone);
-  if (atDay === dayKey(nowMs, locale, timeZone)) return "today at " + time;
-  if (atDay === dayKey(nowMs + 86_400_000, locale, timeZone)) return "tomorrow at " + time;
+  if (atDay === dayKey(nowMs, locale, timeZone)) return (locale === "pt-BR" ? "hoje às " : "today at ") + time;
+  if (atDay === dayKey(nowMs + 86_400_000, locale, timeZone)) return (locale === "pt-BR" ? "amanhã às " : "tomorrow at ") + time;
   const dayOptions = { month: "short", day: "numeric" };
   if (timeZone) dayOptions.timeZone = timeZone;
   const day = new Intl.DateTimeFormat(locale, dayOptions).format(at).replace(/ /g, " ");
-  return day + " at " + time;
+  return day + (locale === "pt-BR" ? " às " : " at ") + time;
 }
 
 // Banked reset credits always show a calendar date, even when they expire
@@ -371,7 +436,7 @@ export function formatResetExact(atMs, nowMs, opts) {
 // item and the stable date makes neighboring expiries easy to compare.
 export function formatResetCreditDate(value, opts) {
   const atMs = typeof value === "number" ? value : Date.parse(String(value || ""));
-  if (!Number.isFinite(atMs)) return "Date unavailable";
+  if (!Number.isFinite(atMs)) return opts && opts.locale === "pt-BR" ? "Data indisponível" : "Date unavailable";
   // `undefined` asks Intl for the WebView/Windows locale. Tests can still
   // inject a locale explicitly to keep their expected strings deterministic.
   const locale = opts && opts.locale ? opts.locale : undefined;
@@ -388,7 +453,7 @@ export function formatResetCreditDate(value, opts) {
   else if (timeFormat === "24") timeOptions.hourCycle = "h23";
   const day = new Intl.DateTimeFormat(locale, dayOptions).format(at).replace(/ /g, " ");
   const time = new Intl.DateTimeFormat(locale, timeOptions).format(at).replace(/ /g, " ");
-  return day + " at " + time;
+  return day + (locale === "pt-BR" ? " às " : " at ") + time;
 }
 
 export function resetCreditDetails(row, nowMs, opts) {
@@ -407,7 +472,7 @@ export function resetCreditDetails(row, nowMs, opts) {
     const atMs = Date.parse(String(credit.expiresAt || ""));
     items.push({
       date: formatResetCreditDate(credit.expiresAt, opts),
-      remaining: Number.isNaN(atMs) ? "—" : atMs <= nowMs ? "expired" : formatDuration(atMs - nowMs),
+      remaining: Number.isNaN(atMs) ? "—" : atMs <= nowMs ? opts && opts.locale === "pt-BR" ? "expirado" : "expired" : formatDuration(atMs - nowMs, opts && opts.locale),
       title: String(credit.title || ""),
     });
   }
@@ -423,9 +488,12 @@ function parseResetAt(row) {
 // `reset` text when there is no parseable absolute timestamp.
 export function resetText(row, mode, nowMs, opts) {
   const at = parseResetAt(row);
-  if (Number.isNaN(at)) return (row && row.reset) || "";
-  if (mode === "exact") return "Resets " + formatResetExact(at, Number(nowMs) || 0, opts);
-  return "Resets in " + formatDuration(at - (Number(nowMs) || 0));
+  if (Number.isNaN(at)) {
+    const fallback = (row && row.reset) || "";
+    return opts && opts.locale === "pt-BR" ? fallback.replace(/^Resets in /, "Redefine em ") : fallback;
+  }
+  if (mode === "exact") return (opts && opts.locale === "pt-BR" ? "Redefine " : "Resets ") + formatResetExact(at, Number(nowMs) || 0, opts);
+  return (opts && opts.locale === "pt-BR" ? "Redefine em " : "Resets in ") + formatDuration(at - (Number(nowMs) || 0), opts && opts.locale);
 }
 
 // Same row in the other mode, for hover tooltips; "" without a timestamp.
@@ -474,6 +542,34 @@ export function pace(row, nowMs) {
   };
 }
 
+// The goal is the share of the window elapsed since its start. Unlike pace,
+// it remains useful at zero actual usage and during the first minute.
+// Monthly metrics without an exact duration use the preceding calendar month;
+// the UI labels those goals as estimates because billing dates may vary.
+export function usageGoal(row, nowMs) {
+  if (!row || typeof row !== "object") return null;
+  const resetMs = Date.parse(String(row.resetAt || ""));
+  const now = Number(nowMs);
+  if (!Number.isFinite(resetMs) || !Number.isFinite(now) || now > resetMs) return null;
+  const seconds = windowSeconds(row.window);
+  let startMs;
+  let estimated = false;
+  if (seconds > 0) {
+    startMs = resetMs - seconds * 1000;
+  } else if (/^monthly(?:\s|$|\()/i.test(String(row.label || ""))) {
+    const end = new Date(resetMs);
+    const year = end.getUTCFullYear();
+    const month = end.getUTCMonth();
+    const day = Math.min(end.getUTCDate(), new Date(Date.UTC(year, month, 0)).getUTCDate());
+    startMs = Date.UTC(year, month - 1, day, end.getUTCHours(), end.getUTCMinutes(), end.getUTCSeconds(), end.getUTCMilliseconds());
+    estimated = true;
+  } else {
+    return null;
+  }
+  if (!Number.isFinite(startMs) || startMs >= resetMs) return null;
+  return { percent: clampPercent((now - startMs) * 100 / (resetMs - startMs)), estimated };
+}
+
 function clampPercent(value) {
   const number = finiteNumber(value);
   return Math.max(0, Math.min(100, number));
@@ -495,11 +591,12 @@ export function paceTickPercent(pace, showAs) {
 export function paceText(pace, nowMs, opts) {
   if (!pace) return "";
   const now = Number(nowMs) || 0;
-  if (pace.state === "ahead") return "~" + Math.round(pace.sparePercent) + "% left at reset";
-  if (pace.state === "onTrack") return "~" + Math.max(Math.round(pace.sparePercent), 0) + "% spare";
+  const pt = opts && opts.locale === "pt-BR";
+  if (pace.state === "ahead") return "~" + Math.round(pace.sparePercent) + (pt ? "% restantes na redefinição" : "% left at reset");
+  if (pace.state === "onTrack") return "~" + Math.max(Math.round(pace.sparePercent), 0) + (pt ? "% de folga" : "% spare");
   if (pace.runsOutMs === null || pace.runsOutMs === undefined) return "";
-  if (opts && opts.resetTimes === "exact") return "Limit " + formatResetExact(pace.runsOutMs, now, opts);
-  return "Limit in " + formatDuration(pace.runsOutMs - now);
+  if (opts && opts.resetTimes === "exact") return (pt ? "Limite " : "Limit ") + formatResetExact(pace.runsOutMs, now, opts);
+  return (pt ? "Limite em " : "Limit in ") + formatDuration(pace.runsOutMs - now, opts && opts.locale);
 }
 
 // Ahead-of-pace rows stay quiet unless the layout asks for pacing everywhere.
@@ -667,11 +764,13 @@ export function prettyMetricLabel(entryId, raw, group) {
 export function emptyLayout() {
   return {
     alwaysShowPace: false,
+    usageGoal: false,
     cardOrder: [],
     hidden: {},
     collapsed: {},
     hideExtras: false,
     hintDismissed: false,
+    language: "en",
     resetTimes: "countdown",
     rows: {},
     seeded: false,
@@ -808,12 +907,14 @@ export function normalizeLayout(raw) {
   const layout = emptyLayout();
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return layout;
   layout.alwaysShowPace = raw.alwaysShowPace === true;
+  layout.usageGoal = raw.usageGoal === true;
   layout.cardOrder = cleanIdList(raw.cardOrder);
   copyFlagMap(raw.hidden, layout.hidden);
   copyFlagMap(raw.collapsed, layout.collapsed);
   layout.timeFormat = normalizeTimeFormat(raw.timeFormat);
   layout.hideExtras = raw.hideExtras === true;
   layout.hintDismissed = raw.hintDismissed === true;
+  layout.language = raw.language === "pt-BR" ? "pt-BR" : "en";
   layout.seeded = raw.seeded === true;
   layout.resetTimes = normalizeResetTimes(raw.resetTimes);
   layout.showAs = normalizeShowAs(raw.showAs);
@@ -894,11 +995,13 @@ export function syncLayout(layout, cardIds) {
   }
   return {
     alwaysShowPace: layout.alwaysShowPace === true,
+    usageGoal: layout.usageGoal === true,
     cardOrder: order,
     hidden,
     collapsed,
     hideExtras: layout.hideExtras === true,
     hintDismissed: layout.hintDismissed === true,
+    language: layout.language === "pt-BR" ? "pt-BR" : "en",
     resetTimes: normalizeResetTimes(layout.resetTimes),
     seeded: layout.seeded === true,
     rows,
@@ -1372,43 +1475,43 @@ export function friendlyError(text, entry) {
   return joinError(explainError(text, entry));
 }
 
-export function nextUpdateLabel(payload, nowMs) {
+export function nextUpdateLabel(payload, nowMs, locale) {
   const remaining = (Number(payload.nextRefreshAt) || 0) - (Number(nowMs) || 0);
-  if (!(remaining > 0)) return "Updating…";
-  return "Next update in " + formatDuration(remaining);
+  if (!(remaining > 0)) return locale === "pt-BR" ? "Atualizando…" : "Updating…";
+  return (locale === "pt-BR" ? "Próxima atualização em " : "Next update in ") + formatDuration(remaining, locale);
 }
 
 // "just now", "5m ago", "2h ago", "3d ago".
-export function formatAgo(milliseconds) {
+export function formatAgo(milliseconds, locale) {
   const ms = Number(milliseconds) || 0;
-  if (ms < 60_000) return "just now";
+  if (ms < 60_000) return locale === "pt-BR" ? "agora mesmo" : "just now";
   const minutes = Math.floor(ms / 60_000);
-  if (minutes < 60) return minutes + "m ago";
+  if (minutes < 60) return locale === "pt-BR" ? "há " + minutes + " min" : minutes + "m ago";
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return hours + "h ago";
-  return Math.floor(hours / 24) + "d ago";
+  if (hours < 24) return locale === "pt-BR" ? "há " + hours + " h" : hours + "h ago";
+  return locale === "pt-BR" ? "há " + Math.floor(hours / 24) + " d" : Math.floor(hours / 24) + "d ago";
 }
 
 // The Settings row under the update-mode picker.
-export function updateStatusLabel(payload, nowMs) {
+export function updateStatusLabel(payload, nowMs, locale) {
   const update = payload && payload.update;
   if (!update) {
     const checkedAt = finiteNumber(payload && payload.updateCheckedAt);
-    if (checkedAt === 0) return "Not checked yet";
-    return "Up to date · checked " + formatAgo((Number(nowMs) || 0) - checkedAt);
+    if (checkedAt === 0) return locale === "pt-BR" ? "Ainda não verificado" : "Not checked yet";
+    return locale === "pt-BR" ? "Atualizado · verificado " + formatAgo((Number(nowMs) || 0) - checkedAt, locale) : "Up to date · checked " + formatAgo((Number(nowMs) || 0) - checkedAt);
   }
   const version = update.version ? "v" + String(update.version).replace(/^v/i, "") : "";
   switch (update.state) {
     case "checking":
-      return "Checking…";
+      return locale === "pt-BR" ? "Verificando…" : "Checking…";
     case "downloading":
-      return "Downloading " + (version || "update") + "…";
+      return (locale === "pt-BR" ? "Baixando " : "Downloading ") + (version || (locale === "pt-BR" ? "atualização" : "update")) + "…";
     case "installing":
-      return "Installing…";
+      return locale === "pt-BR" ? "Instalando…" : "Installing…";
     case "failed":
-      return update.error ? "Couldn't update: " + update.error : "Couldn't update";
+      return update.error ? (locale === "pt-BR" ? "Não foi possível atualizar: " : "Couldn't update: ") + update.error : locale === "pt-BR" ? "Não foi possível atualizar" : "Couldn't update";
     default:
-      return (version || "An update") + " available";
+      return locale === "pt-BR" ? (version || "Uma atualização") + " disponível" : (version || "An update") + " available";
   }
 }
 

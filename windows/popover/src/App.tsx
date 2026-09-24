@@ -3,12 +3,14 @@ import { Footer, TopBar } from "@/components/Chrome";
 import type { RowAction } from "@/components/RowMenu";
 import type { RowLists } from "@/components/dnd";
 import type { Layout, Screen } from "@/lib/types";
+import { LanguageProvider, translate } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { About } from "@/screens/About";
 import { Customize } from "@/screens/Customize";
 import { Dashboard } from "@/screens/Dashboard";
+import { MacDashboard } from "@/screens/MacDashboard";
 import { ProviderDetail } from "@/screens/ProviderDetail";
-import { Settings } from "@/screens/Settings";
+import { Settings, type SettingsTab } from "@/screens/Settings";
 import {
   absorbPayload,
   applyCardLayout,
@@ -55,6 +57,7 @@ export default function App() {
   const [payload, setPayload] = useState(() => emptyPayload(""));
   const [layout, setLayout] = useState<Layout>(() => loadLayout(storageRef.current));
   const [screen, setScreen] = useState<Screen>("dashboard");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [direction, setDirection] = useState<Direction>("forward");
   const [providerId, setProviderId] = useState("");
   // Where the provider detail was opened from, so Back returns there: the
@@ -81,9 +84,18 @@ export default function App() {
   }
 
   function go(next: Screen) {
+    if (next === "customize" && payload.os === "macos") {
+      setSettingsTab("providers");
+      next = "settings";
+    }
     setDirection(SCREEN_DEPTH[next] < SCREEN_DEPTH[screen] ? "back" : "forward");
     setScreen(next);
     setResetArmed(false);
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+  }
+
+  function changeSettingsTab(next: SettingsTab) {
+    setSettingsTab(next);
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
   }
 
@@ -92,7 +104,7 @@ export default function App() {
       go(aboutFrom === "about" ? "dashboard" : aboutFrom);
       return;
     }
-    if (screen === "provider") go(providerFrom === "dashboard" ? "dashboard" : "customize");
+    if (screen === "provider") go(providerFrom);
     else go("dashboard");
   }
 
@@ -110,6 +122,10 @@ export default function App() {
     media.addEventListener("change", onChange);
     return () => media.removeEventListener("change", onChange);
   }, [layout.theme]);
+
+  useEffect(() => {
+    document.documentElement.lang = layout.language;
+  }, [layout.language]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
@@ -237,6 +253,7 @@ export default function App() {
       absorbPayload(
         {
           ...emptyLayout(),
+          language: layout.language,
           alwaysShowPace: layout.alwaysShowPace,
           resetTimes: layout.resetTimes,
           showAs: layout.showAs,
@@ -303,20 +320,27 @@ export default function App() {
 
   const title =
     screen === "customize"
-      ? "Customize"
+      ? translate(layout.language, "Customize")
       : screen === "settings"
-        ? "Settings"
+        ? translate(layout.language, "Settings")
         : screen === "about"
-          ? "About"
+          ? translate(layout.language, "About")
           : currentCard?.title || "Provider";
 
   return (
-    <div ref={shellRef} className="flex h-full flex-col overflow-hidden rounded-[13px] bg-background text-foreground">
+    <LanguageProvider language={layout.language}>
+    <div
+      ref={shellRef}
+      className={cn(
+        "flex h-full flex-col overflow-hidden rounded-[13px] bg-background text-foreground",
+        payload.os === "macos" && "mac-panel",
+      )}
+    >
       {screen !== "dashboard" ? (
         <TopBar
           resetArmed={resetArmed}
           title={title}
-          resetLabel={screen === "customize" ? "Reset All Customization" : screen === "provider" ? `Reset ${title}` : undefined}
+          resetLabel={screen === "customize" ? translate(layout.language, "Reset All Customization") : screen === "provider" ? `${translate(layout.language, "Reset")} ${title}` : undefined}
           onBack={goBack}
           onReset={screen === "customize" ? resetAll : screen === "provider" ? () => resetProviderRows(providerId) : undefined}
         />
@@ -332,7 +356,17 @@ export default function App() {
           )}
         >
           {screen === "dashboard" ? (
-            <Dashboard
+            payload.os === "macos" ? (
+              <MacDashboard
+                cards={visible}
+                layout={layout}
+                nowMs={nowMs}
+                payload={payload}
+                onOpenCustomize={() => go("customize")}
+                onOpenSettings={() => go("settings")}
+              />
+            ) : (
+              <Dashboard
               cards={cards}
               hint={hintPending(layout)}
               layout={layout}
@@ -346,6 +380,7 @@ export default function App() {
               onReorder={(ids) => commit({ ...layout, cardOrder: mergeVisibleOrder(layout.cardOrder, ids) })}
               onRowAction={onRowAction}
               onRowMenuOpenChange={setRowMenuOpen}
+              onSwitchAccount={(vendor, label) => sendCommand("switch-account", { vendor, label })}
               onToggleCollapse={(id) => {
                 const collapsed = { ...layout.collapsed };
                 if (collapsed[id]) delete collapsed[id];
@@ -353,7 +388,8 @@ export default function App() {
                 commit({ ...layout, collapsed });
               }}
               onToggleShowAs={toggleShowAs}
-            />
+              />
+            )
           ) : null}
           {screen === "customize" ? (
             <Customize
@@ -398,11 +434,26 @@ export default function App() {
           {screen === "about" ? <About nowMs={nowMs} payload={payload} /> : null}
           {screen === "settings" ? (
             <Settings
+              tab={settingsTab}
+              onTabChange={changeSettingsTab}
+              cards={cards}
               layout={layout}
               nowMs={nowMs}
               payload={payload}
               onAlwaysShowPace={(alwaysShowPace) => commit({ ...layout, alwaysShowPace })}
+              onUsageGoal={(usageGoal) => commit({ ...layout, usageGoal })}
+              onLanguage={(language) => commit({ ...layout, language })}
               onOpenCustomize={() => go("customize")}
+              onOpenProvider={(id) => openProvider(id, "settings")}
+              onReorderProviders={(ids) => commit({ ...layout, cardOrder: mergeVisibleOrder(layout.cardOrder, ids) })}
+              onToggleProvider={(id, on) => {
+                const hidden = { ...layout.hidden };
+                if (on) delete hidden[id];
+                else hidden[id] = true;
+                commit({ ...layout, hidden });
+              }}
+              onResetCustomization={resetAll}
+              resetArmed={resetArmed}
               onResetTimes={(resetTimes) => commit({ ...layout, resetTimes })}
               onShowAs={(showAs) => commit({ ...layout, showAs })}
               onTheme={(theme) => commit({ ...layout, theme })}
@@ -430,5 +481,6 @@ export default function App() {
         onOptionsOpenChange={setOptionsOpen}
       />
     </div>
+    </LanguageProvider>
   );
 }

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  accountSwitchFor,
   formatDuration,
   nextUpdateLabel,
   parseHostPayload,
@@ -52,6 +53,7 @@ import {
   paceText,
   paceTickPercent,
   paceVisible,
+  usageGoal,
   prettyMetricLabel,
   shortcutFromKeyEvent,
   defaultStars,
@@ -86,6 +88,10 @@ const report = {
   next_refresh_at: 61_000,
   startup_enabled: true,
   host_error: null,
+  menu_bar_show_all: false,
+  menu_bar_hide_value: true,
+  menu_bar_window: 'weekly',
+  menu_bar_chart: true,
   primary: 'anthropic',
   entries: [
     {
@@ -120,6 +126,17 @@ const report = {
 const payload = parseHostPayload(report);
 assert.equal(payload.version, '1.10.0');
 assert.equal(payload.startupEnabled, true);
+assert.equal(payload.menuBarShowAll, false);
+assert.equal(payload.menuBarHideValue, true);
+assert.equal(payload.menuBarWindow, 'weekly');
+assert.equal(payload.menuBarChart, true);
+assert.equal(payload.menuBarProvider, 'highest');
+assert.equal(payload.notificationsEnabled, true);
+assert.equal(payload.notificationsThreshold, 97);
+assert.equal(parseHostPayload({ notifications_enabled: false, notifications_threshold: 85 }).notificationsEnabled, false);
+assert.equal(parseHostPayload({ notifications_threshold: 85 }).notificationsThreshold, 85);
+assert.equal(parseHostPayload({ notifications_threshold: 101 }).notificationsThreshold, 97);
+assert.equal(parseHostPayload({ menu_bar_provider: 'openai@work' }).menuBarProvider, 'openai@work');
 assert.equal(payload.entries.length, 1);
 assert.equal(payload.entries[0].displayName, 'Claude');
 assert.equal(payload.entries[0].sections.length, 2); // spacer dropped
@@ -391,6 +408,17 @@ assert.deepEqual(synced.cardOrder, ['cursor', 'openai', 'anthropic']);
 assert.ok(store.getItem(LAYOUT_KEY).includes('cursor'));
 assert.deepEqual(emptyLayout().cardOrder, []);
 
+// Language must survive storage normalization and every host payload refresh.
+const languageStore = memoryStorage();
+saveLayout(languageStore, { ...emptyLayout(), language: 'pt-BR' });
+assert.equal(loadLayout(languageStore).language, 'pt-BR');
+assert.equal(syncLayout(loadLayout(languageStore), ['anthropic']).language, 'pt-BR');
+assert.equal(normalizeLayout({ language: 'invalid' }).language, 'en');
+assert.equal(nextUpdateLabel({ nextRefreshAt: 120_000 }, 60_000, 'pt-BR'), 'Próxima atualização em 1m');
+assert.equal(resetText({ resetAt: '2026-09-24T12:00:00Z' }, 'countdown', Date.parse('2026-09-24T11:00:00Z'), { locale: 'pt-BR' }), 'Redefine em 1h 0m');
+assert.match(formatResetExact(Date.parse('2026-09-24T12:00:00Z'), Date.parse('2026-09-24T11:00:00Z'), { locale: 'pt-BR', timeZone: 'UTC', timeFormat: '24' }), /^hoje às 12:00$/);
+assert.equal(updateStatusLabel({ update: null, updateCheckedAt: 0 }, 0, 'pt-BR'), 'Ainda não verificado');
+
 // --- resetTimes layout field ------------------------------------
 
 {
@@ -495,34 +523,57 @@ assert.equal(resetAlternate(badStampRow, 'exact', resetNow, utc), '');
   assert.equal(resetAlternate(sameDayRow, 'exact', resetNow, h24), 'Resets in 6h 38m');
 }
 
-// --- layout: timeFormat / alwaysShowPace ------------------------------------
+// --- layout: timeFormat / alwaysShowPace / usageGoal --------------------------
 
 {
   // ARRANGE / ACT
   const empty = emptyLayout();
-  const set = normalizeLayout({ timeFormat: '24', alwaysShowPace: true });
-  const junk = normalizeLayout({ timeFormat: 'military', alwaysShowPace: 'yes' });
+  const set = normalizeLayout({ timeFormat: '24', alwaysShowPace: true, usageGoal: true });
+  const junk = normalizeLayout({ timeFormat: 'military', alwaysShowPace: 'yes', usageGoal: 'yes' });
   // ASSERT: defaults, valid values, and junk
   assert.equal(empty.timeFormat, 'auto');
   assert.equal(empty.alwaysShowPace, false);
+  assert.equal(empty.usageGoal, false);
   assert.equal(set.timeFormat, '24');
   assert.equal(set.alwaysShowPace, true);
+  assert.equal(set.usageGoal, true);
   assert.equal(junk.timeFormat, 'auto');
   assert.equal(junk.alwaysShowPace, false);
+  assert.equal(junk.usageGoal, false);
   assert.equal(normalizeLayout({ timeFormat: '12' }).timeFormat, '12');
 
   // ASSERT: both survive storage and syncLayout
   const store = memoryStorage();
-  saveLayout(store, { cardOrder: ['cursor'], timeFormat: '12', alwaysShowPace: true });
+  saveLayout(store, { cardOrder: ['cursor'], timeFormat: '12', alwaysShowPace: true, usageGoal: true });
   const reloaded = loadLayout(store);
   assert.equal(reloaded.timeFormat, '12');
   assert.equal(reloaded.alwaysShowPace, true);
+  assert.equal(reloaded.usageGoal, true);
   const synced = syncLayout(reloaded, ['cursor']);
   assert.equal(synced.timeFormat, '12');
   assert.equal(synced.alwaysShowPace, true);
-  const cleaned = syncLayout({ cardOrder: [], timeFormat: 'nope', alwaysShowPace: 1 }, ['cursor']);
+  assert.equal(synced.usageGoal, true);
+  const cleaned = syncLayout({ cardOrder: [], timeFormat: 'nope', alwaysShowPace: 1, usageGoal: 1 }, ['cursor']);
   assert.equal(cleaned.timeFormat, 'auto');
   assert.equal(cleaned.alwaysShowPace, false);
+  assert.equal(cleaned.usageGoal, false);
+}
+
+// The goal follows wall-clock progress even when no usage has been reported.
+{
+  const end = Date.parse('2026-09-24T15:00:00Z');
+  for (const seconds of [18_000, 604_800, 2_592_000]) {
+    const row = { label: 'Session', resetAt: new Date(end).toISOString(), window: seconds, usedPercent: 0 };
+    assert.deepEqual(usageGoal(row, end - seconds * 1000), { percent: 0, estimated: false });
+    assert.deepEqual(usageGoal(row, end - seconds * 500), { percent: 50, estimated: false });
+    assert.deepEqual(usageGoal(row, end), { percent: 100, estimated: false });
+    assert.equal(usageGoal(row, end + 60_000), null);
+  }
+  const monthly = { label: 'Monthly', resetAt: '2026-03-31T12:00:00Z', window: 0 };
+  assert.deepEqual(usageGoal(monthly, Date.parse('2026-02-28T12:00:00Z')), { percent: 0, estimated: true });
+  assert.deepEqual(usageGoal(monthly, Date.parse('2026-03-31T12:00:00Z')), { percent: 100, estimated: true });
+  assert.equal(usageGoal({ ...monthly, label: 'Weekly' }, end), null);
+  assert.equal(usageGoal({ ...monthly, resetAt: 'bad' }, end), null);
 }
 
 // --- host payload: shortcut / updates / update / window_secs ------------------
@@ -1331,6 +1382,42 @@ assert.equal(resolvedTheme('system'), 'light');
   assert.equal(card.rows[0].key, 'metric:Codex weekly');
   assert.equal(card.rows[1].label, 'Session');
   assert.equal(card.rows[1].key, 'metric:Codex 5h');
+}
+
+// Account switch: only the macOS host reports switchable logins, keyed by
+// vendor; each named card finds its own label and nothing else does.
+{
+  const payload = parseHostPayload(JSON.stringify({
+    entries: [],
+    accounts: {
+      anthropic: { active: 'main', labels: ['main', 'work'], target: 'work', switching: false, error: 'no stored credential' },
+      openai: { active: '', labels: ['main', 'work'], target: 'work', switching: true, error: '' },
+      cursor: { active: 'x', labels: ['x'] },
+      grok: 'not an object',
+    },
+  }));
+  assert.deepEqual(Object.keys(payload.accounts).sort(), ['anthropic', 'openai']);
+
+  const active = accountSwitchFor('anthropic@main', payload.accounts);
+  assert.equal(active.active, true);
+  assert.equal(active.error, '');
+
+  const failed = accountSwitchFor('anthropic@work', payload.accounts);
+  assert.equal(failed.active, false);
+  assert.equal(failed.error, 'no stored credential');
+
+  const running = accountSwitchFor('openai@work', payload.accounts);
+  assert.equal(running.switching, true);
+  assert.equal(running.busy, false);
+  const waiting = accountSwitchFor('openai@main', payload.accounts);
+  assert.equal(waiting.busy, true);
+  assert.equal(waiting.switching, false);
+
+  assert.equal(accountSwitchFor('anthropic', payload.accounts), null);
+  assert.equal(accountSwitchFor('anthropic@unknown', payload.accounts), null);
+  assert.equal(accountSwitchFor('cursor@x', payload.accounts), null);
+  assert.equal(accountSwitchFor('openai@work', {}), null);
+  assert.deepEqual(parseHostPayload(JSON.stringify({ entries: [] })).accounts, {});
 }
 
 console.log('ok');

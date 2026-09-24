@@ -35,7 +35,7 @@ enabled = false           # opt in, then press c in ai-usagebar-tui
 
 # Quota-threshold desktop notifications. On by default at 97%: a window that
 # crosses the threshold raises one notification per crossing (Linux uses
-# notify-send; macOS and Windows delivery follow). A window re-arms only when
+# notify-send; macOS uses Notification Center; Windows delivery follows). A window re-arms only when
 # usage drops 7 points below the threshold or its reset moves later, and
 # banked reset credits (Codex, SuperGrok) notify 48h before they expire.
 # [notifications]
@@ -226,8 +226,9 @@ For more than one OpenRouter key, see the
 default at 97%: after a **fresh** fetch (never a cached or failed one), any
 window at or above the threshold raises one notification — normal urgency
 between the threshold and 99%, critical at 100% (exhausted). Linux delivers
-via `notify-send` (`-a ai-usagebar -c quota`); macOS and Windows delivery
-land in a later release.
+via `notify-send` (`-a ai-usagebar -c quota`); macOS delivers through
+Notification Center. The macOS popover also exposes the enable switch and
+threshold in Preferences. Windows delivery is planned for a later release.
 
 One crossing is one notification. A key re-arms only when usage drops 7
 percentage points below the threshold (97 → below 90) or when the window's
@@ -327,6 +328,13 @@ Create the second login with `CODEX_HOME=~/.codex-work codex login` and point
 `codex_auth_path` at the file it writes. Select it with `--account work`; each
 account caches separately under `~/.cache/ai-usagebar/openai/<label>`. The
 singular `codex_auth_path` remains the default account and needs no migration.
+
+`ai-usagebar account add <label> --codex` writes that entry and runs the login
+for you; `ai-usagebar account switch <label> --codex` makes a named login the
+one the Codex CLI, desktop app and IDE extension use. See "Switch Codex" in
+[claude-accounts.md](claude-accounts.md). Once every login is named, set
+`[openai] show_default_account = false` so the active account is not listed a
+second time as the unnamed default.
 
 ### Explicitly enable a provider
 

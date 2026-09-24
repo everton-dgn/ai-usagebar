@@ -6,6 +6,7 @@ import { ProviderIcon } from "@/components/ProviderIcon";
 import { SortableItem, VerticalDnd } from "@/components/dnd";
 import { Switch } from "@/components/ui/switch";
 import type { Card, Layout } from "@/lib/types";
+import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { metricCount, orderedCards, providerIconId } from "../model.js";
 
@@ -16,10 +17,12 @@ interface CustomizeProps {
   onOpenSettings: () => void;
   onReorder: (ids: string[]) => void;
   onToggle: (id: string, on: boolean) => void;
+  embedded?: boolean;
 }
 
 /** CustomizeProviderListView (L1): one grouped card of provider rows, then the Settings cross-link. */
-export function Customize({ cards, layout, onOpen, onOpenSettings, onReorder, onToggle }: CustomizeProps) {
+export function Customize({ cards, layout, onOpen, onOpenSettings, onReorder, onToggle, embedded = false }: CustomizeProps) {
+  const { t } = useI18n();
   const ordered = orderedCards(cards, layout);
   const ids = ordered.map((card) => card.id);
   return (
@@ -56,12 +59,12 @@ export function Customize({ cards, layout, onOpen, onOpenSettings, onReorder, on
           })}
         </div>
       </VerticalDnd>
-      <ScreenCrossLinkRow
+      {embedded ? null : <ScreenCrossLinkRow
         icon={<MdiCogOutline />}
-        subtitle="Startup, appearance and more"
-        title="Settings"
+        subtitle={t("Startup, appearance and more")}
+        title={t("Settings")}
         onClick={onOpenSettings}
-      />
+      />}
     </div>
   );
 }
@@ -76,6 +79,7 @@ interface ProviderListRowProps {
 
 /** ProviderListRow: grip, mark, name + "N metrics", switch, chevron. Disabled rows fade to 55%. */
 function ProviderListRow({ card, enabled, handle, onOpen, onToggle }: ProviderListRowProps) {
+  const { language, t } = useI18n();
   const count = metricCount(card);
   return (
     <div
@@ -88,12 +92,12 @@ function ProviderListRow({ card, enabled, handle, onOpen, onToggle }: ProviderLi
         <span className="flex min-w-0 flex-col">
           <span className="truncate text-[length:var(--sz-header)] font-semibold">{card.title}</span>
           <span className="text-[length:var(--sz-badge)] text-label-2">
-            {count} {count === 1 ? "metric" : "metrics"}
+            {count} {language === "pt-BR" ? (count === 1 ? "métrica" : "métricas") : (count === 1 ? "metric" : "metrics")}
           </span>
         </span>
       </button>
-      <Switch checked={enabled} aria-label={`Show ${card.title}`} onCheckedChange={(on) => onToggle?.(on === true)} />
-      <button type="button" aria-label={`Open ${card.title}`} className="plain-btn grid size-4 place-items-center" onClick={onOpen}>
+      <Switch checked={enabled} aria-label={`${t("Show")} ${card.title}`} onCheckedChange={(on) => onToggle?.(on === true)} />
+      <button type="button" aria-label={`${t("Open")} ${card.title}`} className="plain-btn grid size-4 place-items-center" onClick={onOpen}>
         <MdiChevronRight className="size-3.5 text-label-3" />
       </button>
     </div>

@@ -9,8 +9,33 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.23.0] — 2026-09-24
+
 ### Fixed
 
+- **macOS Claude Code Keychain prompts, the oversized case (#148).** Releases
+  1.16.0 through 1.21.1 still wrote a refreshed credential through the native
+  Security.framework API whenever the composed `security -i` line exceeded
+  the 4000-byte operational cap. That case is now the normal one: Claude Code
+  keeps `mcpOAuth` discovery state for every MCP plugin in the same item, so a
+  real blob (3640 bytes, 302 quotes, ~4020 bytes composed, measured
+  2026-09-23) took the native path at every token refresh, re-stamped the
+  item with ai-usagebar's `cdhash:` partition, and brought the dialog back
+  daily — "Always Allow" with the Keychain password does restore `apple-tool:`,
+  but only until the next refresh. Oversized blobs are now handed to
+  `security add-generic-password` as an argument instead, the same fallback
+  Claude Code uses (the JSON is visible to `ps` for the milliseconds `security`
+  runs); the native write is gone and `security-framework` is a dev-dependency
+  used only by the opt-in Keychain tests, which now also cover an oversized
+  blob through the production dispatch.
+- **The macOS tray opens its popover on left click again (#236).** On macOS
+  27 a left click on the status item opened the Refresh / Quit context menu
+  instead of the dashboard. tray-icon 0.24 keeps the menu attached to the
+  `NSStatusItem`, and on macOS 27 an attached menu keeps left clicks from
+  reaching tray-icon's click handler, so `with_menu_on_left_click(false)` had
+  no effect (tauri-apps/tray-icon#355). tray-icon 0.25.1 attaches the menu
+  only while it is being shown. The MSRV is now Rust 1.90, which tray-icon
+  0.25 and muda 0.20 require.
 - **The Omarchy panel keeps the provider you chose.** A refresh gap (fetch
   error, sleep/wake stale list) briefly dropped entries, and the panel's
   fallback re-resolved to the configured primary; when the chosen entry
@@ -20,6 +45,54 @@ Each release is also published at
   only exists because of the gap.
 
 ### Added
+
+- **Optional macOS usage goal.** Preferences can show an extra bar below each
+  usage metric with the percentage expected now for an even path to 100% at
+  the reset. The calculation uses the reported window length and reset time;
+  monthly windows without an exact start are clearly marked as estimates.
+
+- **Omarchy-style macOS menu-bar summary.** The tray shows every ready
+  provider's name and quota headline beside its chart glyph by default.
+  Middle-click or the right-click menu cycles providers; the menu can show one,
+  hide values, or pin the 5-hour, weekly, or monthly window. Selection and
+  display options persist in `[tray]`; Chart Icon Only restores the previous
+  glyph-only presentation.
+
+- **macOS usage panel and preferences.** An AppKit glass popover shows only
+  enabled providers, their usage and balance, reset times, and refresh controls.
+  Settings has General, Providers, Menu, Preferences, and Alerts tabs. The
+  provider list can be reordered and customized there; English and Brazilian
+  Portuguese are selectable in Preferences. Alerts deliver quota and expiring
+  credit notifications through macOS Notification Center, with an enable switch
+  and threshold in the panel. Exact reset times now follow the selected display
+  mode in the macOS panel.
+- **Switch the active Claude or Codex account from the macOS tray.** Each
+  named account's card gets a control beside Customize and Reset: a filled star
+  on the login in use, an outline star on the others that switches to it. A
+  Claude switch moves the `claude` CLI login (which the VS Code extension
+  shares) and, when the account has a Desktop profile, Claude Desktop; a Codex
+  switch moves `~/.codex/auth.json`, which the Codex CLI, desktop app and IDE
+  extension all read. The star spins while the switch runs and turns red with
+  the reason when it fails.
+- **`ai-usagebar account switch <label> --codex`.** The Codex counterpart of the
+  Claude CLI switch: the outgoing login is saved back to its own account
+  before the target's `auth.json` is moved into `~/.codex/auth.json`, so the
+  switch itself never leaves one refresh token in two files. It refuses
+  ambiguous layouts (shared or symlinked credential files, one ChatGPT account
+  under two labels, an active account with its own copy), locks every
+  directory it touches, and on failure restores what it can and names what it
+  could not. A per-file marker (account id only, no token) keeps a moved-away
+  account identifiable, and reads for the active account follow it into the
+  default file. ai-usagebar's Codex token refresh now takes the same lock.
+- **`ai-usagebar account add <label> --codex`** registers an
+  `[[openai.accounts]]` entry at `~/.codex-<label>/auth.json` and runs
+  `codex login` under that `CODEX_HOME`.
+- **`--adopt-current`** on `account add` registers the login already in use
+  (plain `claude`, or `~/.codex` with `--codex`) under a label without signing
+  in again, so the first switch away can save it.
+- **`[openai] show_default_account`**, like the Anthropic and OpenRouter
+  settings: `false` hides the unnamed Codex tab once every login is named.
+- `account status` lists the Codex accounts and which one `~/.codex` holds.
 
 - **Quota-threshold desktop notifications.** After a fresh fetch, any vendor
   window that crosses `[notifications] threshold` (default 97%) raises a
@@ -32,8 +105,8 @@ Each release is also published at
   flock discipline as the vendor caches. Delivery is best-effort by design —
   a missing or failing notifier, an unwritable state file, or lock contention
   is a silent skip that never touches the bar, the report, or an exit code.
-  macOS and Windows delivery follow in a later release; the sink seam is in
-  place. Config: `[notifications]` with `enabled` (default `true`) and
+  macOS delivers through Notification Center; Windows delivery follows in a
+  later release. Config: `[notifications]` with `enabled` (default `true`) and
   `threshold` (1..=100, default `97`), also editable in the TUI Settings
   overlay.
 
@@ -2728,7 +2801,8 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.22.0...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.23.0...HEAD
+[1.23.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.22.0...v1.23.0
 [1.22.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.21.1...v1.22.0
 [1.21.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.21.0...v1.21.1
 [1.21.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.20.2...v1.21.0

@@ -7,14 +7,17 @@ export interface RowPrefs {
 }
 
 export type TimeFormat = "12" | "24" | "auto";
+export type Language = "en" | "pt-BR";
 
 export interface Layout {
   alwaysShowPace: boolean;
+  usageGoal: boolean;
   cardOrder: string[];
   collapsed: Record<string, boolean>;
   hidden: Record<string, boolean>;
   hideExtras: boolean;
   hintDismissed: boolean;
+  language: Language;
   resetTimes: string;
   rows: Record<string, RowPrefs>;
   seeded: boolean;
@@ -181,10 +184,44 @@ export interface UpdateInfo {
   version: string;
 }
 
+/** One vendor's switchable logins, as the macOS host reports them. */
+export interface AccountSwitchInfo {
+  /** Label of the login in use, or "" when it is not a managed account. */
+  active: string;
+  labels: string[];
+  /** Label of the last switch requested, running or finished. */
+  target: string;
+  switching: boolean;
+  /** Why that switch failed, or "". */
+  error: string;
+}
+
+/** The switch control on one account's card. */
+export interface CardAccount {
+  vendor: string;
+  label: string;
+  active: boolean;
+  /** A switch to this account is running. */
+  switching: boolean;
+  /** Another switch for this vendor is running, so this one must wait. */
+  busy: boolean;
+  /** Why the last switch to this account failed, or "". */
+  error: string;
+}
+
 export interface Payload {
+  /** Switchable logins keyed by vendor slug ("anthropic", "openai"); empty off macOS. */
+  accounts: Record<string, AccountSwitchInfo>;
   entries: Entry[];
   generatedAt: number;
   hostError: string;
+  menuBarShowAll: boolean;
+  menuBarHideValue: boolean;
+  menuBarProvider: string;
+  menuBarWindow: "auto" | "session" | "weekly" | "monthly";
+  menuBarChart: boolean;
+  notificationsEnabled: boolean;
+  notificationsThreshold: number;
   /** Host OS: macos, windows, or linux. */
   os: string;
   nextRefreshAt: number;

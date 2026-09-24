@@ -1,12 +1,23 @@
 # AI Usage Bar — macOS menu bar app
 
 The product UI is **`ai-usagebar-tray`**: an NSStatusItem plus a WKWebView
-popover that shares its dashboard with the [Windows tray](../windows/README.md)
-(OpenUsage layout: provider cards, capsule meters, Customize, Settings). The
-menu-bar glyph is a compact **usage chart** of starred metrics (at most two
-per provider).
+popover with a macOS provider switcher on an AppKit glass background. Its
+tabs show only enabled providers and the current usage or balance; selecting
+one shows its metrics, reset times, and other account details. The header has
+Refresh and Settings buttons. The menu-bar item shows every ready provider's
+name and usage headline beside the
+compact usage-chart glyph by default (for example, `Claude 21%   Codex 15%`).
+Providers with a fetch error stay available in the dashboard and when cycling,
+but do not crowd the default summary. Middle-click focuses the next provider
+and switches to the single-provider summary; left-click or right-click opens
+the dashboard. **Settings → Menu Bar** offers Show All Providers,
+Hide Usage Value, Chart Icon Only, and a choice of 5-hour, weekly, or monthly
+quota window. A provider without the chosen window falls back to its highest metric. The
+selection and display options survive restarts in `config.toml`.
 
-![macOS tray popover dashboard — provider cards for Claude, Codex, Cursor, SuperGrok and Antigravity with capsule meters, pace notes such as "~8% spare" and "Limit in 19d 16h", "used / Resets in" lines under each bar, Cursor's On-Demand row with its Status and Dashboard links, SuperGrok's Grok Build slice, and the footer with the AI Usage version, a "Next update in" countdown and the Options menu](../screenshots/macos-tray-dashboard.png)
+**Chart Icon Only** restores the old compact glyph
+without the text summary. Its bars use starred metrics (at most two per
+provider).
 
 ```bash
 cargo build --release --bin ai-usagebar-tray
@@ -14,27 +25,33 @@ cargo build --release --bin ai-usagebar-tray
 ```
 
 Needs Node.js 20+ on PATH for the first build (`windows/popover/` Vite bundle).
-Left-click the status item to toggle the popover; right-click for Refresh /
-Detect / Open TUI / Start at Login / Quit. No Dock icon.
+Click either mouse button on the status item to toggle the popover. Display
+options are in Settings; the footer's Options menu has Detect Providers,
+Open TUI, Start at Login, and Quit. No Dock icon.
 
-![macOS menu bar — the ai-usagebar usage-chart glyph (two stacked bars) at the left of the status items, next to the Cursor, Claude, Antigravity, Codex and Claude Code icons](../screenshots/macos-tray-icon.png)
+![Previous chart-only mode in the macOS menu bar, next to the Cursor, Claude, Antigravity, Codex and Claude Code icons](../screenshots/macos-tray-icon.png)
 
-Star up to two metrics per provider from a row's right-click menu or from
-Customize; those fills are what the status item paints.
+Star up to two metrics per provider from **Settings → Providers**, then open
+that provider's details. Those fills are what the status item paints.
 
-![Right-click menu on the Cursor "Other Models" row — Hide row, Star for menu bar, Show on demand, Refresh Cursor and Customize Cursor](../screenshots/macos-tray-row-menu.png)
+With named Claude or Codex accounts, each account's card also shows which login
+is active (a filled star) and an outline star to switch to the others; see "Switch from
+the macOS menu bar" in [docs/claude-accounts.md](../docs/claude-accounts.md).
 
 ![Customize Claude — Always Visible rows Weekly (starred) and Fable, On Demand row Session, each with a star and an on/off switch, Back and Reset in the top bar](../screenshots/macos-tray-provider-stars.png)
 
-The footer's Options menu reaches Customize and Settings, the same actions as
-the status item's right-click menu, and Start at Login (a LaunchAgent under
-`~/Library/LaunchAgents`).
-
-![Options menu opened from the footer — Customize, Settings, Refresh, Detect Providers, Open TUI, Start at Login (checked), Quit](../screenshots/macos-tray-options.png)
-
-![Customize screen — provider list (Claude, Codex, Cursor, SuperGrok, Antigravity on; GitHub Copilot, Z.AI, OpenRouter, Ollama Cloud off) with metric counts, drag grips and on/off switches, and a Settings cross-link at the bottom](../screenshots/macos-tray-customize.png)
-
-![Settings screen — General (Launch at Login, Refresh Every, Global Shortcut), Appearance (Theme, Time Format), Usage Display (Show Usage As, Reset Times, Always Show Pacing) and a Customize cross-link](../screenshots/macos-tray-settings.png)
+The footer's Options menu opens Settings. Settings uses five tabs: **General**
+(startup, refresh, shortcut), **Providers** (visibility, order, metric details),
+**Menu** (the menu-bar summary), **Preferences** (language, appearance, usage
+display), and **Alerts** (system notifications and the quota threshold). Start
+at Login writes a LaunchAgent under `~/Library/LaunchAgents`. Alerts are sent
+through macOS Notification Center after a fresh reading crosses the threshold.
+In **Preferences → Usage Display**, enable **Usage goal** to show a second,
+subtle bar below each metric. It marks how much of the quota would be used now
+at an even pace from the start of its reset window to 100% at the end. Five-hour,
+weekly, and other windows use the provider's reported duration. Monthly windows
+without an exact duration use the previous calendar month and are labeled as
+estimates. Metrics without a reset time or usable window do not show a goal.
 
 A legacy Swift `NSMenu` (`ai-usagebar-menubar.swift`) remains in this folder
 for the old dropdown. Prefer the tray.
@@ -76,7 +93,7 @@ time, so one of those must be running for quota to load.
 
 ## Requirements
 
-- Rust (`rustc` 1.88+) and **Node.js 20+** (the tray embeds the Vite popover).
+- Rust (`rustc` 1.90+) and **Node.js 20+** (the tray embeds the Vite popover).
 - Run `claude` once on the Mac so its OAuth creds are in the login **Keychain**;
   ai-usagebar reads them there automatically (no env vars).
 
@@ -87,8 +104,7 @@ cargo build --release --bin ai-usagebar-tray
 ./target/release/ai-usagebar-tray
 ```
 
-Start at login from the popover **Settings → Launch at Login**, or the status
-item's right-click menu. That writes
+Start at login from the popover **Settings → Launch at Login**. That writes
 `~/Library/LaunchAgents/com.akitaonrails.ai-usagebar-tray.plist`.
 
 The legacy Swift dropdown:

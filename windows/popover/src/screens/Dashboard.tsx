@@ -5,7 +5,8 @@ import type { RowAction } from "@/components/RowMenu";
 import { UpdateBanner } from "@/components/UpdateBanner";
 import { SortableItem, VerticalDnd } from "@/components/dnd";
 import type { Card, Layout, Payload } from "@/lib/types";
-import { explainError, updateBannerPending } from "../model.js";
+import { useI18n } from "@/lib/i18n";
+import { accountSwitchFor, explainError, updateBannerPending } from "../model.js";
 
 interface DashboardProps {
   cards: Card[];
@@ -21,6 +22,7 @@ interface DashboardProps {
   onResetProvider: (id: string) => void;
   onRowAction: (providerId: string, rowKey: string, action: RowAction) => void;
   onRowMenuOpenChange: (open: boolean) => void;
+  onSwitchAccount: (vendor: string, label: string) => void;
   onToggleCollapse: (id: string) => void;
   onToggleShowAs: () => void;
 }
@@ -40,9 +42,11 @@ export function Dashboard({
   onResetProvider,
   onRowAction,
   onRowMenuOpenChange,
+  onSwitchAccount,
   onToggleCollapse,
   onToggleShowAs,
 }: DashboardProps) {
+  const { t } = useI18n();
   if (payload.hostError) {
     return (
       <div className="card-surface py-[var(--card-gutter)]" title={payload.hostError}>
@@ -53,10 +57,10 @@ export function Dashboard({
   const welcome = hint ? (
     <div className="mb-[var(--section-gap)]">
       <HintCard
-        buttonTitle="Open Customize"
+        buttonTitle={t("Open Customize")}
         icon={<MdiTune />}
-        message="We turned on the providers that have credentials on this PC. Add or hide providers any time."
-        title="Welcome to AI Usage"
+        message={t("We turned on the providers that have credentials on this PC. Add or hide providers any time.")}
+        title={t("Welcome to AI Usage")}
         onAction={onOpenCustomize}
         onDismiss={onDismissHint}
       />
@@ -75,8 +79,8 @@ export function Dashboard({
         {banner}
         <p className="m-0 px-4 py-6 text-center text-[11px] text-label-2">
           {cards.length
-            ? "Turn on Customize to choose what to show."
-            : "No providers enabled. Open the TUI and turn one on in Settings."}
+            ? t("Turn on Customize to choose what to show.")
+            : t("No providers enabled. Open the TUI and turn one on in Settings.")}
         </p>
       </>
     );
@@ -100,6 +104,7 @@ export function Dashboard({
           <SortableItem key={card.id} id={card.id}>
             {({ attributes, listeners }) => (
               <ProviderSection
+                account={accountSwitchFor(card.id, payload.accounts)}
                 card={card}
                 handle={{ attributes, listeners }}
                 layout={layout}
@@ -108,6 +113,10 @@ export function Dashboard({
                 onReset={() => onResetProvider(card.id)}
                 onRowAction={(key, action) => onRowAction(card.id, key, action)}
                 onRowMenuOpenChange={onRowMenuOpenChange}
+                onSwitchAccount={() => {
+                  const account = accountSwitchFor(card.id, payload.accounts);
+                  if (account) onSwitchAccount(account.vendor, account.label);
+                }}
                 onToggleCollapse={() => onToggleCollapse(card.id)}
                 onToggleShowAs={onToggleShowAs}
               />

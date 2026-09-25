@@ -10,17 +10,22 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use block2::RcBlock;
 use fs2::FileExt;
-use objc2::Message;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
+use objc2::{AnyThread, Message};
+use objc2_app_kit::NSAttributedStringAttachmentConveniences;
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSColor, NSEvent,
-    NSEventMask, NSGlassEffectView, NSGlassEffectViewStyle, NSImage, NSImageScaling, NSScreen,
-    NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
-    NSVisualEffectView, NSWindow, NSWindowOrderingMode,
+    NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSColor,
+    NSCompositingOperation, NSEvent, NSEventMask, NSFont, NSFontAttributeName, NSGlassEffectView,
+    NSGlassEffectViewStyle, NSImage, NSImageScaling, NSRectFillUsingOperation, NSScreen,
+    NSTextAttachment, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+    NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowOrderingMode,
 };
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+use objc2_foundation::{
+    MainThreadMarker, NSAttributedString, NSData, NSDictionary, NSMutableAttributedString, NSPoint,
+    NSRect, NSSize, NSString,
+};
 use objc2_quartz_core::kCACornerCurveContinuous;
 use serde_json::{Value, json};
 use tao::dpi::LogicalSize;
@@ -48,7 +53,7 @@ use super::payload::{
 };
 use super::strip::{
     BARS_PIXEL_SIDE, BARS_POINT_SIDE, Stars, StripStyle, bar_fill, bars_layout, bars_rgba,
-    content_from_payload, parse_strip_ipc,
+    content_from_payload, parse_strip_ipc, parse_strip_names,
 };
 use super::update_flow;
 use super::{startup, tui_launch};
@@ -142,6 +147,8 @@ struct TrayState {
     stars: Stars,
     strip_order: Vec<String>,
     strip_order_known: bool,
+    /// The popover's custom card titles, for the menu bar and its tooltip.
+    strip_names: std::collections::BTreeMap<String, String>,
     menu_bar_provider: String,
     menu_bar_show_all: bool,
     menu_bar_hide_value: bool,
@@ -243,6 +250,7 @@ fn run_loop() -> Result<(), String> {
         stars: Stars::new(),
         strip_order: Vec::new(),
         strip_order_known: false,
+        strip_names: Default::default(),
         menu_bar_provider: config
             .tray
             .menu_bar_provider
@@ -605,6 +613,7 @@ fn apply_strip_icon(state: &mut TrayState) {
         state.menu_bar_show_all,
         state.menu_bar_window,
         visible,
+        &state.strip_names,
     );
     let _ = state.tray.set_tooltip(Some(tooltip.as_str()));
     match state.strip_style {
@@ -622,15 +631,18 @@ fn apply_strip_icon(state: &mut TrayState) {
                 // NSStatusBarButton. An empty title actually clears it.
                 state.tray.set_title(Some(""));
             } else {
-                let title = menu_bar::title(
+                let chips = menu_bar::chips(
                     &state.payload,
                     &state.menu_bar_provider,
                     state.menu_bar_show_all,
                     !state.menu_bar_hide_value,
                     state.menu_bar_window,
                     visible,
+                    &state.strip_names,
                 );
-                state.tray.set_title(Some(title.as_str()));
+                // A plain title clears the attributed one, so it goes first.
+                state.tray.set_title(Some(menu_bar::text(&chips).as_str()));
+                set_status_button_chips(&chips);
             }
             if let Some(image) = template_bars_image(&fractions) {
                 set_status_button_image(&image);
@@ -1005,6 +1017,7 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
             state.stars = stars;
             state.strip_order = order;
             state.strip_order_known = true;
+            state.strip_names = parse_strip_names(&value);
             apply_strip_icon(state);
         }
         "open-url" => {
@@ -1628,6 +1641,86 @@ fn fill_round_rect(x: f64, y: f64, w: f64, h: f64, radius: f64, alpha: f64) {
     };
     NSColor::colorWithWhite_alpha(0.0, alpha).setFill();
     NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius).fill();
+}
+
+/// Side of a provider mark in the menu bar, in points.
+const MARK_SIDE: f64 = 15.0;
+
+/// Draws the chips as marks and values. A chip whose mark AppKit cannot load
+/// (SVG needs macOS 14) keeps its name, so older systems read as before.
+fn set_status_button_chips(chips: &[menu_bar::Chip]) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    if chips.iter().all(|chip| chip.mark.is_none()) {
+        return;
+    }
+    let Some(button) = find_status_bar_button(mtm) else {
+        return;
+    };
+    let font = NSFont::menuBarFontOfSize(0.0);
+    let font_object: &AnyObject = font.as_ref();
+    // SAFETY: NSFontAttributeName is an immutable AppKit constant.
+    let font_key = unsafe { NSFontAttributeName };
+    let attributes = NSDictionary::from_slices(&[font_key], &[font_object]);
+    let run = |text: &str| {
+        // SAFETY: the attributes map NSFontAttributeName to an NSFont.
+        unsafe {
+            NSAttributedString::initWithString_attributes(
+                NSAttributedString::alloc(),
+                &NSString::from_str(text),
+                Some(&attributes),
+            )
+        }
+    };
+    let title = NSMutableAttributedString::new();
+    for (index, chip) in chips.iter().enumerate() {
+        if index > 0 {
+            title.appendAttributedString(&run("   "));
+        }
+        let Some(image) = chip.mark.and_then(mark_image) else {
+            title.appendAttributedString(&run(&chip.text()));
+            continue;
+        };
+        let attachment = NSTextAttachment::new();
+        attachment.setImage(Some(&image));
+        // Centred on the menu bar font's x-height rather than sitting on its baseline.
+        let offset = (font.capHeight() - MARK_SIDE) / 2.0;
+        attachment.setBounds(NSRect::new(
+            NSPoint::new(0.0, offset),
+            NSSize::new(MARK_SIDE, MARK_SIDE),
+        ));
+        title.appendAttributedString(&NSAttributedString::attributedStringWithAttachment(
+            &attachment,
+        ));
+        if let Some(value) = &chip.value {
+            title.appendAttributedString(&run(&format!(" {value}")));
+        }
+    }
+    button.setAttributedTitle(&title);
+}
+
+/// A provider mark in the menu bar's text color, or `None` where AppKit
+/// cannot read SVG. An image inside an attributed title is never tinted as a
+/// template, so the mark is filled with `labelColor` each time it is drawn and
+/// follows the menu bar between light and dark.
+fn mark_image(svg: &str) -> Option<Retained<NSImage>> {
+    // Only the shape's alpha is kept; a concrete fill keeps AppKit from
+    // guessing what `currentColor` means outside a document.
+    let svg = svg.replace("currentColor", "#000");
+    let data = NSData::with_bytes(svg.as_bytes());
+    let shape = NSImage::initWithData(NSImage::alloc(), &data)?;
+    let size = NSSize::new(MARK_SIDE, MARK_SIDE);
+    shape.setSize(size);
+    let handler = RcBlock::new(move |rect: NSRect| -> Bool {
+        shape.drawInRect(rect);
+        NSColor::labelColor().set();
+        NSRectFillUsingOperation(rect, NSCompositingOperation::SourceAtop);
+        Bool::YES
+    });
+    Some(NSImage::imageWithSize_flipped_drawingHandler(
+        size, false, &handler,
+    ))
 }
 
 fn set_status_button_image(image: &NSImage) {

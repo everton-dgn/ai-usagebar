@@ -183,6 +183,23 @@ pub fn parse_strip_ipc(value: &Value) -> (StripStyle, Stars, Vec<String>) {
     (style, stars, order)
 }
 
+/// Custom card titles from the popover's `strip` IPC, keyed by entry id. The
+/// popover already cleans them; empty ids and names are dropped here too.
+pub fn parse_strip_names(value: &Value) -> BTreeMap<String, String> {
+    let mut names = BTreeMap::new();
+    if let Some(map) = value.get("names").and_then(Value::as_object) {
+        for (id, name) in map {
+            let (id, Some(name)) = (id.trim(), name.as_str().map(str::trim)) else {
+                continue;
+            };
+            if !id.is_empty() && !name.is_empty() {
+                names.insert(id.to_string(), name.to_string());
+            }
+        }
+    }
+    names
+}
+
 /// Resolve starred metrics from a host payload. `order` is the popover's
 /// visible card order; empty means payload order. Missing stars fall back to
 /// the first two bounded metrics of each ready entry so the glyph has
@@ -634,6 +651,15 @@ mod tests {
         assert_eq!(stars["openai"], vec!["metric:Codex weekly".to_string()]);
         assert!(!stars.contains_key(""));
         assert!(order.is_empty());
+    }
+
+    #[test]
+    fn parse_strip_names_keeps_named_entries_only() {
+        let value = json!({"names": {"openai": " Work ", "": "x", "zai": "", "kimi": 3}});
+        let names = parse_strip_names(&value);
+        assert_eq!(names.len(), 1);
+        assert_eq!(names["openai"], "Work");
+        assert!(parse_strip_names(&json!({})).is_empty());
     }
 
     #[test]

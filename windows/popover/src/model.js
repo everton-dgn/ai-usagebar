@@ -962,7 +962,13 @@ export function stripCommand(layout, cards) {
   } else {
     for (const id of Object.keys(source)) stars[id] = source[id];
   }
-  return { style: "bars", stars, order };
+  // Custom card titles live only here; the host needs them for the menu bar.
+  const custom = cleanNameMap(layout && layout.names);
+  const names = {};
+  for (const id of order) {
+    if (custom[id]) names[id] = custom[id];
+  }
+  return { style: "bars", stars, order, names };
 }
 
 function cleanIdList(list) {

@@ -34,10 +34,22 @@ Each release is also published at
   (such as "Codex trabalho" for `Codex · conta2`) from its Customize screen,
   with a button to restore the original. **Settings → Preferences → Show plan**
   hides the gray plan name beside each provider. Both live in the popover's
-  own settings; the TUI and the menu bar keep the report's names.
+  own settings; the TUI keeps the report's names, and the macOS menu bar's
+  tooltip follows the custom ones.
+
+### Changed
+
+- **The macOS menu bar shows each provider's icon instead of its name.** Every
+  provider with a bundled mark reads as icon and value (`[icon] 46%`), drawn in
+  the menu bar's text color; with values hidden only the icon is left. The name
+  stays in the tooltip, and a provider without a mark keeps its name. macOS 12
+  and 13 cannot load the marks and keep the names.
 
 ### Fixed
 
+- **A custom provider title reaches the macOS menu bar.** A name set in the
+  popover lived only in the popover, so the menu bar and its tooltip kept the
+  report's name. The popover now sends the custom titles to the tray.
 - **The macOS popover opens and closes on every click.** With the popover
   open, pressing the menu bar icon took focus away first, the blur closed the
   popover, and the click then opened it again, so it sometimes seemed not to

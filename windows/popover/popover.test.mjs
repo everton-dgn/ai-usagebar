@@ -1292,6 +1292,7 @@ assert.equal(resolvedTheme('system'), 'light');
     style: 'bars',
     stars,
     order: ['anthropic'],
+    names: {},
   });
 }
 
@@ -1312,6 +1313,9 @@ assert.equal(resolvedTheme('system'), 'light');
     },
   };
   assert.deepEqual(stripCommand(layout, cards).order, ['openai', 'anthropic']);
+  // Only visible cards' custom titles go to the host, cleaned like the layout's.
+  const named = { ...layout, names: { openai: 'Work\u202e Codex', gone: 'Hidden' } };
+  assert.deepEqual(stripCommand(named, cards).names, { openai: 'Work Codex' });
 }
 
 {

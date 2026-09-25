@@ -267,8 +267,10 @@ fn run_loop() -> Result<(), String> {
             Event::UserEvent(UserEvent::Facts) => apply_facts(&mut state),
             Event::UserEvent(UserEvent::Hotkey) => toggle_popover_from_keyboard(&mut state),
             Event::UserEvent(UserEvent::ResizeSettle) => settle_user_resize(&mut state),
+            // No blur guard here: the global monitor never sees our own
+            // presses, so this cannot be the click that opened the popover.
             Event::UserEvent(UserEvent::OutsideClick) => {
-                if state.popover_open && !state.pinned && !blur_guarded(&state) {
+                if state.popover_open && !state.pinned {
                     hide_popover(&mut state);
                 }
             }
@@ -1189,6 +1191,8 @@ fn toggle_startup(state: &mut TrayState) {
     }
 }
 
+/// Shows the popover under the status item and guards it against the blur
+/// that opening and focusing it can cause.
 fn show_popover(state: &mut TrayState) {
     if state.last_anchor.is_none() {
         state.last_anchor = Some(cocoa_mouse());
@@ -1246,6 +1250,8 @@ fn status_item_frame(tray: &TrayIcon) -> Option<CocoaRect> {
     Some(ns_rect_to_cocoa(window.frame()))
 }
 
+/// Whether the popover was opened or focused too recently for a lost focus
+/// to mean the user left it.
 fn blur_guarded(state: &TrayState) -> bool {
     state
         .blur_guard_until
@@ -1254,6 +1260,7 @@ fn blur_guarded(state: &TrayState) -> bool {
 
 const BLUR_GUARD: Duration = Duration::from_millis(400);
 
+/// Ignores focus loss for the next `BLUR_GUARD`.
 fn guard_blur(state: &mut TrayState) {
     state.blur_guard_until = Some(Instant::now() + BLUR_GUARD);
 }

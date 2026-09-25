@@ -1113,7 +1113,7 @@ fn in_live_resize(window: &Window) -> bool {
 
 /// Back to the default width and a fully automatic height.
 fn reset_panel_size(state: &mut TrayState) {
-    state.panel_size = PanelSize::default();
+    state.panel_size = PanelSize::reset();
     state.panel_size_dirty = true;
     save_panel_size(state);
     let visible_h = anchor_visible_height(state.last_anchor);

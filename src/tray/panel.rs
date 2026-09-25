@@ -84,6 +84,15 @@ impl Default for PanelSize {
 }
 
 impl PanelSize {
+    /// What Reset Panel Size returns to: the narrowest width and the
+    /// automatic height.
+    pub fn reset() -> Self {
+        Self {
+            width: MIN_POPOVER_WIDTH,
+            max_height: None,
+        }
+    }
+
     /// A size from a drag, rounded and held to the minimums.
     pub fn dragged(width: f64, height: f64) -> Self {
         Self {
@@ -223,6 +232,13 @@ mod tests {
         let tiny = PanelSize::dragged(10.0, 10.0);
         assert_eq!(tiny.width, MIN_POPOVER_WIDTH);
         assert_eq!(tiny.max_height, Some(MIN_USER_HEIGHT));
+    }
+
+    #[test]
+    fn a_reset_goes_to_the_minimum_width_and_the_automatic_height() {
+        let reset = PanelSize::reset();
+        assert_eq!(reset.width, MIN_POPOVER_WIDTH);
+        assert_eq!(reset.max_height, None);
     }
 
     #[test]

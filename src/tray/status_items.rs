@@ -11,12 +11,13 @@ use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel
 use objc2_app_kit::{
     NSApplication, NSAttributedStringAttachmentConveniences, NSColor, NSCompositingOperation,
     NSControlStateValueOn, NSEventMask, NSEventModifierFlags, NSEventType, NSFont,
-    NSFontAttributeName, NSImage, NSMenu, NSMenuItem, NSRectFillUsingOperation, NSStatusBar,
-    NSStatusItem, NSTextAttachment, NSVariableStatusItemLength,
+    NSFontAttributeName, NSImage, NSKernAttributeName, NSMenu, NSMenuItem,
+    NSRectFillUsingOperation, NSStatusBar, NSStatusItem, NSTextAttachment,
+    NSVariableStatusItemLength,
 };
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSData, NSDictionary, NSMutableAttributedString,
-    NSObject, NSPoint, NSRect, NSSize, NSString,
+    NSNumber, NSObject, NSPoint, NSRect, NSSize, NSString,
 };
 
 use super::menu_bar::Chip;
@@ -24,9 +25,9 @@ use super::menu_bar::Chip;
 /// Side of a provider mark in the menu bar, in points.
 const MARK_SIDE: f64 = 15.0;
 
-/// Padding each provider item adds on both sides of its mark and value, so
-/// neighbouring providers read as separate.
 const ITEM_PADDING: &str = "  ";
+const PADDING_KERN: f64 = -2.0;
+const CHART_GAP_KERN: f64 = 10.0;
 
 /// What a provider item or its menu reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,9 +150,12 @@ impl ProviderItems {
             created.reverse();
             self.items = created;
         }
-        for (((_, item), chip), tip) in self.items.iter().zip(chips).zip(tooltips) {
+        let last = self.items.len().saturating_sub(1);
+        for (index, (((_, item), chip), tip)) in
+            self.items.iter().zip(chips).zip(tooltips).enumerate()
+        {
             if let Some(button) = item.button(mtm) {
-                button.setAttributedTitle(&chip_title(chip));
+                button.setAttributedTitle(&chip_title(chip, index == last));
                 button.setToolTip(Some(&NSString::from_str(tip)));
             }
         }
@@ -251,7 +255,7 @@ fn menu_item(mtm: MainThreadMarker, title: &str, action: Option<Sel>) -> Retaine
 
 /// A chip as the item's title: its mark and value, or its name and value
 /// where the mark cannot be drawn (SVG needs macOS 14).
-fn chip_title(chip: &Chip) -> Retained<NSMutableAttributedString> {
+fn chip_title(chip: &Chip, rightmost: bool) -> Retained<NSMutableAttributedString> {
     let font = NSFont::menuBarFontOfSize(0.0);
     let font_object: &AnyObject = font.as_ref();
     // SAFETY: NSFontAttributeName is an immutable AppKit constant.
@@ -267,8 +271,25 @@ fn chip_title(chip: &Chip) -> Retained<NSMutableAttributedString> {
             )
         }
     };
+    let padding = |kern: f64| {
+        // SAFETY: NSKernAttributeName is an immutable AppKit constant.
+        let kern_key = unsafe { NSKernAttributeName };
+        let kern = NSNumber::numberWithDouble(kern / ITEM_PADDING.len() as f64);
+        let kern_object: &AnyObject = kern.as_ref();
+        let attributes =
+            NSDictionary::from_slices(&[font_key, kern_key], &[font_object, kern_object]);
+        // SAFETY: the attributes map NSFontAttributeName to an NSFont and
+        // NSKernAttributeName to an NSNumber.
+        unsafe {
+            NSAttributedString::initWithString_attributes(
+                NSAttributedString::alloc(),
+                &NSString::from_str(ITEM_PADDING),
+                Some(&attributes),
+            )
+        }
+    };
     let title = NSMutableAttributedString::new();
-    title.appendAttributedString(&run(ITEM_PADDING));
+    title.appendAttributedString(&padding(PADDING_KERN));
     match chip.mark.and_then(mark_image) {
         Some(image) => {
             let attachment = NSTextAttachment::new();
@@ -288,7 +309,8 @@ fn chip_title(chip: &Chip) -> Retained<NSMutableAttributedString> {
         }
         None => title.appendAttributedString(&run(&chip.text())),
     }
-    title.appendAttributedString(&run(ITEM_PADDING));
+    let trailing = PADDING_KERN + if rightmost { CHART_GAP_KERN } else { 0.0 };
+    title.appendAttributedString(&padding(trailing));
     title
 }
 

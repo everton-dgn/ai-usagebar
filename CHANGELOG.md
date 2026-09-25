@@ -56,7 +56,8 @@ Each release is also published at
   stays in the tooltip, and a provider without a mark keeps its name. macOS 12
   and 13 cannot load the marks and keep the names. The chart glyph moved to
   the item's right edge, with more room between it and the providers and
-  between providers.
+  between providers. The MiniMax mark gets the same inner margin as the
+  others, so it no longer looks larger or touches its value.
 
 ### Fixed
 

@@ -2280,6 +2280,15 @@ impl Config {
                 "[tray] refresh_minutes must be one of 1, 5 or 10, got {minutes}"
             )));
         }
+        for (id, item) in &self.tray.menu_bar_items {
+            if let Some(window) = item.window.as_deref()
+                && !matches!(window, "auto" | "session" | "weekly" | "monthly")
+            {
+                return Err(AppError::Other(format!(
+                    "[tray.menu_bar_items.{id:?}] window must be auto, session, weekly or monthly, got {window:?}"
+                )));
+            }
+        }
         if !(1..=100).contains(&self.notifications.threshold) {
             return Err(AppError::Other(format!(
                 "[notifications] threshold must be between 1 and 100, got {}",
@@ -5088,6 +5097,20 @@ enabled = true
         let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
         set_tray_value(&path, "shortcut", None).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+    }
+
+    #[test]
+    fn a_menu_bar_item_window_must_be_a_known_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[tray.menu_bar_items.zai]\nwindow = \"yearly\"\n").unwrap();
+        let error = Config::load_from(&path).unwrap_err().to_string();
+        assert!(
+            error.contains("window must be auto, session, weekly or monthly"),
+            "{error}"
+        );
+        std::fs::write(&path, "[tray.menu_bar_items.zai]\nwindow = \"weekly\"\n").unwrap();
+        assert!(Config::load_from(&path).is_ok());
     }
 
     #[test]

@@ -65,6 +65,8 @@ enum UserEvent {
     FocusPopover,
     Hotkey,
     Facts,
+    /// Polled while the user drags an edge; re-centres the panel once the drag ends.
+    ResizeSettle,
 }
 
 enum WorkerCmd {
@@ -122,6 +124,7 @@ struct TrayState {
     /// Width and height cap the user dragged the panel to, saved on close.
     panel_size: PanelSize,
     panel_size_dirty: bool,
+    resize_settle_armed: bool,
     theme: Theme,
     facts: SharedFacts,
     hotkey: Option<HotkeyBinding>,
@@ -219,6 +222,7 @@ fn run_loop() -> Result<(), String> {
         popover_height: WINDOW_HEIGHT,
         panel_size,
         panel_size_dirty: false,
+        resize_settle_armed: false,
         theme,
         facts,
         hotkey: hotkey_binding,
@@ -249,6 +253,7 @@ fn run_loop() -> Result<(), String> {
             Event::UserEvent(UserEvent::Entry(entry)) => apply_entry(&mut state, entry),
             Event::UserEvent(UserEvent::Facts) => apply_facts(&mut state),
             Event::UserEvent(UserEvent::Hotkey) => toggle_popover_from_keyboard(&mut state),
+            Event::UserEvent(UserEvent::ResizeSettle) => settle_user_resize(&mut state),
             Event::UserEvent(UserEvent::FocusPopover) => {
                 if state.popover_open {
                     guard_blur(&mut state);
@@ -1015,13 +1020,17 @@ fn handle_resize(state: &mut TrayState, value: &Value) {
 }
 
 fn fit_window_to_content(state: &mut TrayState, visible_h: f64) {
+    // Open: position_popover sets size and origin in one synchronous frame.
+    // tao's set_inner_size is queued on the main dispatch queue, so it would
+    // land after that frame and could apply a size computed before it.
+    if state.popover_open {
+        position_popover(state);
+        return;
+    }
     let target = fit_popover_height(state.popover_height, visible_h, state.panel_size.max_height);
     state
         .window
         .set_inner_size(LogicalSize::new(state.panel_size.width, target));
-    if state.popover_open {
-        position_popover(state);
-    }
 }
 
 /// A `Resized` from AppKit's live resize is the user dragging an edge: that
@@ -1033,6 +1042,36 @@ fn note_user_resize(state: &mut TrayState, size: tao::dpi::PhysicalSize<u32>) {
     let logical = size.to_logical::<f64>(state.window.scale_factor());
     state.panel_size = PanelSize::dragged(logical.width, logical.height);
     state.panel_size_dirty = true;
+    arm_resize_settle(state);
+}
+
+/// AppKit reports no end of a live resize to tao, so poll for it: moving the
+/// frame mid-drag would fight the edge under the cursor.
+const RESIZE_SETTLE_POLL: Duration = Duration::from_millis(120);
+
+fn arm_resize_settle(state: &mut TrayState) {
+    if state.resize_settle_armed {
+        return;
+    }
+    state.resize_settle_armed = true;
+    let proxy = state.proxy.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(RESIZE_SETTLE_POLL);
+        let _ = proxy.send_event(UserEvent::ResizeSettle);
+    });
+}
+
+/// Once the drag is over, centre the panel under the status item again at
+/// its new size.
+fn settle_user_resize(state: &mut TrayState) {
+    state.resize_settle_armed = false;
+    if in_live_resize(&state.window) {
+        arm_resize_settle(state);
+        return;
+    }
+    if state.popover_open {
+        position_popover(state);
+    }
 }
 
 fn in_live_resize(window: &Window) -> bool {

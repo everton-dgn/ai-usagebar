@@ -12,7 +12,8 @@ Each release is also published at
 ### Added
 
 - **Resize the macOS tray popover.** Drag any edge to make the panel wider or
-  shorter; the size is remembered across runs. The height still follows the
+  shorter; the size is remembered across runs and the panel re-centres under
+  the menu bar icon when you let go. The height still follows the
   content, but never grows past the height you chose, and the list scrolls
   when the content is taller. **Options → Reset Panel Size** restores the
   default width and the automatic height.
@@ -29,8 +30,9 @@ Each release is also published at
   show the provider's icon and full name, and a provider with no icon of its
   own gets a generic one.
 - **Popover text wraps instead of being cut.** Provider names, plans, labels
-  and values wrap onto another line rather than ending in "…", and provider
-  tabs wrap onto more rows instead of scrolling out of sight.
+  and values wrap onto another line rather than ending in "…", and cards
+  shrink to a panel narrower than one column instead of losing their right
+  side.
 
 ## [1.23.0] — 2026-09-24
 

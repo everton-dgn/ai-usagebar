@@ -329,12 +329,16 @@ body:has(.mac-panel) {
   outline-offset: 2px;
 }
 
-/* Tabs wrap onto more rows rather than scrolling out of sight. */
 .mac-provider-tabs {
   display: flex;
-  flex-wrap: wrap;
   gap: 7px;
+  overflow-x: auto;
   padding: 1px 1px 5px;
+  scrollbar-width: none;
+}
+
+.mac-provider-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .mac-provider-tab {
@@ -351,8 +355,7 @@ body:has(.mac-panel) {
   cursor: pointer;
   font: inherit;
   font-size: 11px;
-  max-width: 100%;
-  text-align: left;
+  white-space: nowrap;
 }
 
 .dark .mac-provider-tab {
@@ -367,9 +370,7 @@ body:has(.mac-panel) {
 }
 
 .mac-tab-name {
-  min-width: 0;
   font-weight: 600;
-  overflow-wrap: anywhere;
 }
 
 .mac-tab-value {

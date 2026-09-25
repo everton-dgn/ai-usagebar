@@ -15,6 +15,9 @@ Each release is also published at
   70% used and red from 85%, the same defaults as the Claude Code statusline,
   in both the list and the tabs view. **Settings → Preferences → Bar colors**
   sets both thresholds. The pace flame and tick keep their own signal.
+- **Pin the macOS popover open.** The pin in the popover header keeps it
+  open when focus moves or a click lands outside it; the menu bar icon and
+  Escape still close it. The choice is remembered.
 - **Resize the macOS tray popover.** Drag any edge to make the panel wider or
   shorter; the size is remembered across runs and the panel re-centres under
   the menu bar icon when you let go. The height still follows the
@@ -34,6 +37,11 @@ Each release is also published at
 
 ### Fixed
 
+- **The macOS popover opens and closes on every click.** With the popover
+  open, pressing the menu bar icon took focus away first, the blur closed the
+  popover, and the click then opened it again, so it sometimes seemed not to
+  close. The blur now leaves a press on the icon to its click. A click in the
+  menu bar outside the icon, another app or the desktop now closes it too.
 - **The macOS popover never shows letters for a provider.** Tabs used the
   three-letter short name and two-letter initials for named accounts; they now
   show the provider's icon and full name, and a provider with no icon of its
@@ -42,6 +50,10 @@ Each release is also published at
   and values wrap onto another line rather than ending in "…", and cards
   shrink to a panel narrower than one column instead of losing their right
   side.
+- **The macOS popover keeps its border around the footer.** The hairline was
+  an inset shadow on the panel, which is painted under its children, so the
+  footer (and the top bar on inner screens) drew over it. It is now drawn
+  above the content.
 
 ## [1.23.0] — 2026-09-24
 

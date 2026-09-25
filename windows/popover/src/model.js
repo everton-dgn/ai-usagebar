@@ -790,6 +790,7 @@ export function emptyLayout() {
     names: {},
     panelView: "list",
     colorThresholds: { ...DEFAULT_COLOR_THRESHOLDS },
+    pinned: false,
     resetTimes: "countdown",
     rows: {},
     seeded: false,
@@ -992,6 +993,7 @@ export function normalizeLayout(raw) {
   layout.language = raw.language === "pt-BR" ? "pt-BR" : "en";
   layout.panelView = normalizePanelView(raw.panelView);
   layout.colorThresholds = normalizeColorThresholds(raw.colorThresholds);
+  layout.pinned = raw.pinned === true;
   layout.names = cleanNameMap(raw.names);
   layout.showPlan = raw.showPlan !== false;
   layout.seeded = raw.seeded === true;
@@ -1083,6 +1085,7 @@ export function syncLayout(layout, cardIds) {
     language: layout.language === "pt-BR" ? "pt-BR" : "en",
     panelView: normalizePanelView(layout.panelView),
     colorThresholds: normalizeColorThresholds(layout.colorThresholds),
+    pinned: layout.pinned === true,
     names: cleanNameMap(layout.names),
     showPlan: layout.showPlan !== false,
     resetTimes: normalizeResetTimes(layout.resetTimes),

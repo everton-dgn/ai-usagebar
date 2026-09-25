@@ -484,6 +484,7 @@ fn safe_text(value: &str, limit: usize) -> String {
         .to_owned()
 }
 
+/// Marks and overrides that can reorder the text around them.
 fn is_bidi_control(c: char) -> bool {
     matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }

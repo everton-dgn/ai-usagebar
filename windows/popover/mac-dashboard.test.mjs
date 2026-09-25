@@ -108,6 +108,20 @@ try {
   const listColor = (used, colorThresholds) => renderToStaticMarkup(React.createElement(TooltipProvider, {},
     React.createElement(LanguageProvider, { language: 'pt-BR' },
       React.createElement(ProviderSection, { card: at(used), layout: { ...emptyLayout(), colorThresholds }, nowMs })))).match(/class="meter-fill" data-color="(\w+)"/)?.[1];
+  // The number beside each bar takes the same color.
+  const tabsNumber = (used) => renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
+    React.createElement(MacDashboard, {
+      cards: [at(used)], layout: emptyLayout(), nowMs, payload,
+      onOpenCustomize() {}, onOpenSettings() {},
+    }))).match(/<strong data-usage="(\w+)">\d+%<\/strong>/)?.[1];
+  const listNumber = (used) => renderToStaticMarkup(React.createElement(TooltipProvider, {},
+    React.createElement(LanguageProvider, { language: 'pt-BR' },
+      React.createElement(ProviderSection, { card: at(used), layout: emptyLayout(), nowMs })))).match(/class="plain-btn[^"]*" data-usage="(\w+)"/)?.[1];
+  for (const number of [tabsNumber, listNumber]) {
+    assert.equal(number(46), 'green');
+    assert.equal(number(75), 'yellow');
+    assert.equal(number(90), 'red');
+  }
   for (const color of [tabsColor, listColor]) {
     assert.equal(color(46, { yellow: 70, red: 85 }), 'green');
     assert.equal(color(75, { yellow: 70, red: 85 }), 'yellow');

@@ -391,6 +391,8 @@ function MetricRow({ demand, layout, nowMs, onToggleShowAs, row }: MetricRowProp
   const showPace = rowPace !== null && paceVisible(rowPace, layout);
   const paceNote = showPace && rowPace ? paceText(rowPace, nowMs, { resetTimes: layout.resetTimes, timeFormat: layout.timeFormat, locale: language }) : "";
   const behind = rowPace?.state === "behind";
+  // One verdict for the bar and its number; it never flips with the Used/Left toggle.
+  const color = usageColor(row.usedPercent, layout.colorThresholds, spent);
   return (
     <div className="flex flex-col gap-[var(--row-inner)] px-[var(--card-pad)] py-[var(--pad-bar-row)]">
       <div className="flex items-center gap-[6px]">
@@ -413,7 +415,7 @@ function MetricRow({ demand, layout, nowMs, onToggleShowAs, row }: MetricRowProp
       <div className="meter" aria-hidden="true">
         <div
           className="meter-fill"
-          data-color={usageColor(row.usedPercent, layout.colorThresholds, spent)}
+          data-color={color}
           data-empty={fill === 0 ? "true" : "false"}
           style={{ width: `${fill}%` }}
         />
@@ -422,6 +424,7 @@ function MetricRow({ demand, layout, nowMs, onToggleShowAs, row }: MetricRowProp
         <button
           type="button"
           className="plain-btn [overflow-wrap:anywhere]"
+          data-usage={color}
           title={headlineAlt || undefined}
           onClick={onToggleShowAs}
         >

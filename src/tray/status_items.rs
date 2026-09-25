@@ -12,10 +12,10 @@ use std::ptr::NonNull;
 
 use objc2_app_kit::{
     NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
-    NSAttributedStringAttachmentConveniences, NSColor, NSCompositingOperation,
-    NSControlStateValueOn, NSEventMask, NSEventModifierFlags, NSEventType, NSFont,
-    NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSKernAttributeName, NSMenu,
-    NSMenuItem, NSRectFillUsingOperation, NSStatusBar, NSStatusItem, NSTextAttachment,
+    NSAttributedStringAttachmentConveniences, NSBaselineOffsetAttributeName, NSColor,
+    NSCompositingOperation, NSControlStateValueOn, NSEventMask, NSEventModifierFlags, NSEventType,
+    NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSKernAttributeName,
+    NSMenu, NSMenuItem, NSRectFillUsingOperation, NSStatusBar, NSStatusItem, NSTextAttachment,
     NSVariableStatusItemLength,
 };
 use objc2_foundation::{
@@ -319,6 +319,9 @@ fn chip_title(chip: &Chip, rightmost: bool) -> Retained<NSMutableAttributedStrin
             }
         }
     }
+    if chip.active_account {
+        title.appendAttributedString(&active_mark());
+    }
     let trailing = PADDING_KERN + if rightmost { CHART_GAP_KERN } else { 0.0 };
     title.appendAttributedString(&padding(trailing));
     title
@@ -356,6 +359,33 @@ fn level_color(level: Level) -> Retained<NSColor> {
     );
     // SAFETY: the provider returns colors it owns for as long as it lives.
     unsafe { NSColor::colorWithName_dynamicProvider(None, &provider) }
+}
+
+/// The popover's star for the account in use, small and raised after the value.
+fn active_mark() -> Retained<NSAttributedString> {
+    let font = NSFont::menuBarFontOfSize(8.0);
+    let font_object: &AnyObject = font.as_ref();
+    let color = NSColor::systemYellowColor();
+    let color_object: &AnyObject = color.as_ref();
+    let raise = NSNumber::numberWithDouble(3.0);
+    let raise_object: &AnyObject = raise.as_ref();
+    // SAFETY: immutable AppKit attribute-name constants.
+    let keys = unsafe {
+        [
+            NSFontAttributeName,
+            NSForegroundColorAttributeName,
+            NSBaselineOffsetAttributeName,
+        ]
+    };
+    let attributes = NSDictionary::from_slices(&keys, &[font_object, color_object, raise_object]);
+    // SAFETY: the attributes map each key to a value of its documented type.
+    unsafe {
+        NSAttributedString::initWithString_attributes(
+            NSAttributedString::alloc(),
+            &NSString::from_str(" ★"),
+            Some(&attributes),
+        )
+    }
 }
 
 fn value_run(value: &str, level: Option<Level>, font: &NSFont) -> Retained<NSAttributedString> {

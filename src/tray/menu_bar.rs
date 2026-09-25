@@ -106,6 +106,8 @@ pub struct Chip {
     pub stale: bool,
     /// The value's color, when it is a percentage and coloring is on.
     pub level: Option<Level>,
+    /// The account in use, when the bar shows more than one of its provider.
+    pub active_account: bool,
     pub mark: Option<&'static str>,
     pub name: String,
     pub value: Option<String>,
@@ -311,11 +313,21 @@ impl View<'_> {
 
 /// The menu bar's providers, in display order.
 pub fn chips(payload: &Value, view: &View) -> Vec<Chip> {
-    displayed_entries(payload, view)
+    let mut chips: Vec<Chip> = displayed_entries(payload, view)
         .into_iter()
         .map(|entry| chip(entry, view))
         .filter(|chip| chip.mark.is_some() || !chip.name.is_empty())
-        .collect()
+        .collect();
+    let accounts = payload.get("accounts");
+    let vendor = |id: &str| id.split('@').next().unwrap_or("").to_owned();
+    let vendors: Vec<String> = chips.iter().map(|chip| vendor(&chip.id)).collect();
+    for chip in &mut chips {
+        let own = vendor(&chip.id);
+        let shared = vendors.iter().filter(|v| **v == own).count() > 1;
+        let switchable = accounts.and_then(|a| a.get(&own)).is_some();
+        chip.active_account = shared && switchable && is_active_account(&chip.id, accounts);
+    }
+    chips
 }
 
 /// The menu bar as plain text: every chip's name and value.
@@ -488,6 +500,7 @@ fn chip(entry: &Value, view: &View) -> Chip {
     Chip {
         id: id.to_owned(),
         stale: entry.get("stale").and_then(Value::as_bool) == Some(true),
+        active_account: false,
         level: (show_value && view.color_value_for(id))
             .then(|| used_percent(entry, window))
             .flatten()
@@ -679,6 +692,34 @@ mod tests {
             .map(|c| c.level)
             .collect();
         assert_eq!(levels, [Some(Level::Yellow), Some(Level::Yellow), None]);
+    }
+
+    #[test]
+    fn the_account_in_use_is_marked_only_beside_its_siblings() {
+        let report = json!({
+        "accounts": {"anthropic": {"active": "work", "labels": ["work", "home"]}},
+        "entries":[
+            {"id":"anthropic@work", "display_name":"Claude", "status":"ready"},
+            {"id":"anthropic@home", "display_name":"Claude · 2", "status":"ready"},
+            {"id":"zai", "display_name":"Z.AI", "status":"ready"}
+        ]});
+        let marks: Vec<bool> = chips(&report, &view("", true, false, UsageWindow::Auto, None))
+            .into_iter()
+            .map(|chip| chip.active_account)
+            .collect();
+        assert_eq!(marks, [true, false, false]);
+        let items = BTreeMap::from([(
+            "anthropic@home".to_string(),
+            MenuBarItemConfig {
+                hidden: true,
+                ..Default::default()
+            },
+        )]);
+        let alone = View {
+            items: &items,
+            ..view("", true, false, UsageWindow::Auto, None)
+        };
+        assert!(!chips(&report, &alone)[0].active_account);
     }
 
     #[test]

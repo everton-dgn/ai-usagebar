@@ -49,7 +49,8 @@ Each release is also published at
   Use** keeps one account per provider, the one the `claude` or `codex` login
   holds. The chart item stays on the right and opens the popover as before.
   A provider's click waits for its tab's height before showing, so the popover
-  no longer opens at the list's height and then shrinks.
+  no longer opens at the list's height and then shrinks, and the tab row
+  scrolls to show that provider's tab.
 - **Menu bar percentages take the bar colors.** Each provider's value reads
   green, yellow or red (Dracula's on a dark menu bar, darker tones on a light
   one) at the thresholds set in **Settings → Preferences →

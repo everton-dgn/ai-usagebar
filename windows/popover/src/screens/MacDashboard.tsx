@@ -270,6 +270,17 @@ export function MacDashboard({ cards, layout, nowMs, payload, focusId, onOpenCus
     ?? cards.find((card) => primaryMetric(card))
     ?? cards[0];
   const selectedEntry = payload.entries.find((entry) => entry.id === selected?.id);
+  useEffect(() => {
+    const row = tabRow.ref.current;
+    const tab = row?.querySelector<HTMLElement>('[data-active="true"]');
+    if (!row || !tab) return;
+    const rowBox = row.getBoundingClientRect();
+    const tabBox = tab.getBoundingClientRect();
+    const left = tabBox.left - rowBox.left + row.scrollLeft;
+    const right = left + tabBox.width;
+    if (left < row.scrollLeft) row.scrollLeft = left;
+    else if (right > row.scrollLeft + row.clientWidth) row.scrollLeft = right - row.clientWidth;
+  }, [selected?.id]);
   const updated = payload.generatedAt > 0
     ? Math.max(0, Math.floor((nowMs - payload.generatedAt) / 60_000))
     : null;

@@ -1361,7 +1361,8 @@ function vendorSlug(entryId) {
   return String(entryId || "").split("@")[0].toLowerCase();
 }
 
-const ICON_ALIAS = { supergrok: "grok" };
+// Card ids use the report slug; the bundled mark file names use underscores.
+const ICON_ALIAS = { supergrok: "grok", "opencode-go": "opencode_go" };
 
 /** OpenUsage-style Status / Dashboard / Usage links. Cap three; only http(s). */
 const PROVIDER_LINKS = {

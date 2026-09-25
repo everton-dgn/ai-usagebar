@@ -125,6 +125,9 @@ struct TrayState {
     panel_size: PanelSize,
     panel_size_dirty: bool,
     resize_settle_armed: bool,
+    /// Logical height last given to the window by us, so a drag that leaves
+    /// it untouched (a width-only drag) is not mistaken for a chosen height.
+    applied_height: f64,
     theme: Theme,
     facts: SharedFacts,
     hotkey: Option<HotkeyBinding>,
@@ -223,6 +226,7 @@ fn run_loop() -> Result<(), String> {
         panel_size,
         panel_size_dirty: false,
         resize_settle_armed: false,
+        applied_height: WINDOW_HEIGHT,
         theme,
         facts,
         hotkey: hotkey_binding,
@@ -1028,6 +1032,7 @@ fn fit_window_to_content(state: &mut TrayState, visible_h: f64) {
         return;
     }
     let target = fit_popover_height(state.popover_height, visible_h, state.panel_size.max_height);
+    state.applied_height = target;
     state
         .window
         .set_inner_size(LogicalSize::new(state.panel_size.width, target));
@@ -1040,7 +1045,13 @@ fn note_user_resize(state: &mut TrayState, size: tao::dpi::PhysicalSize<u32>) {
         return;
     }
     let logical = size.to_logical::<f64>(state.window.scale_factor());
-    state.panel_size = PanelSize::dragged(logical.width, logical.height);
+    let mut next = PanelSize::dragged(logical.width, logical.height);
+    // A width-only drag leaves the height where we put it: keep the previous
+    // cap (none, if the height was automatic) instead of freezing that height.
+    if (logical.height.round() - state.applied_height.round()).abs() < 1.0 {
+        next.max_height = state.panel_size.max_height;
+    }
+    state.panel_size = next;
     state.panel_size_dirty = true;
     arm_resize_settle(state);
 }
@@ -1111,14 +1122,16 @@ fn save_panel_size(state: &mut TrayState) {
     if !state.panel_size_dirty {
         return;
     }
-    state.panel_size_dirty = false;
     let (Some(path), Ok(bytes)) = (panel_size_path(), serde_json::to_vec(&state.panel_size)) else {
         return;
     };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = crate::cache::atomic_write(&path, &bytes);
+    // Stay dirty on failure, so the next close or quit tries again.
+    if crate::cache::atomic_write(&path, &bytes).is_ok() {
+        state.panel_size_dirty = false;
+    }
 }
 
 fn apply_theme(state: &mut TrayState, theme: Theme) {
@@ -1212,7 +1225,7 @@ fn toggle_popover_from_keyboard(state: &mut TrayState) {
     }
 }
 
-fn position_popover(state: &TrayState) {
+fn position_popover(state: &mut TrayState) {
     let (icon_x, icon_y) = state.last_anchor.unwrap_or_else(cocoa_mouse);
     let (screen, visible) = screen_pair_containing(icon_x, icon_y).unwrap_or((
         CocoaRect {
@@ -1237,6 +1250,7 @@ fn position_popover(state: &TrayState) {
         popover_w: state.panel_size.width,
         popover_h: height,
     });
+    state.applied_height = frame.h;
     apply_cocoa_frame(&state.window, frame);
 }
 

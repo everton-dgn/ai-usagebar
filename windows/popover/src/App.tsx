@@ -262,6 +262,8 @@ export default function App() {
           alwaysShowPace: layout.alwaysShowPace,
           resetTimes: layout.resetTimes,
           showAs: layout.showAs,
+          showPlan: layout.showPlan,
+          panelView: layout.panelView,
           theme: layout.theme,
           timeFormat: layout.timeFormat,
         },

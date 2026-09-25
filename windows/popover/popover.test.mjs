@@ -1438,6 +1438,10 @@ assert.equal(resolvedTheme('system'), 'light');
   assert.equal(normalizeLayout({ showPlan: false }).showPlan, false);
 }
 
+// Every provider id finds its own mark: the report slug uses a dash where the icon file has an underscore.
+assert.equal(providerIconId('opencode-go'), 'opencode_go');
+assert.equal(providerIconId('opencode-go@work'), 'opencode_go');
+
 // macOS panel view: the list is the default, and only "tabs" switches it.
 {
   assert.equal(normalizeLayout({}).panelView, 'list');

@@ -38,7 +38,7 @@ import {
   headlineAlternate,
   headlineLabel,
   isStarred,
-  meterColor,
+  usageColor,
   providerLinks,
   pace,
   paceText,
@@ -415,7 +415,7 @@ function MetricRow({ demand, layout, nowMs, onToggleShowAs, row }: MetricRowProp
         <div className="meter" aria-hidden="true">
           <div
             className="meter-fill"
-            data-color={meterColor(row.severity, rowPace, spent)}
+            data-color={usageColor(row.usedPercent, layout.colorThresholds, spent)}
             data-empty={fill === 0 ? "true" : "false"}
             style={{ width: `${fill}%` }}
           />

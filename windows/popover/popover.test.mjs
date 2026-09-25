@@ -38,7 +38,8 @@ import {
   moveRowToList,
   LAYOUT_KEY,
   normalizeLayout,
-  meterColor,
+  normalizeColorThresholds,
+  usageColor,
   resetText,
   resetAlternate,
   formatResetExact,
@@ -452,19 +453,23 @@ assert.equal(updateStatusLabel({ update: null, updateCheckedAt: 0 }, 0, 'pt-BR')
   assert.equal(cleaned.resetTimes, 'countdown');
 }
 
-// --- meterColor --------------------------------------------------------------
+// --- usageColor / normalizeColorThresholds ------------------------------------
 
-assert.equal(meterColor('low'), 'blue');
-assert.equal(meterColor('mid'), 'yellow');
-assert.equal(meterColor('high'), 'yellow');
-assert.equal(meterColor('critical'), 'red');
-assert.equal(meterColor('nope'), 'blue');
-assert.equal(meterColor(undefined), 'blue');
-assert.equal(meterColor('low', { state: 'ahead', sparePercent: 40 }), 'blue');
-assert.equal(meterColor('low', { state: 'onTrack', sparePercent: 2 }), 'yellow');
-assert.equal(meterColor('low', { state: 'onTrack', sparePercent: 0 }), 'red');
-assert.equal(meterColor('low', { state: 'behind', sparePercent: -12 }), 'red');
-assert.equal(meterColor('low', null, true), 'red');
+// Defaults match the Claude Code statusline: green, yellow from 70%, red from 85%.
+assert.deepEqual(normalizeColorThresholds(undefined), { yellow: 70, red: 85 });
+assert.equal(usageColor(0), 'green');
+assert.equal(usageColor(69), 'green');
+assert.equal(usageColor(70), 'yellow');
+assert.equal(usageColor(84), 'yellow');
+assert.equal(usageColor(85), 'red');
+assert.equal(usageColor(10, undefined, true), 'red');
+assert.equal(usageColor(55, { yellow: 50, red: 60 }), 'yellow');
+assert.equal(usageColor(60, { yellow: 50, red: 60 }), 'red');
+// Unusable input falls back per field; red always stays above yellow.
+assert.deepEqual(normalizeColorThresholds({ yellow: 'x', red: 150 }), { yellow: 70, red: 85 });
+assert.deepEqual(normalizeColorThresholds({ yellow: 90, red: 80 }), { yellow: 90, red: 91 });
+assert.deepEqual(normalizeColorThresholds({ yellow: 100, red: 100 }), { yellow: 99, red: 100 });
+assert.deepEqual(normalizeLayout({ colorThresholds: { yellow: 60 } }).colorThresholds, { yellow: 60, red: 85 });
 
 // --- resetText / resetAlternate / formatResetExact ---------------------------
 

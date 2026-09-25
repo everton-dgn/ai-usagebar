@@ -264,6 +264,7 @@ export default function App() {
           showAs: layout.showAs,
           showPlan: layout.showPlan,
           panelView: layout.panelView,
+          colorThresholds: layout.colorThresholds,
           theme: layout.theme,
           timeFormat: layout.timeFormat,
         },
@@ -478,6 +479,7 @@ export default function App() {
               onTimeFormat={(timeFormat) => commit({ ...layout, timeFormat })}
               onPanelView={(panelView) => commit({ ...layout, panelView })}
               onShowPlan={(showPlan) => commit({ ...layout, showPlan })}
+              onColorThresholds={(colorThresholds) => commit({ ...layout, colorThresholds })}
             />
           ) : null}
         </div>

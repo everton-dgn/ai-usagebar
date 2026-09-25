@@ -11,6 +11,12 @@ export type Language = "en" | "pt-BR";
 
 export type PanelView = "list" | "tabs";
 
+/** Percentages used where a usage bar turns yellow and red. */
+export interface ColorThresholds {
+  yellow: number;
+  red: number;
+}
+
 export interface Layout {
   alwaysShowPace: boolean;
   usageGoal: boolean;
@@ -22,6 +28,7 @@ export interface Layout {
   language: Language;
   /** macOS dashboard: all providers stacked, or one at a time behind tabs. */
   panelView: PanelView;
+  colorThresholds: ColorThresholds;
   /** Card id → the name the user gave it. */
   names: Record<string, string>;
   /** Show the subscription plan beside each provider's name. */

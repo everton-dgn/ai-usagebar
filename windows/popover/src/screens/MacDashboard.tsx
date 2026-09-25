@@ -6,7 +6,7 @@ import MdiViewAgendaOutline from "~icons/mdi/view-agenda-outline";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { useI18n } from "@/lib/i18n";
 import type { Card, Layout, MetricRow, PanelView, Payload, Row } from "@/lib/types";
-import { nextUpdateLabel, providerIconId, resetText, sendCommand, usageGoal } from "../model.js";
+import { nextUpdateLabel, providerIconId, resetText, sendCommand, usageColor, usageGoal } from "../model.js";
 
 interface MacDashboardProps {
   cards: Card[];
@@ -97,7 +97,7 @@ function Metric({ row, layout, nowMs }: { row: MetricRow; layout: Layout; nowMs:
         aria-valuemax={100}
         aria-valuenow={percent}
       >
-        <span className="mac-meter-fill" data-severity={row.severity} style={{ width: `${percent}%` }} />
+        <span className="mac-meter-fill" data-color={usageColor(percent, layout.colorThresholds)} style={{ width: `${percent}%` }} />
       </div>
       {reset || row.detail || (balance && percent > 0) ? (
         <div className="mac-metric-note">

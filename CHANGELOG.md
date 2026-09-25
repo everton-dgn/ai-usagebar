@@ -11,6 +11,10 @@ Each release is also published at
 
 ### Added
 
+- **Usage bar colors by how much is used.** Bars are green, turn yellow from
+  70% used and red from 85%, the same defaults as the Claude Code statusline,
+  in both the list and the tabs view. **Settings → Preferences → Bar colors**
+  sets both thresholds. The pace flame and tick keep their own signal.
 - **Resize the macOS tray popover.** Drag any edge to make the panel wider or
   shorter; the size is remembered across runs and the panel re-centres under
   the menu bar icon when you let go. The height still follows the

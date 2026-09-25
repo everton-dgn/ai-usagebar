@@ -68,7 +68,7 @@ try {
     onAlwaysShowPace() {}, onUsageGoal() {}, onLanguage() {}, onOpenCustomize() {},
     onOpenProvider() {}, onReorderProviders() {}, onToggleProvider() {},
     onResetCustomization() {}, onResetTimes() {}, onShowAs() {},
-    onTheme() {}, onTimeFormat() {}, onPanelView() {}, onShowPlan() {}, onTabChange() {},
+    onTheme() {}, onTimeFormat() {}, onPanelView() {}, onShowPlan() {}, onColorThresholds() {}, onTabChange() {},
   };
   function settingsTab(tab) {
     return renderToStaticMarkup(React.createElement(TooltipProvider, {},

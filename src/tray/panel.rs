@@ -45,6 +45,16 @@ pub fn clamp_popover_height(requested: f64, work_area_height: f64) -> f64 {
     requested.round().clamp(MIN_POPOVER_HEIGHT, max)
 }
 
+/// Whether losing focus should close an open popover.
+///
+/// Pressing the status item takes focus away from the popover before that
+/// press's click arrives. Closing on the blur would leave the click to find
+/// the popover closed and open it again, so a press on the status item is
+/// left to its click, which closes it.
+pub fn close_on_blur(guarded: bool, press_on_status_item: bool) -> bool {
+    !guarded && !press_on_status_item
+}
+
 /// The popover height for the content's `requested` height: automatic as
 /// before, but never taller than the height the user dragged the panel to.
 /// Below the content's height the list scrolls.
@@ -163,9 +173,17 @@ mod tests {
     use super::{
         CocoaRect, MENU_BAR_MIN_HEIGHT, MIN_POPOVER_HEIGHT, MIN_POPOVER_WIDTH, MIN_USER_HEIGHT,
         POPOVER_BOTTOM_GAP, POPOVER_SIDE_MARGIN, POPOVER_TOP_GAP, PanelSize, PopoverPlacement,
-        WINDOW_WIDTH, WORK_AREA_MARGIN, clamp_popover_height, cocoa_popover_frame,
+        WINDOW_WIDTH, WORK_AREA_MARGIN, clamp_popover_height, close_on_blur, cocoa_popover_frame,
         fit_popover_height, menu_bar_bottom_y,
     };
+
+    #[test]
+    fn a_press_on_the_status_item_leaves_closing_to_its_click() {
+        assert!(close_on_blur(false, false));
+        assert!(!close_on_blur(false, true));
+        // Just opened: the click that opened it must not close it again.
+        assert!(!close_on_blur(true, false));
+    }
 
     #[test]
     fn fit_without_a_dragged_height_is_the_automatic_height() {

@@ -148,13 +148,29 @@ body:has(.mac-panel) {
 }
 
 .mac-panel {
+  position: relative;
+  isolation: isolate;
   font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
   background: rgba(255, 255, 255, 0.22);
+}
+
+/* The hairline sits above the content: an inset shadow on the panel itself is
+   painted under its children, so the footer and top bar covered it. */
+.mac-panel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.62);
+  pointer-events: none;
 }
 
 .dark .mac-panel {
   background: rgba(18, 22, 29, 0.28);
+}
+
+.dark .mac-panel::after {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
 }
 
@@ -238,6 +254,10 @@ body:has(.mac-panel) {
   gap: 8px;
   padding: 8px 4px 0;
   margin-bottom: 12px;
+}
+
+.mac-pin-button[data-active="true"] {
+  color: var(--blue);
 }
 
 .mac-view-switch {

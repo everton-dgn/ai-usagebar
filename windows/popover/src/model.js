@@ -773,6 +773,7 @@ export function emptyLayout() {
     language: "en",
     names: {},
     panelView: "list",
+    pinned: false,
     resetTimes: "countdown",
     rows: {},
     seeded: false,
@@ -974,6 +975,7 @@ export function normalizeLayout(raw) {
   layout.hintDismissed = raw.hintDismissed === true;
   layout.language = raw.language === "pt-BR" ? "pt-BR" : "en";
   layout.panelView = normalizePanelView(raw.panelView);
+  layout.pinned = raw.pinned === true;
   layout.names = cleanNameMap(raw.names);
   layout.showPlan = raw.showPlan !== false;
   layout.seeded = raw.seeded === true;
@@ -1064,6 +1066,7 @@ export function syncLayout(layout, cardIds) {
     hintDismissed: layout.hintDismissed === true,
     language: layout.language === "pt-BR" ? "pt-BR" : "en",
     panelView: normalizePanelView(layout.panelView),
+    pinned: layout.pinned === true,
     names: cleanNameMap(layout.names),
     showPlan: layout.showPlan !== false,
     resetTimes: normalizeResetTimes(layout.resetTimes),

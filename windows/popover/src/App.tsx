@@ -82,6 +82,11 @@ export default function App() {
   const visible = useMemo(() => applyCardLayout(cards, layout), [cards, layout]);
   const currentCard = cards.find((card) => card.id === providerId);
 
+  // The host decides whether a blur or an outside click closes the popover.
+  useEffect(() => {
+    sendCommand("set-pinned", { value: layout.pinned });
+  }, [layout.pinned]);
+
   function commit(next: Layout) {
     setLayout(next);
     saveLayout(storageRef.current, next);
@@ -264,6 +269,7 @@ export default function App() {
           showAs: layout.showAs,
           showPlan: layout.showPlan,
           panelView: layout.panelView,
+          pinned: layout.pinned,
           theme: layout.theme,
           timeFormat: layout.timeFormat,
         },
@@ -334,6 +340,16 @@ export default function App() {
           ? translate(layout.language, "About")
           : currentCard?.title || "Provider";
 
+  const macHeader = (
+    <MacPanelHeader
+      view={layout.panelView}
+      pinned={layout.pinned}
+      onView={(panelView) => commit({ ...layout, panelView })}
+      onPin={(pinned) => commit({ ...layout, pinned })}
+      onOpenSettings={() => go("settings")}
+    />
+  );
+
   return (
     <LanguageProvider language={layout.language}>
     <div
@@ -365,7 +381,7 @@ export default function App() {
           {screen === "dashboard" ? (
             payload.os === "macos" && layout.panelView === "tabs" ? (
               <>
-                <MacPanelHeader view={layout.panelView} onView={(panelView) => commit({ ...layout, panelView })} onOpenSettings={() => go("settings")} />
+                {macHeader}
                 <MacDashboard
                   cards={visible}
                   layout={layout}
@@ -376,9 +392,7 @@ export default function App() {
               </>
             ) : (
               <>
-              {payload.os === "macos" ? (
-                <MacPanelHeader view={layout.panelView} onView={(panelView) => commit({ ...layout, panelView })} onOpenSettings={() => go("settings")} />
-              ) : null}
+              {payload.os === "macos" ? macHeader : null}
               <Dashboard
               cards={cards}
               hint={hintPending(layout)}

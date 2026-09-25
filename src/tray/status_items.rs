@@ -8,15 +8,18 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use std::ptr::NonNull;
+
 use objc2_app_kit::{
-    NSApplication, NSAttributedStringAttachmentConveniences, NSColor, NSCompositingOperation,
+    NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+    NSAttributedStringAttachmentConveniences, NSColor, NSCompositingOperation,
     NSControlStateValueOn, NSEventMask, NSEventModifierFlags, NSEventType, NSFont,
     NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSKernAttributeName, NSMenu,
     NSMenuItem, NSRectFillUsingOperation, NSStatusBar, NSStatusItem, NSTextAttachment,
     NSVariableStatusItemLength,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedString, NSData, NSDictionary, NSMutableAttributedString,
+    MainThreadMarker, NSArray, NSAttributedString, NSData, NSDictionary, NSMutableAttributedString,
     NSNumber, NSObject, NSPoint, NSRect, NSSize, NSString,
 };
 
@@ -321,15 +324,45 @@ fn chip_title(chip: &Chip, rightmost: bool) -> Retained<NSMutableAttributedStrin
     title
 }
 
+/// Dracula's green, yellow and red on a dark menu bar; darker tones on a
+/// light one, where Dracula's pastels would not read.
+fn level_color(level: Level) -> Retained<NSColor> {
+    let (dark, light) = match level {
+        Level::Green => ((0x50, 0xfa, 0x7b), (0x1f, 0x8a, 0x3c)),
+        Level::Yellow => ((0xf1, 0xfa, 0x8c), (0x9a, 0x74, 0x00)),
+        Level::Red => ((0xff, 0x55, 0x55), (0xc4, 0x1e, 0x1e)),
+    };
+    let srgb = |(r, g, b): (u8, u8, u8)| {
+        NSColor::colorWithSRGBRed_green_blue_alpha(
+            f64::from(r) / 255.0,
+            f64::from(g) / 255.0,
+            f64::from(b) / 255.0,
+            1.0,
+        )
+    };
+    let (dark, light) = (srgb(dark), srgb(light));
+    let provider = RcBlock::new(
+        move |appearance: NonNull<NSAppearance>| -> NonNull<NSColor> {
+            // SAFETY: AppKit passes a live appearance for the duration of the call.
+            let appearance = unsafe { appearance.as_ref() };
+            // SAFETY: these appearance names are immutable AppKit constants.
+            let names =
+                unsafe { NSArray::from_slice(&[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) };
+            let is_dark = appearance
+                .bestMatchFromAppearancesWithNames(&names)
+                .is_some_and(|name| &*name == unsafe { NSAppearanceNameDarkAqua });
+            NonNull::from(if is_dark { &*dark } else { &*light })
+        },
+    );
+    // SAFETY: the provider returns colors it owns for as long as it lives.
+    unsafe { NSColor::colorWithName_dynamicProvider(None, &provider) }
+}
+
 fn value_run(value: &str, level: Option<Level>, font: &NSFont) -> Retained<NSAttributedString> {
     let font_object: &AnyObject = font.as_ref();
     // SAFETY: NSFontAttributeName is an immutable AppKit constant.
     let font_key = unsafe { NSFontAttributeName };
-    let color = level.map(|level| match level {
-        Level::Green => NSColor::systemGreenColor(),
-        Level::Yellow => NSColor::systemYellowColor(),
-        Level::Red => NSColor::systemRedColor(),
-    });
+    let color = level.map(level_color);
     let attributes = match &color {
         Some(color) => {
             // SAFETY: NSForegroundColorAttributeName is an immutable AppKit constant.

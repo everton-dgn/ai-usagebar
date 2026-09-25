@@ -176,9 +176,12 @@ body:has(.mac-panel) {
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* Tabs size to their word and share the spare width; a panel too narrow for
+   all five scrolls the row sideways instead of breaking a word. */
 .mac-panel .settings-tabs {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: none;
   gap: 2px;
   padding: 3px;
   border-radius: 10px;
@@ -186,18 +189,21 @@ body:has(.mac-panel) {
   box-shadow: inset 0 0 0 0.5px var(--separator);
 }
 
+.mac-panel .settings-tabs::-webkit-scrollbar {
+  display: none;
+}
+
 .mac-panel .settings-tab {
-  min-width: 0;
-  overflow: hidden;
+  flex: 1 0 auto;
   border: 0;
   border-radius: 7px;
-  padding: 7px 2px;
+  padding: 7px 8px;
   background: transparent;
   color: var(--label-2);
   font: inherit;
   font-size: 10px;
   font-weight: 600;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -339,6 +345,15 @@ body:has(.mac-panel) {
 
 .mac-provider-tabs::-webkit-scrollbar {
   display: none;
+}
+
+.mac-provider-tabs[data-dragging] {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.mac-provider-tabs[data-dragging] .mac-provider-tab {
+  cursor: grabbing;
 }
 
 .mac-provider-tab {

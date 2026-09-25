@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState, type MouseEvent, type PointerEvent } from "react";
 import MdiCogOutline from "~icons/mdi/cog-outline";
 import MdiRefresh from "~icons/mdi/refresh";
 import MdiTab from "~icons/mdi/tab";
@@ -154,10 +154,84 @@ function DetailRow({ row, layout, nowMs }: { row: Row; layout: Layout; nowMs: nu
   );
 }
 
+/** Pointer travel before a press on the tab row counts as a drag, not a click. */
+const DRAG_THRESHOLD = 4;
+
+/**
+ * The tab row scrolls sideways with its scrollbar hidden, so a mouse gets two
+ * ways in: drag the row, or turn the wheel. A drag never also selects a tab.
+ */
+function useDragScroll() {
+  const ref = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ x: number; left: number; moved: boolean; id: number } | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  useEffect(() => {
+    const row = ref.current;
+    if (!row) return;
+    // Native and non-passive: a vertical wheel over the row must scroll it
+    // sideways instead of scrolling the panel underneath.
+    const onWheel = (event: WheelEvent) => {
+      if (row.scrollWidth <= row.clientWidth) return;
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+      row.scrollLeft += event.deltaY;
+      event.preventDefault();
+    };
+    row.addEventListener("wheel", onWheel, { passive: false });
+    return () => row.removeEventListener("wheel", onWheel);
+  }, []);
+
+  function onPointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || event.pointerType !== "mouse") return;
+    drag.current = { x: event.clientX, left: event.currentTarget.scrollLeft, moved: false, id: event.pointerId };
+  }
+
+  function onPointerMove(event: PointerEvent<HTMLDivElement>) {
+    const state = drag.current;
+    if (!state) return;
+    const dx = event.clientX - state.x;
+    if (!state.moved && Math.abs(dx) > DRAG_THRESHOLD) {
+      state.moved = true;
+      event.currentTarget.setPointerCapture(state.id);
+      setDragging(true);
+    }
+    if (state.moved) event.currentTarget.scrollLeft = state.left - dx;
+  }
+
+  function onPointerEnd(event: PointerEvent<HTMLDivElement>) {
+    const state = drag.current;
+    if (state?.moved && event.currentTarget.hasPointerCapture(state.id)) {
+      event.currentTarget.releasePointerCapture(state.id);
+    }
+    setDragging(false);
+    // Keep `moved` until the click that ends this press has been swallowed.
+    if (!state?.moved) drag.current = null;
+  }
+
+  function onClickCapture(event: MouseEvent<HTMLDivElement>) {
+    if (drag.current?.moved) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    drag.current = null;
+  }
+
+  return {
+    ref,
+    "data-dragging": dragging || undefined,
+    onClickCapture,
+    onPointerCancel: onPointerEnd,
+    onPointerDown,
+    onPointerMove,
+    onPointerUp: onPointerEnd,
+  };
+}
+
 /** A compact provider switcher for the macOS menu bar popover. */
 export function MacDashboard({ cards, layout, nowMs, payload, onOpenCustomize }: MacDashboardProps) {
   const { language, t } = useI18n();
   const [selectedId, setSelectedId] = useState("");
+  const tabRow = useDragScroll();
   const selected = cards.find((card) => card.id === selectedId)
     ?? cards.find((card) => card.id === payload.primary)
     ?? cards.find((card) => primaryMetric(card))
@@ -171,7 +245,7 @@ export function MacDashboard({ cards, layout, nowMs, payload, onOpenCustomize }:
     <div className="mac-dashboard">
       {cards.length ? (
         <>
-          <div className="mac-provider-tabs" role="group" aria-label={t("Providers")}>
+          <div className="mac-provider-tabs" role="group" aria-label={t("Providers")} {...tabRow}>
             {cards.map((card) => {
               const active = selected?.id === card.id;
               return (

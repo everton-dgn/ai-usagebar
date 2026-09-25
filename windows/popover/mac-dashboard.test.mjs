@@ -134,6 +134,21 @@ try {
       React.createElement(Settings, { ...settingsProps, layout: { ...emptyLayout(), colorThresholds: { yellow: 60, red: 80 } }, tab: 'preferences' }))));
   assert.match(colors, /min="1" max="79"[^>]*aria-label="Amarelo a partir de"/);
   assert.match(colors, /min="61" max="100"[^>]*aria-label="Vermelho a partir de"/);
+  // The tabs view's card carries the account star: outline to switch, filled on the account in use.
+  const accountsPayload = {
+    ...payload,
+    entries: [{ id: 'anthropic@work', shortName: 'cld', status: 'ready' }, { id: 'anthropic@home', shortName: 'cld', status: 'ready' }],
+    primary: 'anthropic@work',
+    accounts: { anthropic: { active: 'home', labels: ['work', 'home'], switching: false, error: '', target: '' } },
+  };
+  const tabsAccount = (selected) => renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
+    React.createElement(MacDashboard, {
+      cards: [{ ...card, id: 'anthropic@work', title: 'Claude' }, { ...card, id: 'anthropic@home', title: 'Claude · 2' }],
+      layout: emptyLayout(), nowMs, payload: accountsPayload, focusId: selected,
+      onOpenCustomize() {}, onSwitchAccount() {},
+    })));
+  assert.match(tabsAccount('anthropic@work'), /aria-label="Use Claude \(switches Claude Code and the VS Code extension\)"/);
+  assert.match(tabsAccount('anthropic@home'), /aria-label="Claude · 2 is the active account"/);
   console.log('macOS dashboard reset display: ok');
 } finally {
   await server.close();

@@ -397,6 +397,7 @@ export default function App() {
                   payload={payload}
                   focusId={focusId}
                   onOpenCustomize={() => go("customize")}
+                  onSwitchAccount={(vendor, label) => sendCommand("switch-account", { vendor, label })}
                 />
               </>
             ) : (

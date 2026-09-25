@@ -342,6 +342,17 @@ body:has(.mac-panel) {
   height: 16px;
 }
 
+.mac-provider-account .header-action {
+  width: 29px;
+  height: 29px;
+  border-radius: 9px;
+}
+
+.mac-provider-account .header-action svg {
+  width: 17px;
+  height: 17px;
+}
+
 .mac-icon-button:hover,
 .mac-provider-refresh:hover,
 .mac-provider-tab:hover {

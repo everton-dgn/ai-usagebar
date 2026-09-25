@@ -6,9 +6,10 @@ import MdiRefresh from "~icons/mdi/refresh";
 import MdiTab from "~icons/mdi/tab";
 import MdiViewAgendaOutline from "~icons/mdi/view-agenda-outline";
 import { ProviderIcon } from "@/components/ProviderIcon";
+import { AccountControl } from "@/components/ProviderSection";
 import { useI18n } from "@/lib/i18n";
 import type { Card, Layout, MetricRow, PanelView, Payload, Row } from "@/lib/types";
-import { nextUpdateLabel, providerIconId, resetText, sendCommand, usageColor, usageGoal } from "../model.js";
+import { accountSwitchFor, nextUpdateLabel, providerIconId, resetText, sendCommand, usageColor, usageGoal } from "../model.js";
 
 interface MacDashboardProps {
   cards: Card[];
@@ -17,6 +18,7 @@ interface MacDashboardProps {
   payload: Payload;
   /** A provider to show first, when its menu-bar item opened the popover. */
   focusId?: string;
+  onSwitchAccount?: (vendor: string, label: string) => void;
   onOpenCustomize: () => void;
 }
 
@@ -258,7 +260,7 @@ function useDragScroll() {
 }
 
 /** A compact provider switcher for the macOS menu bar popover. */
-export function MacDashboard({ cards, layout, nowMs, payload, focusId, onOpenCustomize }: MacDashboardProps) {
+export function MacDashboard({ cards, layout, nowMs, payload, focusId, onOpenCustomize, onSwitchAccount }: MacDashboardProps) {
   const { language, t } = useI18n();
   const [selectedId, setSelectedId] = useState(focusId || "");
   useEffect(() => {
@@ -270,6 +272,7 @@ export function MacDashboard({ cards, layout, nowMs, payload, focusId, onOpenCus
     ?? cards.find((card) => primaryMetric(card))
     ?? cards[0];
   const selectedEntry = payload.entries.find((entry) => entry.id === selected?.id);
+  const selectedAccount = selected ? accountSwitchFor(selected.id, payload.accounts) : null;
   useEffect(() => {
     const row = tabRow.ref.current;
     const tab = row?.querySelector<HTMLElement>('[data-active="true"]');
@@ -317,6 +320,15 @@ export function MacDashboard({ cards, layout, nowMs, payload, focusId, onOpenCus
                   <strong>{selected.title}</strong>
                   <small>{(layout.showPlan !== false && selected.plan) || (selectedEntry?.status === "ready" ? t("Current usage") : t("Usage unavailable"))}{selected.stale ? ` · ${t("Cached")}` : ""}</small>
                 </span>
+                {selectedAccount ? (
+                  <span className="mac-provider-account">
+                    <AccountControl
+                      account={selectedAccount}
+                      title={selected.title}
+                      onSwitch={onSwitchAccount ? () => onSwitchAccount(selectedAccount.vendor, selectedAccount.label) : undefined}
+                    />
+                  </span>
+                ) : null}
                 <button type="button" className="mac-provider-refresh" title={`${t("Refresh")} ${selected.title}`} aria-label={`${t("Refresh")} ${selected.title}`} onClick={() => sendCommand("refresh-entry", { id: selected.id })}>
                   <MdiRefresh aria-hidden />
                 </button>

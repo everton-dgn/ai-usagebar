@@ -13,6 +13,7 @@ import MdiPower from "~icons/mdi/power";
 import MdiRefresh from "~icons/mdi/refresh";
 import MdiUpdate from "~icons/mdi/update";
 import MdiRestore from "~icons/mdi/restore";
+import MdiResize from "~icons/mdi/resize";
 import MdiTune from "~icons/mdi/tune-variant";
 import {
   DropdownMenu,
@@ -131,6 +132,9 @@ export function Footer({
           <MenuItem icon={<MdiRefresh />} label={t("Refresh")} onSelect={() => sendCommand("refresh")} />
           <MenuItem icon={<MdiMagnifyScan />} label={t("Detect Providers")} onSelect={() => sendCommand("detect")} />
           <MenuItem icon={<MdiConsole />} label={t("Open TUI")} onSelect={() => sendCommand("open-tui")} />
+          {payload.os === "macos" ? (
+            <MenuItem icon={<MdiResize />} label={t("Reset Panel Size")} onSelect={() => sendCommand("reset-panel-size")} />
+          ) : null}
           <DropdownMenuSeparator />
           <MenuItem
             checked={payload.startupEnabled}

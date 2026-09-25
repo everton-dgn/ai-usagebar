@@ -10,6 +10,11 @@ pub const WINDOW_HEIGHT: f64 = 420.0;
 /// Sized so the footer Options menu (nine rows, opens upward) fits without
 /// Radix scrolling the list on short screens like Customize / provider detail.
 pub const MIN_POPOVER_HEIGHT: f64 = 360.0;
+/// Narrowest the macOS popover can be dragged to.
+pub const MIN_POPOVER_WIDTH: f64 = 320.0;
+/// Shortest the macOS popover can be dragged to. Content taller than the
+/// dragged height scrolls instead of growing the panel.
+pub const MIN_USER_HEIGHT: f64 = 200.0;
 /// Breathing room kept between the popover and the monitor's edges.
 pub const WORK_AREA_MARGIN: f64 = 16.0;
 /// Gap between the bottom of the menu bar and the top of the popover.
@@ -38,6 +43,58 @@ pub const CORNER_RADIUS: f64 = 13.0;
 pub fn clamp_popover_height(requested: f64, work_area_height: f64) -> f64 {
     let max = (work_area_height - WORK_AREA_MARGIN).max(MIN_POPOVER_HEIGHT);
     requested.round().clamp(MIN_POPOVER_HEIGHT, max)
+}
+
+/// The popover height for the content's `requested` height: automatic as
+/// before, but never taller than the height the user dragged the panel to.
+/// Below the content's height the list scrolls.
+pub fn fit_popover_height(requested: f64, work_area_height: f64, cap: Option<f64>) -> f64 {
+    let auto = clamp_popover_height(requested, work_area_height);
+    match cap {
+        Some(cap) => auto.min(cap.round().max(MIN_USER_HEIGHT)),
+        None => auto,
+    }
+}
+
+/// The size the user dragged the macOS popover to, remembered across runs.
+/// `max_height` caps the content-driven height; `None` keeps it automatic.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PanelSize {
+    pub width: f64,
+    pub max_height: Option<f64>,
+}
+
+impl Default for PanelSize {
+    fn default() -> Self {
+        Self {
+            width: WINDOW_WIDTH,
+            max_height: None,
+        }
+    }
+}
+
+impl PanelSize {
+    /// A size from a drag, rounded and held to the minimums.
+    pub fn dragged(width: f64, height: f64) -> Self {
+        Self {
+            width: width.round().max(MIN_POPOVER_WIDTH),
+            max_height: Some(height.round().max(MIN_USER_HEIGHT)),
+        }
+    }
+
+    /// The saved size, or `None` for anything malformed: a bad file falls
+    /// back to the default size rather than to a broken panel.
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        let raw: Self = serde_json::from_slice(bytes).ok()?;
+        let valid = |v: f64| v.is_finite() && v > 0.0;
+        if !valid(raw.width) || raw.max_height.is_some_and(|h| !valid(h)) {
+            return None;
+        }
+        Some(Self {
+            width: raw.width.round().max(MIN_POPOVER_WIDTH),
+            max_height: raw.max_height.map(|h| h.round().max(MIN_USER_HEIGHT)),
+        })
+    }
 }
 
 /// Axis-aligned rectangle in Cocoa screen space: origin at the bottom-left of
@@ -104,10 +161,77 @@ pub fn cocoa_popover_frame(p: PopoverPlacement) -> CocoaRect {
 #[cfg(test)]
 mod tests {
     use super::{
-        CocoaRect, MENU_BAR_MIN_HEIGHT, MIN_POPOVER_HEIGHT, POPOVER_BOTTOM_GAP,
-        POPOVER_SIDE_MARGIN, POPOVER_TOP_GAP, PopoverPlacement, WORK_AREA_MARGIN,
-        clamp_popover_height, cocoa_popover_frame, menu_bar_bottom_y,
+        CocoaRect, MENU_BAR_MIN_HEIGHT, MIN_POPOVER_HEIGHT, MIN_POPOVER_WIDTH, MIN_USER_HEIGHT,
+        POPOVER_BOTTOM_GAP, POPOVER_SIDE_MARGIN, POPOVER_TOP_GAP, PanelSize, PopoverPlacement,
+        WINDOW_WIDTH, WORK_AREA_MARGIN, clamp_popover_height, cocoa_popover_frame,
+        fit_popover_height, menu_bar_bottom_y,
     };
+
+    #[test]
+    fn fit_without_a_dragged_height_is_the_automatic_height() {
+        assert_eq!(fit_popover_height(512.4, 1080.0, None), 512.0);
+        assert_eq!(fit_popover_height(40.0, 1080.0, None), MIN_POPOVER_HEIGHT);
+    }
+
+    #[test]
+    fn a_dragged_height_caps_taller_content_so_the_list_scrolls() {
+        assert_eq!(fit_popover_height(700.0, 1080.0, Some(300.0)), 300.0);
+        // Below the automatic floor too: the user asked for a shorter panel.
+        assert_eq!(fit_popover_height(400.0, 1080.0, Some(250.0)), 250.0);
+    }
+
+    #[test]
+    fn a_dragged_height_never_grows_the_panel_past_its_content() {
+        assert_eq!(fit_popover_height(420.0, 1080.0, Some(900.0)), 420.0);
+    }
+
+    #[test]
+    fn a_dragged_height_keeps_the_minimum() {
+        assert_eq!(
+            fit_popover_height(700.0, 1080.0, Some(50.0)),
+            MIN_USER_HEIGHT
+        );
+    }
+
+    #[test]
+    fn a_drag_is_rounded_and_held_to_the_minimums() {
+        assert_eq!(
+            PanelSize::dragged(512.6, 333.3),
+            PanelSize {
+                width: 513.0,
+                max_height: Some(333.0)
+            }
+        );
+        let tiny = PanelSize::dragged(10.0, 10.0);
+        assert_eq!(tiny.width, MIN_POPOVER_WIDTH);
+        assert_eq!(tiny.max_height, Some(MIN_USER_HEIGHT));
+    }
+
+    #[test]
+    fn a_saved_size_round_trips() {
+        let size = PanelSize::dragged(560.0, 480.0);
+        let bytes = serde_json::to_vec(&size).unwrap();
+        assert_eq!(PanelSize::parse(&bytes), Some(size));
+        let auto = serde_json::to_vec(&PanelSize::default()).unwrap();
+        assert_eq!(
+            PanelSize::parse(&auto),
+            Some(PanelSize {
+                width: WINDOW_WIDTH,
+                max_height: None
+            })
+        );
+    }
+
+    #[test]
+    fn a_malformed_saved_size_is_ignored() {
+        assert_eq!(PanelSize::parse(b"not json"), None);
+        assert_eq!(PanelSize::parse(br#"{"width":-5,"max_height":null}"#), None);
+        assert_eq!(PanelSize::parse(br#"{"width":500,"max_height":0}"#), None);
+        assert_eq!(
+            PanelSize::parse(br#"{"width":100,"max_height":null}"#).map(|s| s.width),
+            Some(MIN_POPOVER_WIDTH)
+        );
+    }
 
     fn place(visible: CocoaRect, icon_x: f64, h: f64) -> CocoaRect {
         cocoa_popover_frame(PopoverPlacement {

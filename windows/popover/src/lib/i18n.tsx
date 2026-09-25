@@ -112,6 +112,7 @@ const portuguese: Record<string, string> = {
   "Remind me later": "Lembrar mais tarde",
   "Reorder": "Reordenar",
   "Reset All Customization": "Redefinir toda a personalização",
+  "Reset Panel Size": "Redefinir tamanho do painel",
   "Reset Times": "Horários de redefinição",
   "Resets": "Redefinições",
   "Session": "Sessão",

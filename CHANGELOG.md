@@ -9,6 +9,14 @@ Each release is also published at
 
 ## [Unreleased]
 
+### Added
+
+- **Resize the macOS tray popover.** Drag any edge to make the panel wider or
+  shorter; the size is remembered across runs. The height still follows the
+  content, but never grows past the height you chose, and the list scrolls
+  when the content is taller. **Options → Reset Panel Size** restores the
+  default width and the automatic height.
+
 ## [1.23.0] — 2026-09-24
 
 ### Fixed

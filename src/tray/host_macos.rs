@@ -128,6 +128,8 @@ struct TrayState {
     panel_size: PanelSize,
     panel_size_dirty: bool,
     resize_settle_armed: bool,
+    /// Set from the panel's pin: blurs and outside clicks leave it open.
+    pinned: bool,
     /// Keeps the global mouse monitor alive; dropping it would end it.
     _outside_click_monitor: Option<Retained<AnyObject>>,
     /// Logical height last given to the window by us, so a drag that leaves
@@ -231,6 +233,7 @@ fn run_loop() -> Result<(), String> {
         panel_size,
         panel_size_dirty: false,
         resize_settle_armed: false,
+        pinned: false,
         _outside_click_monitor: install_outside_click_monitor(proxy.clone()),
         applied_height: WINDOW_HEIGHT,
         theme,
@@ -265,7 +268,7 @@ fn run_loop() -> Result<(), String> {
             Event::UserEvent(UserEvent::Hotkey) => toggle_popover_from_keyboard(&mut state),
             Event::UserEvent(UserEvent::ResizeSettle) => settle_user_resize(&mut state),
             Event::UserEvent(UserEvent::OutsideClick) => {
-                if state.popover_open && !blur_guarded(&state) {
+                if state.popover_open && !state.pinned && !blur_guarded(&state) {
                     hide_popover(&mut state);
                 }
             }
@@ -280,6 +283,7 @@ fn run_loop() -> Result<(), String> {
                 ..
             } => {
                 if state.popover_open
+                    && !state.pinned
                     && close_on_blur(blur_guarded(&state), press_on_status_item(&state.tray))
                 {
                     hide_popover(&mut state);
@@ -891,6 +895,7 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
         "switch-account" => request_account_switch(state, &value),
         "resize" => handle_resize(state, &value),
         "reset-panel-size" => reset_panel_size(state),
+        "set-pinned" => state.pinned = value.get("value").and_then(Value::as_bool) == Some(true),
         "refresh-entry" => {
             if let Some(id) = value.get("id").and_then(Value::as_str) {
                 let _ = state.worker.send(WorkerCmd::RefreshEntry(id.to_owned()));

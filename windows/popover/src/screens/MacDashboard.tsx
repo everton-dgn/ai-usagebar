@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent, type PointerEvent } from "react";
 import MdiCogOutline from "~icons/mdi/cog-outline";
+import MdiPin from "~icons/mdi/pin";
+import MdiPinOutline from "~icons/mdi/pin-outline";
 import MdiRefresh from "~icons/mdi/refresh";
 import MdiTab from "~icons/mdi/tab";
 import MdiViewAgendaOutline from "~icons/mdi/view-agenda-outline";
@@ -18,12 +20,14 @@ interface MacDashboardProps {
 
 interface MacPanelHeaderProps {
   view: PanelView;
+  pinned: boolean;
   onView: (view: PanelView) => void;
+  onPin: (pinned: boolean) => void;
   onOpenSettings: () => void;
 }
 
 /** The macOS dashboard header, shared by both views: title, view switch, refresh, settings. */
-export function MacPanelHeader({ view, onView, onOpenSettings }: MacPanelHeaderProps) {
+export function MacPanelHeader({ view, pinned, onView, onPin, onOpenSettings }: MacPanelHeaderProps) {
   const { t } = useI18n();
   const views: [PanelView, string, typeof MdiTab][] = [
     ["list", t("List"), MdiViewAgendaOutline],
@@ -52,6 +56,17 @@ export function MacPanelHeader({ view, onView, onOpenSettings }: MacPanelHeaderP
             </button>
           ))}
         </div>
+        <button
+          type="button"
+          className="mac-icon-button mac-pin-button"
+          aria-label={t(pinned ? "Unpin panel" : "Pin panel")}
+          aria-pressed={pinned}
+          data-active={pinned}
+          title={t(pinned ? "Unpin panel" : "Pin panel")}
+          onClick={() => onPin(!pinned)}
+        >
+          {pinned ? <MdiPin aria-hidden /> : <MdiPinOutline aria-hidden />}
+        </button>
         <button type="button" className="mac-icon-button" aria-label={t("Refresh")} title={t("Refresh")} onClick={() => sendCommand("refresh")}>
           <MdiRefresh aria-hidden />
         </button>

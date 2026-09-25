@@ -11,6 +11,9 @@ Each release is also published at
 
 ### Added
 
+- **Pin the macOS popover open.** The pin in the popover header keeps it
+  open when focus moves or a click lands outside it; the menu bar icon and
+  Escape still close it. The choice is remembered.
 - **Resize the macOS tray popover.** Drag any edge to make the panel wider or
   shorter; the size is remembered across runs and the panel re-centres under
   the menu bar icon when you let go. The height still follows the

@@ -273,6 +273,16 @@ export function Settings({
             />
           </SettingRow>
           <SettingRow
+            hint={t("Percentages in the menu bar take the bar colors. Each provider can override it below.")}
+            label={t("Color the Values")}
+          >
+            <Switch
+              checked={payload.menuBarColorValue}
+              aria-label={t("Color the Values")}
+              onCheckedChange={(value) => sendCommand("set-menu-bar-color-value", { value: value === true })}
+            />
+          </SettingRow>
+          <SettingRow
             hint={t("With several accounts of one provider, only the one in use shows in the menu bar.")}
             label={t("Only the Account in Use")}
           >
@@ -293,6 +303,7 @@ export function Settings({
                 name={layout.names[entry.id] || entry.displayName || entry.shortName || entry.id}
                 item={payload.menuBarItems[entry.id]}
                 hideValue={payload.menuBarHideValue}
+                colorValue={payload.menuBarColorValue}
               />
             ))}
         </Section>
@@ -513,14 +524,16 @@ function MenuBarProviderRow({
   name,
   item,
   hideValue,
+  colorValue,
 }: {
   id: string;
   name: string;
   item: MenuBarItem | undefined;
   hideValue: boolean;
+  colorValue: boolean;
 }) {
   const { t } = useI18n();
-  const set = (key: "window" | "hide_value" | "hidden", value: string | boolean) =>
+  const set = (key: "window" | "hide_value" | "hidden" | "color_value", value: string | boolean) =>
     sendCommand("set-menu-bar-item", { id, key, value });
   const shown = !item?.hidden;
   return (
@@ -551,6 +564,14 @@ function MenuBarProviderRow({
               checked={!(item?.hideValue ?? hideValue)}
               aria-label={`${t("Value")}: ${name}`}
               onCheckedChange={(value) => set("hide_value", value !== true)}
+            />
+          </label>
+          <label className="flex items-center gap-[6px]">
+            <span>{t("Color")}</span>
+            <Switch
+              checked={item?.colorValue ?? colorValue}
+              aria-label={`${t("Color")}: ${name}`}
+              onCheckedChange={(value) => set("color_value", value === true)}
             />
           </label>
         </div>

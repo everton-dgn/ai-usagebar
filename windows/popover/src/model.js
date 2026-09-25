@@ -44,6 +44,7 @@ export function emptyPayload(hostError) {
     menuBarChart: false,
     menuBarItems: {},
     menuBarActiveAccountOnly: false,
+    menuBarColorValue: true,
     notificationsEnabled: true,
     notificationsThreshold: 97,
     os: "",
@@ -95,6 +96,7 @@ export function normalizeMenuBarItems(value) {
       window: MENU_BAR_WINDOWS.includes(raw.window) ? raw.window : "auto",
       hideValue: typeof raw.hide_value === "boolean" ? raw.hide_value : null,
       hidden: raw.hidden === true,
+      colorValue: typeof raw.color_value === "boolean" ? raw.color_value : null,
     };
   }
   return out;
@@ -121,6 +123,7 @@ function normalizePayload(parsed) {
     menuBarChart: parsed.menu_bar_chart === true,
     menuBarItems: normalizeMenuBarItems(parsed.menu_bar_items),
     menuBarActiveAccountOnly: parsed.menu_bar_active_account_only === true,
+    menuBarColorValue: parsed.menu_bar_color_value !== false,
     notificationsEnabled: parsed.notifications_enabled !== false,
     notificationsThreshold: Number.isInteger(parsed.notifications_threshold) && parsed.notifications_threshold >= 1 && parsed.notifications_threshold <= 100 ? parsed.notifications_threshold : 97,
     os: normalizeOs(parsed.os),
@@ -1012,7 +1015,8 @@ export function stripCommand(layout, cards) {
     if (custom[id]) names[id] = custom[id];
   }
   const language = layout && layout.language === "pt-BR" ? "pt-BR" : "en";
-  return { style: "bars", stars, order, names, language };
+  const thresholds = normalizeColorThresholds(layout && layout.colorThresholds);
+  return { style: "bars", stars, order, names, language, thresholds };
 }
 
 function cleanIdList(list) {

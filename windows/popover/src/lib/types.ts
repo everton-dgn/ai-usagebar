@@ -243,6 +243,8 @@ export interface Payload {
   menuBarItems: Record<string, MenuBarItem>;
   /** With several accounts of one provider, the menu bar shows only the one in use. */
   menuBarActiveAccountOnly: boolean;
+  /** Color menu-bar percentages like the bars; providers may override it. */
+  menuBarColorValue: boolean;
   notificationsEnabled: boolean;
   notificationsThreshold: number;
   /** Host OS: macos, windows, or linux. */
@@ -269,4 +271,5 @@ export interface MenuBarItem {
   window: "auto" | "session" | "weekly" | "monthly";
   hideValue: boolean | null;
   hidden: boolean;
+  colorValue: boolean | null;
 }

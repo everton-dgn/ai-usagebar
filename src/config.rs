@@ -128,6 +128,9 @@ pub struct TrayConfig {
     /// With several accounts of one provider, the menu bar shows only the one
     /// in use.
     pub menu_bar_active_account_only: bool,
+    /// Color menu-bar percentages green, yellow or red like the popover's
+    /// bars; defaults to true.
+    pub menu_bar_color_value: Option<bool>,
 }
 
 /// One provider's menu-bar settings. Unset fields follow the `[tray]` ones.
@@ -140,6 +143,8 @@ pub struct MenuBarItemConfig {
     pub hide_value: Option<bool>,
     /// Keep this provider out of the menu bar.
     pub hidden: bool,
+    /// Color this provider's percentage, overriding `menu_bar_color_value`.
+    pub color_value: Option<bool>,
 }
 
 /// Poll intervals the tray offers, in minutes. The provider cache TTL is
@@ -746,7 +751,7 @@ pub fn set_menu_bar_item_value(
     key: &str,
     value: Option<toml_edit::Value>,
 ) -> Result<()> {
-    if !matches!(key, "window" | "hide_value" | "hidden") || id.trim().is_empty() {
+    if !matches!(key, "window" | "hide_value" | "hidden" | "color_value") || id.trim().is_empty() {
         return Err(AppError::Other(format!(
             "invalid menu bar item setting: {key}"
         )));

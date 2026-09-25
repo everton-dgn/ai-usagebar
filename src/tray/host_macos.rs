@@ -49,7 +49,7 @@ use super::payload::{
 use super::status_items::{self, ItemAction, MenuLine, ProviderItems};
 use super::strip::{
     BARS_PIXEL_SIDE, BARS_POINT_SIDE, Stars, StripStyle, bar_fill, bars_layout, bars_rgba,
-    content_from_payload, parse_strip_ipc, parse_strip_names,
+    content_from_payload, parse_strip_ipc, parse_strip_names, parse_strip_thresholds,
 };
 use super::update_flow;
 use super::{startup, tui_launch};
@@ -161,6 +161,9 @@ struct TrayState {
     menu_bar_chart: bool,
     menu_bar_items: std::collections::BTreeMap<String, MenuBarItemConfig>,
     menu_bar_active_account_only: bool,
+    menu_bar_color_value: bool,
+    /// The popover's bar-color thresholds, (yellow, red) in percent used.
+    color_thresholds: (f64, f64),
     /// The providers' own menu-bar items, left of the chart glyph.
     provider_items: ProviderItems,
     /// The provider whose item opened the popover, if one did.
@@ -280,6 +283,8 @@ fn run_loop() -> Result<(), String> {
         menu_bar_chart,
         menu_bar_items: config.tray.menu_bar_items.clone(),
         menu_bar_active_account_only: config.tray.menu_bar_active_account_only,
+        menu_bar_color_value: config.tray.menu_bar_color_value.unwrap_or(true),
+        color_thresholds: menu_bar::DEFAULT_THRESHOLDS,
         provider_items: {
             let proxy = proxy.clone();
             let mtm = MainThreadMarker::new().ok_or("the tray runs on the main thread")?;
@@ -645,6 +650,8 @@ fn apply_strip_icon(state: &mut TrayState) {
         names: &state.strip_names,
         items: &state.menu_bar_items,
         active_account_only: state.menu_bar_active_account_only,
+        color_value: state.menu_bar_color_value,
+        thresholds: state.color_thresholds,
     };
     let tooltip = menu_bar::tooltip(&state.payload, &view);
     let chips = if state.menu_bar_chart {
@@ -805,6 +812,7 @@ fn popover_payload(state: &TrayState) -> String {
     payload["menu_bar_chart"] = json!(state.menu_bar_chart);
     payload["menu_bar_items"] = json!(state.menu_bar_items);
     payload["menu_bar_active_account_only"] = json!(state.menu_bar_active_account_only);
+    payload["menu_bar_color_value"] = json!(state.menu_bar_color_value);
     payload["notifications_enabled"] = json!(state.notifications_enabled);
     payload["notifications_threshold"] = json!(state.notifications_threshold);
     host_payload(&payload)
@@ -916,6 +924,7 @@ const MENU_TOGGLE_VALUE: isize = 10;
 const MENU_HIDE: isize = 11;
 const MENU_ACTIVE_ACCOUNT_ONLY: isize = 12;
 const MENU_OPEN: isize = 13;
+const MENU_TOGGLE_COLOR: isize = 14;
 
 fn provider_menu(state: &mut TrayState, id: &str) -> Vec<MenuLine> {
     state.menu_provider = Some(id.to_owned());
@@ -972,6 +981,11 @@ fn provider_menu(state: &mut TrayState, id: &str) -> Vec<MenuLine> {
         checked: !hide_value,
     });
     lines.push(MenuLine::Pick {
+        title: label("Color the value", "Colorir o valor"),
+        tag: MENU_TOGGLE_COLOR,
+        checked: item.color_value.unwrap_or(state.menu_bar_color_value),
+    });
+    lines.push(MenuLine::Pick {
         title: label("Only the account in use", "Só a conta em uso"),
         tag: MENU_ACTIVE_ACCOUNT_ONLY,
         checked: state.menu_bar_active_account_only,
@@ -1017,6 +1031,13 @@ fn apply_provider_menu_pick(state: &mut TrayState, tag: isize) {
             .and_then(|item| item.hide_value)
             .unwrap_or(state.menu_bar_hide_value);
         set_menu_bar_item(state, &id, "hide_value", Some((!hidden).into()));
+    } else if tag == MENU_TOGGLE_COLOR {
+        let colored = state
+            .menu_bar_items
+            .get(&id)
+            .and_then(|item| item.color_value)
+            .unwrap_or(state.menu_bar_color_value);
+        set_menu_bar_item(state, &id, "color_value", Some((!colored).into()));
     } else if tag == MENU_HIDE {
         set_menu_bar_item(state, &id, "hidden", Some(true.into()));
     } else {
@@ -1038,13 +1059,14 @@ fn set_menu_bar_item(state: &mut TrayState, id: &str, key: &str, value: Option<t
                 .and_then(toml_edit::Value::as_bool)
                 .unwrap_or(false)
         }
+        "color_value" => item.color_value = value.as_ref().and_then(toml_edit::Value::as_bool),
         _ => return,
     }
     if *item == MenuBarItemConfig::default() {
         state.menu_bar_items.remove(id);
     }
-    // `false` and "same as the menu bar" are the defaults, so they clear the key.
-    let value = value.filter(|v| v.as_bool() != Some(false));
+    // `hidden = false` is the default; `hide_value = false` is an override.
+    let value = value.filter(|v| key != "hidden" || v.as_bool() != Some(false));
     if let Some(path) = config_path() {
         let _ = crate::config::set_menu_bar_item_value(&path, id, key, value);
     }
@@ -1260,7 +1282,7 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
         "set-menu-bar-item" => {
             let id = value.get("id").and_then(Value::as_str).unwrap_or("").trim();
             let key = value.get("key").and_then(Value::as_str).unwrap_or("");
-            if id.is_empty() || !matches!(key, "window" | "hide_value" | "hidden") {
+            if id.is_empty() || !matches!(key, "window" | "hide_value" | "hidden" | "color_value") {
                 return;
             }
             let setting = match value.get("value") {
@@ -1273,6 +1295,14 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
             set_menu_bar_item(state, id, key, setting);
             apply_strip_icon(state);
             push_to_webview(state);
+        }
+        "set-menu-bar-color-value" => {
+            if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
+                state.menu_bar_color_value = enabled;
+                persist_menu_bar_value("menu_bar_color_value", enabled.into());
+                apply_strip_icon(state);
+                push_to_webview(state);
+            }
         }
         "set-menu-bar-active-account-only" => {
             if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
@@ -1289,6 +1319,9 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
             state.strip_order = order;
             state.strip_order_known = true;
             state.strip_names = parse_strip_names(&value);
+            if let Some(thresholds) = parse_strip_thresholds(&value) {
+                state.color_thresholds = thresholds;
+            }
             if let Some(language) = value.get("language").and_then(Value::as_str) {
                 state.language = language.to_owned();
             }

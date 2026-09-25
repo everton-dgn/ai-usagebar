@@ -11,8 +11,8 @@ use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel
 use objc2_app_kit::{
     NSApplication, NSAttributedStringAttachmentConveniences, NSColor, NSCompositingOperation,
     NSControlStateValueOn, NSEventMask, NSEventModifierFlags, NSEventType, NSFont,
-    NSFontAttributeName, NSImage, NSKernAttributeName, NSMenu, NSMenuItem,
-    NSRectFillUsingOperation, NSStatusBar, NSStatusItem, NSTextAttachment,
+    NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSKernAttributeName, NSMenu,
+    NSMenuItem, NSRectFillUsingOperation, NSStatusBar, NSStatusItem, NSTextAttachment,
     NSVariableStatusItemLength,
 };
 use objc2_foundation::{
@@ -20,7 +20,7 @@ use objc2_foundation::{
     NSNumber, NSObject, NSPoint, NSRect, NSSize, NSString,
 };
 
-use super::menu_bar::Chip;
+use super::menu_bar::{Chip, Level};
 
 /// Side of a provider mark in the menu bar, in points.
 const MARK_SIDE: f64 = 15.0;
@@ -304,14 +304,49 @@ fn chip_title(chip: &Chip, rightmost: bool) -> Retained<NSMutableAttributedStrin
                 &attachment,
             ));
             if let Some(value) = &chip.value {
-                title.appendAttributedString(&run(&format!(" {value}")));
+                title.appendAttributedString(&run(" "));
+                title.appendAttributedString(&value_run(value, chip.level, &font));
             }
         }
-        None => title.appendAttributedString(&run(&chip.text())),
+        None => {
+            title.appendAttributedString(&run(&chip.name));
+            if let Some(value) = &chip.value {
+                title.appendAttributedString(&run(" "));
+                title.appendAttributedString(&value_run(value, chip.level, &font));
+            }
+        }
     }
     let trailing = PADDING_KERN + if rightmost { CHART_GAP_KERN } else { 0.0 };
     title.appendAttributedString(&padding(trailing));
     title
+}
+
+fn value_run(value: &str, level: Option<Level>, font: &NSFont) -> Retained<NSAttributedString> {
+    let font_object: &AnyObject = font.as_ref();
+    // SAFETY: NSFontAttributeName is an immutable AppKit constant.
+    let font_key = unsafe { NSFontAttributeName };
+    let color = level.map(|level| match level {
+        Level::Green => NSColor::systemGreenColor(),
+        Level::Yellow => NSColor::systemYellowColor(),
+        Level::Red => NSColor::systemRedColor(),
+    });
+    let attributes = match &color {
+        Some(color) => {
+            // SAFETY: NSForegroundColorAttributeName is an immutable AppKit constant.
+            let color_key = unsafe { NSForegroundColorAttributeName };
+            let color_object: &AnyObject = color.as_ref();
+            NSDictionary::from_slices(&[font_key, color_key], &[font_object, color_object])
+        }
+        None => NSDictionary::from_slices(&[font_key], &[font_object]),
+    };
+    // SAFETY: the attributes map font and color keys to an NSFont and NSColor.
+    unsafe {
+        NSAttributedString::initWithString_attributes(
+            NSAttributedString::alloc(),
+            &NSString::from_str(value),
+            Some(&attributes),
+        )
+    }
 }
 
 /// A provider mark in the menu bar's text color, or `None` where AppKit
@@ -339,8 +374,13 @@ fn mark_image(svg: &str) -> Option<Retained<NSImage>> {
 
 /// A chip's tooltip line: its name, its value and whether it is cached.
 pub fn tooltip_line(chip: &Chip) -> String {
-    match &chip.value {
+    let line = match &chip.value {
         Some(value) => format!("{} · {value}", chip.name),
         None => chip.name.clone(),
+    };
+    if chip.stale {
+        format!("{line} · cached")
+    } else {
+        line
     }
 }

@@ -50,6 +50,10 @@ Each release is also published at
   holds. The chart item stays on the right and opens the popover as before.
   A provider's click waits for its tab's height before showing, so the popover
   no longer opens at the list's height and then shrinks.
+- **Menu bar percentages take the bar colors.** Each provider's value reads
+  green, yellow or red at the thresholds set in **Settings → Preferences →
+  Bar colors**. **Settings → Menu → Color the Values** turns it off, and each
+  provider or account can override it there or from its right-click menu.
 - **The macOS menu bar shows each provider's icon instead of its name.** Every
   provider with a bundled mark reads as icon and value (`[icon] 46%`), drawn in
   the menu bar's text color; with values hidden only the icon is left. The name

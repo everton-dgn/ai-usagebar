@@ -85,18 +85,34 @@ pub const PROVIDER_MARKS: &[(&str, &str)] = &[
 /// `windows/popover/src/model.js` (a test keeps the two in step).
 const MARK_ALIASES: &[(&str, &str)] = &[("supergrok", "grok"), ("opencode-go", "opencode_go")];
 
+/// How full a quota is, as the popover's bar colors read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    Green,
+    Yellow,
+    Red,
+}
+
+/// Where a bar turns yellow and red, in percent used; the popover's
+/// `DEFAULT_COLOR_THRESHOLDS`.
+pub const DEFAULT_THRESHOLDS: (f64, f64) = (70.0, 85.0);
+
 /// One provider in the menu bar: its mark when one is bundled, its name for
 /// the tooltip and for when the mark cannot be drawn, and its value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chip {
     pub id: String,
+    /// The value comes from the cache after a failed refresh.
+    pub stale: bool,
+    /// The value's color, when it is a percentage and coloring is on.
+    pub level: Option<Level>,
     pub mark: Option<&'static str>,
     pub name: String,
     pub value: Option<String>,
 }
 
 impl Chip {
-    /// The chip as plain text, for a status item that cannot draw marks.
+    #[cfg(test)]
     pub fn text(&self) -> String {
         match &self.value {
             Some(value) if !self.name.is_empty() => format!("{} {value}", self.name),
@@ -163,7 +179,22 @@ pub fn selected_id<'a>(
     window: UsageWindow,
     visible: Option<&[String]>,
 ) -> Option<&'a str> {
-    let entries = eligible_entries(payload, visible);
+    select_from(
+        payload,
+        &eligible_entries(payload, visible),
+        remembered,
+        window,
+    )
+}
+
+/// The remembered entry, else the highest usage in `window`, else the
+/// report's primary, else the first ready entry, chosen among `entries`.
+fn select_from<'a>(
+    payload: &'a Value,
+    entries: &[&'a Value],
+    remembered: &str,
+    window: UsageWindow,
+) -> Option<&'a str> {
     if entries.is_empty() {
         return None;
     }
@@ -179,7 +210,7 @@ pub fn selected_id<'a>(
             .and_then(|entry| entry.get("id").and_then(Value::as_str));
     }
     let mut best: Option<(&Value, f64)> = None;
-    for entry in &entries {
+    for entry in entries {
         let Some(percent) = highest_percent(entry, window) else {
             continue;
         };
@@ -244,6 +275,9 @@ pub struct View<'a> {
     pub items: &'a BTreeMap<String, MenuBarItemConfig>,
     /// With several accounts of one provider, only the one in use shows.
     pub active_account_only: bool,
+    pub color_value: bool,
+    /// Yellow and red thresholds in percent used.
+    pub thresholds: (f64, f64),
 }
 
 impl View<'_> {
@@ -252,6 +286,7 @@ impl View<'_> {
         self.items
             .get(id)
             .and_then(|item| item.window.as_deref())
+            .filter(|window| *window != "auto")
             .map_or(self.window, UsageWindow::parse)
     }
 
@@ -260,6 +295,13 @@ impl View<'_> {
             .get(id)
             .and_then(|item| item.hide_value)
             .map_or(self.show_value, |hide| !hide)
+    }
+
+    fn color_value_for(&self, id: &str) -> bool {
+        self.items
+            .get(id)
+            .and_then(|item| item.color_value)
+            .unwrap_or(self.color_value)
     }
 
     fn hidden(&self, id: &str) -> bool {
@@ -334,7 +376,7 @@ fn displayed_entries<'a>(payload: &'a Value, view: &View) -> Vec<&'a Value> {
             return ready;
         }
     }
-    let selected = selected_id(payload, view.remembered, view.window, view.visible);
+    let selected = select_from(payload, &entries, view.remembered, view.window);
     entries
         .into_iter()
         .filter(|entry| entry.get("id").and_then(Value::as_str) == selected)
@@ -440,9 +482,36 @@ fn chip(entry: &Value, view: &View) -> Chip {
     let name = safe_text(name, 24);
     Chip {
         id: id.to_owned(),
+        stale: entry.get("stale").and_then(Value::as_bool) == Some(true),
+        level: (show_value && view.color_value_for(id))
+            .then(|| used_percent(entry, window))
+            .flatten()
+            .map(|used| level(used, view.thresholds)),
         mark: mark_for(id),
         value: (show_value && !name.is_empty()).then(|| headline(entry, window)),
         name,
+    }
+}
+
+/// The percentage the headline shows, when it shows one.
+fn used_percent(entry: &Value, window: UsageWindow) -> Option<f64> {
+    if !is_ready(entry) {
+        return None;
+    }
+    let metric = best_metric(entry, window, true)?;
+    if metric.get("headline").and_then(Value::as_str) == Some("value") {
+        return None;
+    }
+    metric.get("percent")?.as_f64()
+}
+
+fn level(used: f64, (yellow, red): (f64, f64)) -> Level {
+    if used >= red {
+        Level::Red
+    } else if used >= yellow {
+        Level::Yellow
+    } else {
+        Level::Green
     }
 }
 
@@ -562,7 +631,93 @@ mod tests {
             names: &NO_NAMES,
             items: &NO_ITEMS,
             active_account_only: false,
+            color_value: false,
+            thresholds: DEFAULT_THRESHOLDS,
         }
+    }
+
+    #[test]
+    fn values_take_the_bar_colors_per_provider() {
+        let report = json!({"primary":"anthropic", "entries":[
+            {"id":"anthropic", "display_name":"Claude", "status":"ready", "sections":[
+                {"type":"metric", "label":"Weekly", "percent":90}
+            ]},
+            {"id":"openai", "display_name":"Codex", "status":"ready", "sections":[
+                {"type":"metric", "label":"Weekly", "percent":72}
+            ]},
+            {"id":"openrouter", "display_name":"OpenRouter", "status":"ready", "sections":[
+                {"type":"metric", "label":"Balance", "percent":10, "headline":"value", "value":"$4"}
+            ]}
+        ]});
+        let items = BTreeMap::from([(
+            "openai".to_string(),
+            MenuBarItemConfig {
+                color_value: Some(false),
+                ..Default::default()
+            },
+        )]);
+        let view = View {
+            color_value: true,
+            items: &items,
+            ..view("", true, true, UsageWindow::Auto, None)
+        };
+        let levels: Vec<Option<Level>> =
+            chips(&report, &view).into_iter().map(|c| c.level).collect();
+        assert_eq!(levels, [Some(Level::Red), None, None]);
+        let custom = View {
+            items: &NO_ITEMS,
+            thresholds: (50.0, 95.0),
+            ..view
+        };
+        let levels: Vec<Option<Level>> = chips(&report, &custom)
+            .into_iter()
+            .map(|c| c.level)
+            .collect();
+        assert_eq!(levels, [Some(Level::Yellow), Some(Level::Yellow), None]);
+    }
+
+    #[test]
+    fn a_provider_set_to_auto_follows_the_menu_bar_window() {
+        let items = BTreeMap::from([(
+            "openai".to_string(),
+            MenuBarItemConfig {
+                window: Some("auto".into()),
+                ..Default::default()
+            },
+        )]);
+        let view = View {
+            items: &items,
+            ..view("", true, true, UsageWindow::Weekly, None)
+        };
+        assert_eq!(view.window_for("openai"), UsageWindow::Weekly);
+    }
+
+    #[test]
+    fn one_provider_mode_picks_among_the_providers_left_after_filters() {
+        let report = json!({"primary":"anthropic", "entries":[
+            {"id":"anthropic", "display_name":"Claude", "status":"ready", "stale": true},
+            {"id":"openai", "display_name":"Codex", "status":"ready"}
+        ]});
+        let items = BTreeMap::from([(
+            "anthropic".to_string(),
+            MenuBarItemConfig {
+                hidden: true,
+                ..Default::default()
+            },
+        )]);
+        let hidden = View {
+            items: &items,
+            ..view("anthropic", false, false, UsageWindow::Auto, None)
+        };
+        let ids: Vec<String> = chips(&report, &hidden).into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, ["openai"]);
+        assert!(
+            chips(
+                &report,
+                &view("anthropic", false, false, UsageWindow::Auto, None)
+            )[0]
+            .stale
+        );
     }
 
     /// The plain-text menu bar with only the `[tray]` settings.

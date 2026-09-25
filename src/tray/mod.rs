@@ -39,7 +39,7 @@ pub use icon::{Severity, tray_icon_rgba};
 pub use payload::{POLL_INTERVAL, host_payload, worst_severity, wrap_report};
 pub use strip::{
     BARS_PIXEL_SIDE, StripContent, StripStyle, bars_rgba, content_from_payload, parse_strip_ipc,
-    parse_strip_names,
+    parse_strip_names, parse_strip_thresholds,
 };
 
 /// Process entry for `ai-usagebar-tray`.

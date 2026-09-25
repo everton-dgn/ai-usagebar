@@ -1295,6 +1295,7 @@ assert.equal(resolvedTheme('system'), 'light');
     order: ['anthropic'],
     names: {},
     language: 'en',
+    thresholds: { yellow: 70, red: 85 },
   });
 }
 
@@ -1330,14 +1331,17 @@ assert.equal(resolvedTheme('system'), 'light');
     '': { hidden: true },
     kimi: 'x',
   }), {
-    'openai@work': { window: 'session', hideValue: true, hidden: false },
-    zai: { window: 'auto', hideValue: null, hidden: true },
+    'openai@work': { window: 'session', hideValue: true, hidden: false, colorValue: null },
+    zai: { window: 'auto', hideValue: null, hidden: true, colorValue: null },
   });
   assert.deepEqual(normalizeMenuBarItems(null), {});
   const parsed = parseHostPayload({ menu_bar_items: { zai: { hidden: true } }, menu_bar_active_account_only: true });
   assert.equal(parsed.menuBarItems.zai.hidden, true);
   assert.equal(parsed.menuBarActiveAccountOnly, true);
   assert.equal(parseHostPayload({}).menuBarActiveAccountOnly, false);
+  assert.equal(parseHostPayload({}).menuBarColorValue, true);
+  assert.equal(parseHostPayload({ menu_bar_color_value: false }).menuBarColorValue, false);
+  assert.equal(normalizeMenuBarItems({ zai: { color_value: false } }).zai.colorValue, false);
 }
 
 {

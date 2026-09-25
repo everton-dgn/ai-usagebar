@@ -14,7 +14,7 @@ Each release is also published at
 - **Usage bar colors by how much is used.** Bars are green, turn yellow from
   70% used and red from 85%, the same defaults as the Claude Code statusline,
   in both the list and the tabs view. **Settings → Preferences → Bar colors**
-  sets both thresholds. The pace flame and tick keep their own signal.
+  sets both thresholds. The pace note and flame keep their own signal.
 - **Pin the macOS popover open.** The pin in the popover header keeps it
   open when focus moves or a click lands outside it; the menu bar icon and
   Escape still close it. The choice is remembered.

@@ -42,7 +42,6 @@ import {
   providerLinks,
   pace,
   paceText,
-  paceTickPercent,
   paceVisible,
   prefsForCard,
   providerIconId,
@@ -373,9 +372,9 @@ interface MetricRowProps {
 
 /**
  * Bounded row: label (+ the pace note on the right: flame and "Limit in 3h" when behind, "~N%
- * spare" / "~N% left at reset" otherwise; "Limit reached" once spent) → capsule meter with the
- * pace tick where an even burn would sit → `52% left ⟷ Resets in 4d 17h`. The pace note and
- * tick show only off-pace unless Settings asks for them always (paceVisible).
+ * spare" / "~N% left at reset" otherwise; "Limit reached" once spent) → capsule meter →
+ * `52% left ⟷ Resets in 4d 17h`. The pace note shows only off-pace unless Settings asks for it
+ * always (paceVisible).
  */
 function MetricRow({ demand, layout, nowMs, onToggleShowAs, row }: MetricRowProps) {
   const { language, metricLabel, t } = useI18n();
@@ -391,7 +390,6 @@ function MetricRow({ demand, layout, nowMs, onToggleShowAs, row }: MetricRowProp
   const showPace = rowPace !== null && paceVisible(rowPace, layout);
   const paceNote = showPace && rowPace ? paceText(rowPace, nowMs, { resetTimes: layout.resetTimes, timeFormat: layout.timeFormat, locale: language }) : "";
   const behind = rowPace?.state === "behind";
-  const tick = paceTickPercent(rowPace, layout.showAs);
   return (
     <div className="flex flex-col gap-[var(--row-inner)] px-[var(--card-pad)] py-[var(--pad-bar-row)]">
       <div className="flex items-center gap-[6px]">
@@ -411,22 +409,13 @@ function MetricRow({ demand, layout, nowMs, onToggleShowAs, row }: MetricRowProp
           </span>
         ) : null}
       </div>
-      <div className="meter-wrap">
-        <div className="meter" aria-hidden="true">
-          <div
-            className="meter-fill"
-            data-color={usageColor(row.usedPercent, layout.colorThresholds, spent)}
-            data-empty={fill === 0 ? "true" : "false"}
-            style={{ width: `${fill}%` }}
-          />
-        </div>
-        {showPace && tick !== null ? (
-          <span
-            aria-hidden="true"
-            className="meter-tick"
-            style={{ left: `clamp(1px, ${tick}%, calc(100% - 1px))` }}
-          />
-        ) : null}
+      <div className="meter" aria-hidden="true">
+        <div
+          className="meter-fill"
+          data-color={usageColor(row.usedPercent, layout.colorThresholds, spent)}
+          data-empty={fill === 0 ? "true" : "false"}
+          style={{ width: `${fill}%` }}
+        />
       </div>
       <div className="flex items-baseline gap-2 text-[length:var(--sz-support)] tabular-nums">
         <button

@@ -403,7 +403,7 @@ export function normalizeColorThresholds(value) {
 /**
  * A usage bar's color from how much of the quota is used: green, then
  * yellow and red at the configured thresholds. A spent quota is red whatever
- * the number says. Pace keeps its own signal (the flame note and the tick).
+ * the number says. Pace keeps its own signal (the flame note).
  */
 export function usageColor(usedPercent, thresholds, spent) {
   if (spent) return "red";
@@ -589,15 +589,6 @@ export function usageGoal(row, nowMs) {
 function clampPercent(value) {
   const number = finiteNumber(value);
   return Math.max(0, Math.min(100, number));
-}
-
-// Where the "you should be here" tick sits on the meter, as a percent of its
-// width. The meter fills with what is consumed in Used mode and with what
-// remains in Left mode, so the tick follows the same reading.
-export function paceTickPercent(pace, showAs) {
-  if (!pace) return null;
-  const elapsed = clampPercent(pace.elapsedPercent);
-  return showAs === "used" ? elapsed : 100 - elapsed;
 }
 
 // One-line pace verdict beside the row label, in OpenUsage's WidgetRowView

@@ -674,23 +674,6 @@ body:has(.mac-panel) {
   width: 0 !important;
 }
 
-/* Pace tick: where the fill would sit on an even burn (WidgetRowView's marker). */
-.meter-wrap {
-  position: relative;
-}
-
-.meter-tick {
-  position: absolute;
-  top: -2px;
-  bottom: -2px;
-  width: 2px;
-  border-radius: 1px;
-  background: var(--label-1);
-  opacity: 0.55;
-  transform: translateX(-50%);
-  pointer-events: none;
-}
-
 /* Reorder grip (line.3.horizontal, 12pt semibold, tertiary, 16×22). */
 .grip {
   display: inline-flex;

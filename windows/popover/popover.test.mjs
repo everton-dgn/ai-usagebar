@@ -54,7 +54,6 @@ import {
   emptyPayload,
   pace,
   paceText,
-  paceTickPercent,
   paceVisible,
   usageGoal,
   prettyMetricLabel,
@@ -740,18 +739,6 @@ assert.equal(resetAlternate(badStampRow, 'exact', resetNow, utc), '');
   assert.equal(spent.runsOutMs, null);
   assert.equal(paceText(spent, now), '');
   assert.equal(paceText(spent, now, { resetTimes: 'exact', timeZone: 'UTC' }), '');
-
-  // ASSERT: the tick follows the meter's reading — elapsed in Used mode, remaining in Left mode
-  assert.equal(paceTickPercent(behind, 'used'), 40);
-  assert.equal(paceTickPercent(behind, 'left'), 60);
-  assert.equal(paceTickPercent(ahead, 'used'), 50);
-  assert.equal(paceTickPercent(ahead, undefined), 50);
-  assert.equal(paceTickPercent({ ...ahead, elapsedPercent: 250 }, 'used'), 100);
-  assert.equal(paceTickPercent({ ...ahead, elapsedPercent: 250 }, 'left'), 0);
-  assert.equal(paceTickPercent({ ...ahead, elapsedPercent: -5 }, 'used'), 0);
-  assert.equal(paceTickPercent({ ...ahead, elapsedPercent: -5 }, 'left'), 100);
-  assert.equal(paceTickPercent({ ...ahead, elapsedPercent: NaN }, 'used'), 0);
-  assert.equal(paceTickPercent(null, 'used'), null);
 
   // ASSERT: no signal → null
   assert.equal(pace(row(50, 30_000), now), null); // 30s in: under the 1% / 60s floor

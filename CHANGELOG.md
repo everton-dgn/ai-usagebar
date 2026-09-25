@@ -48,6 +48,12 @@ Each release is also published at
 
 ### Fixed
 
+- **Clicking the macOS menu bar icon closes the popover again.** On current
+  macOS the status item is drawn out of process, so the outside-click watch saw
+  the press on the icon and closed the popover, and that same click then opened
+  it again. A quick click was also released before the popover lost focus, so
+  the blur could not tell it came from the icon. Presses on the icon are now
+  left to its click, which toggles the popover.
 - **A custom provider title reaches the macOS menu bar.** A name set in the
   popover lived only in the popover, so the menu bar and its tooltip kept the
   report's name. The popover now sends the custom titles to the tray.

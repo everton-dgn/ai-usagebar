@@ -55,6 +55,13 @@ pub fn close_on_blur(guarded: bool, press_on_status_item: bool) -> bool {
     !guarded && !press_on_status_item
 }
 
+/// Whether a press outside the popover should close it. A press on the status
+/// item is left to that item's click, which toggles the popover: closing here
+/// too would let the click open it again.
+pub fn close_on_outside_click(open: bool, pinned: bool, on_status_item: bool) -> bool {
+    open && !pinned && !on_status_item
+}
+
 /// The popover height for the content's `requested` height: automatic as
 /// before, but never taller than the height the user dragged the panel to.
 /// Below the content's height the list scrolls.
@@ -183,9 +190,17 @@ mod tests {
     use super::{
         CocoaRect, MENU_BAR_MIN_HEIGHT, MIN_POPOVER_HEIGHT, MIN_POPOVER_WIDTH, MIN_USER_HEIGHT,
         POPOVER_BOTTOM_GAP, POPOVER_SIDE_MARGIN, POPOVER_TOP_GAP, PanelSize, PopoverPlacement,
-        WINDOW_WIDTH, WORK_AREA_MARGIN, clamp_popover_height, close_on_blur, cocoa_popover_frame,
-        fit_popover_height, menu_bar_bottom_y,
+        WINDOW_WIDTH, WORK_AREA_MARGIN, clamp_popover_height, close_on_blur,
+        close_on_outside_click, cocoa_popover_frame, fit_popover_height, menu_bar_bottom_y,
     };
+
+    #[test]
+    fn an_outside_press_on_the_status_item_is_left_to_its_click() {
+        assert!(close_on_outside_click(true, false, false));
+        assert!(!close_on_outside_click(true, false, true));
+        assert!(!close_on_outside_click(true, true, false));
+        assert!(!close_on_outside_click(false, false, false));
+    }
 
     #[test]
     fn a_press_on_the_status_item_leaves_closing_to_its_click() {

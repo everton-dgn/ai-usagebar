@@ -46,7 +46,8 @@ use super::menu_bar::{self, UsageWindow};
 use super::panel::{
     CLICK_LOCK_MS, CORNER_RADIUS, CocoaRect, FALLBACK_WORK_AREA_HEIGHT, MIN_POPOVER_WIDTH,
     MIN_USER_HEIGHT, PanelSize, PopoverPlacement, WINDOW_HEIGHT, clamp_popover_height,
-    close_on_blur, cocoa_popover_frame, fit_popover_height, menu_bar_bottom_y,
+    close_on_blur, close_on_outside_click, cocoa_popover_frame, fit_popover_height,
+    menu_bar_bottom_y,
 };
 use super::payload::{
     AccountSwitchFact, HostFacts, UpdateFact, fact_after_check, host_payload, wrap_report,
@@ -73,8 +74,9 @@ enum UserEvent {
     Facts,
     /// Polled while the user drags an edge; re-centres the panel once the drag ends.
     ResizeSettle,
-    /// A mouse press in another app, the menu bar or the desktop.
-    OutsideClick,
+    /// A mouse press in another app, the menu bar or the desktop, at this
+    /// Cocoa screen point.
+    OutsideClick(f64, f64),
 }
 
 enum WorkerCmd {
@@ -133,6 +135,10 @@ struct TrayState {
     panel_size: PanelSize,
     panel_size_dirty: bool,
     resize_settle_armed: bool,
+    /// When the global monitor last saw a press on the status item. A quick
+    /// click is released before the popover's blur arrives, so the blur reads
+    /// this instead of the live button state.
+    status_item_pressed_at: Option<Instant>,
     /// Set from the panel's pin: blurs and outside clicks leave it open.
     pinned: bool,
     /// Keeps the global mouse monitor alive; dropping it would end it.
@@ -241,6 +247,7 @@ fn run_loop() -> Result<(), String> {
         panel_size_dirty: false,
         resize_settle_armed: false,
         pinned: false,
+        status_item_pressed_at: None,
         _outside_click_monitor: install_outside_click_monitor(proxy.clone()),
         applied_height: WINDOW_HEIGHT,
         theme,
@@ -275,10 +282,13 @@ fn run_loop() -> Result<(), String> {
             Event::UserEvent(UserEvent::Facts) => apply_facts(&mut state),
             Event::UserEvent(UserEvent::Hotkey) => toggle_popover_from_keyboard(&mut state),
             Event::UserEvent(UserEvent::ResizeSettle) => settle_user_resize(&mut state),
-            // No blur guard here: the global monitor never sees our own
-            // presses, so this cannot be the click that opened the popover.
-            Event::UserEvent(UserEvent::OutsideClick) => {
-                if state.popover_open && !state.pinned {
+            Event::UserEvent(UserEvent::OutsideClick(x, y)) => {
+                let on_status_item =
+                    status_item_frame(&state.tray).is_some_and(|frame| frame.contains(x, y));
+                if on_status_item {
+                    state.status_item_pressed_at = Some(Instant::now());
+                }
+                if close_on_outside_click(state.popover_open, state.pinned, on_status_item) {
                     hide_popover(&mut state);
                 }
             }
@@ -294,7 +304,10 @@ fn run_loop() -> Result<(), String> {
             } => {
                 if state.popover_open
                     && !state.pinned
-                    && close_on_blur(blur_guarded(&state), press_on_status_item(&state.tray))
+                    && close_on_blur(
+                        blur_guarded(&state),
+                        press_on_status_item(&state.tray) || status_item_just_pressed(&state),
+                    )
                 {
                     hide_popover(&mut state);
                 }
@@ -1236,16 +1249,18 @@ fn show_popover(state: &mut TrayState) {
     });
 }
 
-/// A global monitor sees presses delivered to other processes only: another
-/// app, another status item, the empty menu bar, the desktop. Those take no
-/// focus from the popover when they land in the menu bar, so without this the
-/// popover would stay open. Presses on our own status item or panel never
-/// reach it.
+/// A global monitor sees presses delivered to other processes: another app,
+/// another status item, the empty menu bar, the desktop. Those take no focus
+/// from the popover when they land in the menu bar, so without this the
+/// popover would stay open. The status item's own button is drawn out of
+/// process on current macOS, so its presses reach the monitor too; the
+/// handler leaves those to the item's click.
 fn install_outside_click_monitor(proxy: EventLoopProxy<UserEvent>) -> Option<Retained<AnyObject>> {
     let mask =
         NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::OtherMouseDown;
     let block = RcBlock::new(move |_event: NonNull<NSEvent>| {
-        let _ = proxy.send_event(UserEvent::OutsideClick);
+        let (x, y) = cocoa_mouse();
+        let _ = proxy.send_event(UserEvent::OutsideClick(x, y));
     });
     let monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &block);
     if monitor.is_none() {
@@ -1277,6 +1292,16 @@ fn status_item_frame(tray: &TrayIcon) -> Option<CocoaRect> {
     let window = tray.ns_status_item()?.button(mtm)?.window()?;
     Some(ns_rect_to_cocoa(window.frame()))
 }
+
+/// Whether the monitor saw a press on the status item just now, so the blur
+/// that follows belongs to that click.
+fn status_item_just_pressed(state: &TrayState) -> bool {
+    state
+        .status_item_pressed_at
+        .is_some_and(|at| at.elapsed() < STATUS_ITEM_PRESS_WINDOW)
+}
+
+const STATUS_ITEM_PRESS_WINDOW: Duration = Duration::from_millis(500);
 
 /// Whether the popover was opened or focused too recently for a lost focus
 /// to mean the user left it.
@@ -1659,7 +1684,7 @@ fn fill_round_rect(x: f64, y: f64, w: f64, h: f64, radius: f64, alpha: f64) {
 }
 
 /// Space between the providers and the chart glyph on their right.
-const CHART_GAP: &str = "   ";
+const CHART_GAP: &str = "          ";
 
 /// Side of a provider mark in the menu bar, in points.
 const MARK_SIDE: f64 = 15.0;

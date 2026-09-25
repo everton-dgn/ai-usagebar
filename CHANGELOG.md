@@ -22,8 +22,9 @@ Each release is also published at
   shorter; the size is remembered across runs and the panel re-centres under
   the menu bar icon when you let go. The height still follows the
   content, but never grows past the height you chose, and the list scrolls
-  when the content is taller. **Options → Reset Panel Size** restores the
-  default width and the automatic height.
+  when the content is taller. **Reset Panel Size**, in the footer where the
+  version used to be (the version is under About), restores the default width
+  and the automatic height.
 - **List and Tabs views in the macOS popover.** The List view is back as the
   default: every provider stacked, with the account star, collapse and
   reordering, in two columns once the panel is wide enough. Tabs keeps the

@@ -30,6 +30,11 @@ Each release is also published at
 
 ### Fixed
 
+- **The macOS popover opens and closes on every click.** With the popover
+  open, pressing the menu bar icon took focus away first, the blur closed the
+  popover, and the click then opened it again, so it sometimes seemed not to
+  close. The blur now leaves a press on the icon to its click. A click in the
+  menu bar outside the icon, another app or the desktop now closes it too.
 - **The macOS popover never shows letters for a provider.** Tabs used the
   three-letter short name and two-letter initials for named accounts; they now
   show the provider's icon and full name, and a provider with no icon of its

@@ -387,13 +387,18 @@ fn eligible_entries<'a>(payload: &'a Value, visible: Option<&[String]>) -> Vec<&
     let Some(entries) = payload.get("entries").and_then(Value::as_array) else {
         return Vec::new();
     };
-    entries
+    let Some(order) = visible else {
+        return entries
+            .iter()
+            .filter(|entry| entry.get("id").is_some())
+            .collect();
+    };
+    order
         .iter()
-        .filter(|entry| {
-            let Some(id) = entry.get("id").and_then(Value::as_str) else {
-                return false;
-            };
-            visible.is_none_or(|ids| ids.iter().any(|allowed| allowed == id))
+        .filter_map(|id| {
+            entries
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(id.as_str()))
         })
         .collect()
 }
@@ -674,6 +679,28 @@ mod tests {
             .map(|c| c.level)
             .collect();
         assert_eq!(levels, [Some(Level::Yellow), Some(Level::Yellow), None]);
+    }
+
+    #[test]
+    fn providers_follow_the_popover_card_order() {
+        let report = json!({"entries":[
+            {"id":"anthropic@conta2", "display_name":"Claude · 2", "status":"ready"},
+            {"id":"anthropic@principal", "display_name":"Claude", "status":"ready"},
+            {"id":"zai", "display_name":"Z.AI", "status":"ready"}
+        ]});
+        let order = vec![
+            "anthropic@principal".to_string(),
+            "zai".into(),
+            "anthropic@conta2".into(),
+        ];
+        let ids: Vec<String> = chips(
+            &report,
+            &view("", true, false, UsageWindow::Auto, Some(&order)),
+        )
+        .into_iter()
+        .map(|chip| chip.id)
+        .collect();
+        assert_eq!(ids, ["anthropic@principal", "zai", "anthropic@conta2"]);
     }
 
     #[test]

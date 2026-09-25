@@ -47,7 +47,8 @@ Each release is also published at
   same settings live in **Settings → Menu → Providers in the Menu Bar**, saved
   per provider under `[tray.menu_bar_items."<id>"]`. **Only the Account in
   Use** keeps one account per provider, the one the `claude` or `codex` login
-  holds. The chart item stays on the right and opens the popover as before.
+  holds. Providers follow the popover's card order. The chart item stays on
+  the right and opens the popover as before.
   A provider's click waits for its tab's height before showing, so the popover
   no longer opens at the list's height and then shrinks, and the tab row
   scrolls to show that provider's tab.

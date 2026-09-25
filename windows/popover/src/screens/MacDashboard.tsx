@@ -207,8 +207,15 @@ function useDragScroll() {
       event.currentTarget.releasePointerCapture(state.id);
     }
     setDragging(false);
-    // Keep `moved` until the click that ends this press has been swallowed.
-    if (!state?.moved) drag.current = null;
+    if (!state?.moved || event.type === "pointercancel") {
+      drag.current = null;
+      return;
+    }
+    // Keep `moved` for the click that ends this press (dispatched in the same
+    // task), then drop it: a press with no click must not swallow the next one.
+    window.setTimeout(() => {
+      if (drag.current === state) drag.current = null;
+    }, 0);
   }
 
   function onClickCapture(event: MouseEvent<HTMLDivElement>) {

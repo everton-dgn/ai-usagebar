@@ -197,7 +197,7 @@ export function MacDashboard({ cards, layout, nowMs, payload, onOpenCustomize }:
                 <span className="mac-provider-mark"><ProviderIcon slug={providerIconId(selected.id)} title={selected.title} size={25} /></span>
                 <span className="mac-provider-title">
                   <strong>{selected.title}</strong>
-                  <small>{selected.plan || (selectedEntry?.status === "ready" ? t("Current usage") : t("Usage unavailable"))}{selected.stale ? ` · ${t("Cached")}` : ""}</small>
+                  <small>{(layout.showPlan !== false && selected.plan) || (selectedEntry?.status === "ready" ? t("Current usage") : t("Usage unavailable"))}{selected.stale ? ` · ${t("Cached")}` : ""}</small>
                 </span>
                 <button type="button" className="mac-provider-refresh" title={`${t("Refresh")} ${selected.title}`} aria-label={`${t("Refresh")} ${selected.title}`} onClick={() => sendCommand("refresh-entry", { id: selected.id })}>
                   <MdiRefresh aria-hidden />

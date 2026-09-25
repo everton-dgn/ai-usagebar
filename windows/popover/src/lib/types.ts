@@ -22,6 +22,10 @@ export interface Layout {
   language: Language;
   /** macOS dashboard: all providers stacked, or one at a time behind tabs. */
   panelView: PanelView;
+  /** Card id → the name the user gave it. */
+  names: Record<string, string>;
+  /** Show the subscription plan beside each provider's name. */
+  showPlan: boolean;
   resetTimes: string;
   rows: Record<string, RowPrefs>;
   seeded: boolean;
@@ -124,6 +128,8 @@ export interface ResetCredits {
 }
 
 export interface Card {
+  /** The report's name when the user renamed the card. */
+  defaultTitle?: string;
   error: string;
   errorDetail: string;
   errorHint: string;

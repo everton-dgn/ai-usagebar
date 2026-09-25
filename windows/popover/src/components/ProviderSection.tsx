@@ -151,6 +151,7 @@ export function ProviderSection({
       <ProviderSectionHeader
         account={account}
         card={card}
+        showPlan={layout.showPlan !== false}
         handle={handle}
         onCustomize={onCustomize}
         onReset={onReset}
@@ -236,6 +237,8 @@ function ResetCreditsRow({ condensedTop, demand, layout, nowMs, row }: ResetCred
 interface ProviderSectionHeaderProps {
   account?: CardAccount | null;
   card: Card;
+  /** Show the plan beside the name (Settings → Show plan). */
+  showPlan?: boolean;
   handle?: SectionHandle;
   onCustomize?: () => void;
   onReset?: () => void;
@@ -253,12 +256,13 @@ export function ProviderSectionHeader({
   account,
   card,
   handle,
+  showPlan = true,
   onCustomize,
   onReset,
   onSwitchAccount,
 }: ProviderSectionHeaderProps) {
   const { t } = useI18n();
-  const plan = displayPlan(card.title, card.plan);
+  const plan = showPlan ? displayPlan(card.title, card.plan) : "";
   return (
     <header
       className="group/header flex items-center gap-[5px] py-[2px] pr-1 pl-[2px]"

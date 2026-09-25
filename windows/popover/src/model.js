@@ -771,16 +771,64 @@ export function emptyLayout() {
     hideExtras: false,
     hintDismissed: false,
     language: "en",
+    names: {},
     panelView: "list",
     resetTimes: "countdown",
     rows: {},
     seeded: false,
     showAs: "left",
+    showPlan: true,
     stars: {},
     stripStyle: "bars",
     theme: "system",
     timeFormat: "auto",
   };
+}
+
+/** Longest custom card name kept; it is a label, not a note. */
+const MAX_CARD_NAME = 80;
+
+/** Custom card names by card id: trimmed, one line, bounded like the entry list. */
+function cleanNameMap(source) {
+  const out = {};
+  if (!isPlainObject(source)) return out;
+  for (const key of Object.keys(source)) {
+    // Same bounds as the report's entries: 64 cards, 180-character ids.
+    if (Object.keys(out).length >= 64) break;
+    const id = clean(key, 180).trim();
+    const name = clean(source[key], MAX_CARD_NAME).replace(/\n/g, " ").trim();
+    if (id && name) out[id] = name;
+  }
+  return out;
+}
+
+/**
+ * Cards with the user's own names; `defaultTitle` keeps the report's name.
+ * @param {import("./lib/types").Card[]} cards
+ * @param {Record<string, string>} names
+ * @returns {import("./lib/types").Card[]}
+ */
+export function applyCardNames(cards, names) {
+  if (!isPlainObject(names)) return cards;
+  return cards.map((card) => {
+    const name = names[card.id];
+    return name ? { ...card, title: name, defaultTitle: card.title } : card;
+  });
+}
+
+/**
+ * Names with `id` renamed; an empty name drops back to the report's name.
+ * @param {Record<string, string>} names
+ * @param {string} id
+ * @param {string} name
+ * @returns {Record<string, string>}
+ */
+export function renameCard(names, id, name) {
+  const next = cleanNameMap(names);
+  const value = clean(name, MAX_CARD_NAME).replace(/\n/g, " ").trim();
+  if (value) next[id] = value;
+  else delete next[id];
+  return next;
 }
 
 /**
@@ -926,6 +974,8 @@ export function normalizeLayout(raw) {
   layout.hintDismissed = raw.hintDismissed === true;
   layout.language = raw.language === "pt-BR" ? "pt-BR" : "en";
   layout.panelView = normalizePanelView(raw.panelView);
+  layout.names = cleanNameMap(raw.names);
+  layout.showPlan = raw.showPlan !== false;
   layout.seeded = raw.seeded === true;
   layout.resetTimes = normalizeResetTimes(raw.resetTimes);
   layout.showAs = normalizeShowAs(raw.showAs);
@@ -1014,6 +1064,8 @@ export function syncLayout(layout, cardIds) {
     hintDismissed: layout.hintDismissed === true,
     language: layout.language === "pt-BR" ? "pt-BR" : "en",
     panelView: normalizePanelView(layout.panelView),
+    names: cleanNameMap(layout.names),
+    showPlan: layout.showPlan !== false,
     resetTimes: normalizeResetTimes(layout.resetTimes),
     seeded: layout.seeded === true,
     rows,

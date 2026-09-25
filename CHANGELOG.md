@@ -22,6 +22,11 @@ Each release is also published at
   reordering, in two columns once the panel is wide enough. Tabs keeps the
   one-provider-at-a-time view. Switch from the header or Settings →
   Preferences → Panel View.
+- **Rename a provider card and hide its plan.** Give any card your own name
+  (such as "Codex trabalho" for `Codex · conta2`) from its Customize screen,
+  with a button to restore the original. **Settings → Preferences → Show plan**
+  hides the gray plan name beside each provider. Both live in the popover's
+  own settings; the TUI and the menu bar keep the report's names.
 
 ### Fixed
 

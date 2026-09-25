@@ -23,8 +23,10 @@ import {
   mergeVisibleOrder,
   moveRowToList,
   parseHostPayload,
+  applyCardNames,
   prefsForCard,
   projectCards,
+  renameCard,
   resolvedTheme,
   saveLayout,
   seedStars,
@@ -73,7 +75,10 @@ export default function App() {
   const [popoverVisible, setPopoverVisible] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const cards = useMemo(() => (payload.hostError ? [] : projectCards(payload, nowMs)), [payload, nowMs]);
+  const cards = useMemo(
+    () => (payload.hostError ? [] : applyCardNames(projectCards(payload, nowMs), layout.names)),
+    [payload, nowMs, layout.names],
+  );
   const visible = useMemo(() => applyCardLayout(cards, layout), [cards, layout]);
   const currentCard = cards.find((card) => card.id === providerId);
 
@@ -436,6 +441,10 @@ export default function App() {
                   rows: { ...layout.rows, [providerId]: setRowEnabled(prefsForCard(currentCard, layout), key, on) },
                 });
               }}
+              onRename={(name) => {
+                if (!currentCard) return;
+                commit({ ...layout, names: renameCard(layout.names, currentCard.id, name) });
+              }}
             />
           ) : null}
           {screen === "about" ? <About nowMs={nowMs} payload={payload} /> : null}
@@ -466,6 +475,7 @@ export default function App() {
               onTheme={(theme) => commit({ ...layout, theme })}
               onTimeFormat={(timeFormat) => commit({ ...layout, timeFormat })}
               onPanelView={(panelView) => commit({ ...layout, panelView })}
+              onShowPlan={(showPlan) => commit({ ...layout, showPlan })}
             />
           ) : null}
         </div>

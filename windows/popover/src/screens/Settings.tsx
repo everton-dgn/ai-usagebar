@@ -43,6 +43,7 @@ interface SettingsProps {
   onTheme: (theme: string) => void;
   onTimeFormat: (timeFormat: Layout["timeFormat"]) => void;
   onPanelView: (view: Layout["panelView"]) => void;
+  onShowPlan: (on: boolean) => void;
 }
 
 /** Settings screen with compact macOS tabs; Windows retains its section layout. */
@@ -67,6 +68,7 @@ export function Settings({
   onTheme,
   onTimeFormat,
   onPanelView,
+  onShowPlan,
 }: SettingsProps) {
   const { language, t } = useI18n();
   const [busy, startBusy] = useBusyLabel();
@@ -316,6 +318,13 @@ export function Settings({
             />
           </SettingRow>
         ) : null}
+        <SettingRow hint={t("Show the subscription plan next to each provider's name.")} label={t("Show plan")}>
+          <Switch
+            checked={layout.showPlan !== false}
+            aria-label={t("Show plan")}
+            onCheckedChange={(on) => onShowPlan(on === true)}
+          />
+        </SettingRow>
         {payload.os === "macos" ? (
           <SettingRow hint={t("Show a goal based on time elapsed in each usage window. Monthly goals may be estimated.")} label={t("Usage goal")}>
             <Switch

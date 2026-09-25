@@ -16,7 +16,7 @@ use objc2::{AnyThread, Message};
 use objc2_app_kit::NSAttributedStringAttachmentConveniences;
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSColor,
+    NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSCellImagePosition, NSColor,
     NSCompositingOperation, NSEvent, NSEventMask, NSFont, NSFontAttributeName, NSGlassEffectView,
     NSGlassEffectViewStyle, NSImage, NSImageScaling, NSRectFillUsingOperation, NSScreen,
     NSTextAttachment, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
@@ -641,7 +641,13 @@ fn apply_strip_icon(state: &mut TrayState) {
                     &state.strip_names,
                 );
                 // A plain title clears the attributed one, so it goes first.
-                state.tray.set_title(Some(menu_bar::text(&chips).as_str()));
+                let text = menu_bar::text(&chips);
+                let text = if text.is_empty() {
+                    text
+                } else {
+                    format!("{text}{CHART_GAP}")
+                };
+                state.tray.set_title(Some(text.as_str()));
                 set_status_button_chips(&chips);
             }
             if let Some(image) = template_bars_image(&fractions) {
@@ -1652,6 +1658,9 @@ fn fill_round_rect(x: f64, y: f64, w: f64, h: f64, radius: f64, alpha: f64) {
     NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius).fill();
 }
 
+/// Space between the providers and the chart glyph on their right.
+const CHART_GAP: &str = "   ";
+
 /// Side of a provider mark in the menu bar, in points.
 const MARK_SIDE: f64 = 15.0;
 
@@ -1685,7 +1694,7 @@ fn set_status_button_chips(chips: &[menu_bar::Chip]) {
     let title = NSMutableAttributedString::new();
     for (index, chip) in chips.iter().enumerate() {
         if index > 0 {
-            title.appendAttributedString(&run("   "));
+            title.appendAttributedString(&run(menu_bar::CHIP_GAP));
         }
         let Some(image) = chip.mark.and_then(mark_image) else {
             title.appendAttributedString(&run(&chip.text()));
@@ -1706,6 +1715,7 @@ fn set_status_button_chips(chips: &[menu_bar::Chip]) {
             title.appendAttributedString(&run(&format!(" {value}")));
         }
     }
+    title.appendAttributedString(&run(CHART_GAP));
     button.setAttributedTitle(&title);
 }
 
@@ -1740,6 +1750,8 @@ fn set_status_button_image(image: &NSImage) {
         return;
     };
     button.setImageScaling(NSImageScaling::ScaleNone);
+    // The chart glyph sits after the providers, at the item's right edge.
+    button.setImagePosition(NSCellImagePosition::ImageTrailing);
     button.setImage(Some(image));
 }
 

@@ -10,6 +10,9 @@ use serde_json::Value;
 
 pub const HIGHEST_PROVIDER: &str = "highest";
 
+/// Space between two providers in the menu bar.
+pub const CHIP_GAP: &str = "     ";
+
 /// The popover's bundled provider marks (`windows/popover/src/icons/providers`),
 /// drawn by the macOS status item in place of the provider's name.
 pub const PROVIDER_MARKS: &[(&str, &str)] = &[
@@ -247,7 +250,7 @@ pub fn text(chips: &[Chip]) -> String {
         .map(Chip::text)
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
-        .join("   ")
+        .join(CHIP_GAP)
 }
 
 /// Rendered by the macOS status item only; the Linux test build never calls it.
@@ -532,7 +535,7 @@ mod tests {
         // No bundled mark: the name is what the status item shows.
         assert_eq!(shown[1].mark, None);
         assert_eq!(shown[1].text(), "Kilo 5%");
-        assert_eq!(text(&shown), "Work Claude 21%   Kilo 5%");
+        assert_eq!(text(&shown), "Work Claude 21%     Kilo 5%");
         assert!(
             tooltip(&report, "", true, UsageWindow::Auto, None, &names)
                 .starts_with("Work Claude · 21%")
@@ -651,7 +654,7 @@ mod tests {
         );
         assert_eq!(
             title(&report, "", true, true, UsageWindow::Auto, None),
-            "cdx 80%   opr $12.50"
+            "cdx 80%     opr $12.50"
         );
     }
 
@@ -669,11 +672,11 @@ mod tests {
         ]});
         assert_eq!(
             title(&report, "", true, true, UsageWindow::Auto, None),
-            "Claude 21%   Codex 15%"
+            "Claude 21%     Codex 15%"
         );
         assert_eq!(
             title(&report, "", true, true, UsageWindow::Session, None),
-            "Claude 17%   Codex 15%"
+            "Claude 17%     Codex 15%"
         );
         assert_eq!(
             title(&report, "zai", false, true, UsageWindow::Auto, None),

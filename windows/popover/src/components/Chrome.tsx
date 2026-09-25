@@ -96,9 +96,15 @@ export function Footer({
     <footer className="bar-glass flex shrink-0 items-center gap-2 p-[var(--panel-pad)]">
       {/* macOS shows the version in About; the footer carries the size reset instead. */}
       {payload.os === "macos" ? (
-        <button type="button" className="capsule-btn min-w-0" onClick={() => sendCommand("reset-panel-size")}>
+        <button
+          type="button"
+          className="capsule-btn min-w-0"
+          aria-label={t("Reset Panel Size")}
+          title={t("Reset Panel Size")}
+          onClick={() => sendCommand("reset-panel-size")}
+        >
           <MdiResize className="size-[13px] shrink-0" />
-          <span className="truncate">{t("Reset Panel Size")}</span>
+          <span className="truncate">{t("Reset Size")}</span>
         </button>
       ) : (
         <div className="flex min-w-0 flex-col text-[10px] leading-[14px] text-label-2">

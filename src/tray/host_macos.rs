@@ -38,8 +38,9 @@ use super::hotkey::{self, HotkeyBinding};
 use super::icon::{Severity, tray_icon_rgba};
 use super::menu_bar::{self, UsageWindow};
 use super::panel::{
-    CLICK_LOCK_MS, CORNER_RADIUS, CocoaRect, FALLBACK_WORK_AREA_HEIGHT, PopoverPlacement,
-    WINDOW_HEIGHT, WINDOW_WIDTH, clamp_popover_height, cocoa_popover_frame, menu_bar_bottom_y,
+    CLICK_LOCK_MS, CORNER_RADIUS, CocoaRect, FALLBACK_WORK_AREA_HEIGHT, MIN_POPOVER_WIDTH,
+    MIN_USER_HEIGHT, PanelSize, PopoverPlacement, WINDOW_HEIGHT, clamp_popover_height,
+    cocoa_popover_frame, fit_popover_height, menu_bar_bottom_y,
 };
 use super::payload::{
     AccountSwitchFact, HostFacts, UpdateFact, fact_after_check, host_payload, wrap_report,
@@ -64,6 +65,8 @@ enum UserEvent {
     FocusPopover,
     Hotkey,
     Facts,
+    /// Polled while the user drags an edge; re-centres the panel once the drag ends.
+    ResizeSettle,
 }
 
 enum WorkerCmd {
@@ -118,6 +121,13 @@ struct TrayState {
     /// Last CSS/logical height from the `resize` IPC; not derived from
     /// `inner_size / scale_factor`, which is wrong after a scale-factor change.
     popover_height: f64,
+    /// Width and height cap the user dragged the panel to, saved on close.
+    panel_size: PanelSize,
+    panel_size_dirty: bool,
+    resize_settle_armed: bool,
+    /// Logical height last given to the window by us, so a drag that leaves
+    /// it untouched (a width-only drag) is not mistaken for a chosen height.
+    applied_height: f64,
     theme: Theme,
     facts: SharedFacts,
     hotkey: Option<HotkeyBinding>,
@@ -156,13 +166,15 @@ fn run_loop() -> Result<(), String> {
             let _ = proxy.send_event(UserEvent::Tray(event));
         }));
     }
+    let panel_size = load_panel_size();
     let window = WindowBuilder::new()
         .with_title("AI Usage")
-        .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
+        .with_inner_size(LogicalSize::new(panel_size.width, WINDOW_HEIGHT))
+        .with_min_inner_size(LogicalSize::new(MIN_POPOVER_WIDTH, MIN_USER_HEIGHT))
         .with_visible(false)
         .with_decorations(false)
         .with_always_on_top(true)
-        .with_resizable(false)
+        .with_resizable(true)
         .with_focused(false)
         .with_transparent(true)
         .with_has_shadow(true)
@@ -211,6 +223,10 @@ fn run_loop() -> Result<(), String> {
         blur_guard_until: None,
         last_anchor: None,
         popover_height: WINDOW_HEIGHT,
+        panel_size,
+        panel_size_dirty: false,
+        resize_settle_armed: false,
+        applied_height: WINDOW_HEIGHT,
         theme,
         facts,
         hotkey: hotkey_binding,
@@ -241,6 +257,7 @@ fn run_loop() -> Result<(), String> {
             Event::UserEvent(UserEvent::Entry(entry)) => apply_entry(&mut state, entry),
             Event::UserEvent(UserEvent::Facts) => apply_facts(&mut state),
             Event::UserEvent(UserEvent::Hotkey) => toggle_popover_from_keyboard(&mut state),
+            Event::UserEvent(UserEvent::ResizeSettle) => settle_user_resize(&mut state),
             Event::UserEvent(UserEvent::FocusPopover) => {
                 if state.popover_open {
                     guard_blur(&mut state);
@@ -259,7 +276,12 @@ fn run_loop() -> Result<(), String> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => hide_popover(&mut state),
+            Event::WindowEvent {
+                event: WindowEvent::Resized(size),
+                ..
+            } => note_user_resize(&mut state, size),
             Event::LoopDestroyed => {
+                save_panel_size(&mut state);
                 let _ = state.worker.send(WorkerCmd::Shutdown);
             }
             _ => {}
@@ -855,6 +877,7 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
         "toggle-startup" => toggle_startup(state),
         "switch-account" => request_account_switch(state, &value),
         "resize" => handle_resize(state, &value),
+        "reset-panel-size" => reset_panel_size(state),
         "refresh-entry" => {
             if let Some(id) = value.get("id").and_then(Value::as_str) {
                 let _ = state.worker.send(WorkerCmd::RefreshEntry(id.to_owned()));
@@ -991,13 +1014,123 @@ fn handle_resize(state: &mut TrayState, value: &Value) {
         return;
     }
     let visible_h = anchor_visible_height(state.last_anchor);
-    let target = clamp_popover_height(requested, visible_h);
-    state.popover_height = target;
-    state
-        .window
-        .set_inner_size(LogicalSize::new(WINDOW_WIDTH, target));
+    state.popover_height = clamp_popover_height(requested, visible_h);
+    // While the user drags an edge the content reports its own height; fitting
+    // to it would fight the drag. The next report after the drag applies.
+    if in_live_resize(&state.window) {
+        return;
+    }
+    fit_window_to_content(state, visible_h);
+}
+
+fn fit_window_to_content(state: &mut TrayState, visible_h: f64) {
+    // Open: position_popover sets size and origin in one synchronous frame.
+    // tao's set_inner_size is queued on the main dispatch queue, so it would
+    // land after that frame and could apply a size computed before it.
     if state.popover_open {
         position_popover(state);
+        return;
+    }
+    let target = fit_popover_height(state.popover_height, visible_h, state.panel_size.max_height);
+    state.applied_height = target;
+    state
+        .window
+        .set_inner_size(LogicalSize::new(state.panel_size.width, target));
+}
+
+/// A `Resized` from AppKit's live resize is the user dragging an edge: that
+/// becomes the panel's width and height cap. Every other resize is ours.
+fn note_user_resize(state: &mut TrayState, size: tao::dpi::PhysicalSize<u32>) {
+    if !in_live_resize(&state.window) {
+        return;
+    }
+    let logical = size.to_logical::<f64>(state.window.scale_factor());
+    let mut next = PanelSize::dragged(logical.width, logical.height);
+    // A width-only drag leaves the height where we put it: keep the previous
+    // cap (none, if the height was automatic) instead of freezing that height.
+    if (logical.height.round() - state.applied_height.round()).abs() < 1.0 {
+        next.max_height = state.panel_size.max_height;
+    }
+    state.panel_size = next;
+    state.panel_size_dirty = true;
+    arm_resize_settle(state);
+}
+
+/// AppKit reports no end of a live resize to tao, so poll for it: moving the
+/// frame mid-drag would fight the edge under the cursor.
+const RESIZE_SETTLE_POLL: Duration = Duration::from_millis(120);
+
+fn arm_resize_settle(state: &mut TrayState) {
+    if state.resize_settle_armed {
+        return;
+    }
+    state.resize_settle_armed = true;
+    let proxy = state.proxy.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(RESIZE_SETTLE_POLL);
+        let _ = proxy.send_event(UserEvent::ResizeSettle);
+    });
+}
+
+/// Once the drag is over, centre the panel under the status item again at
+/// its new size.
+fn settle_user_resize(state: &mut TrayState) {
+    state.resize_settle_armed = false;
+    if in_live_resize(&state.window) {
+        arm_resize_settle(state);
+        return;
+    }
+    if state.popover_open {
+        position_popover(state);
+    }
+}
+
+fn in_live_resize(window: &Window) -> bool {
+    let ptr = window.ns_window() as *mut NSWindow;
+    // SAFETY: tao owns the NSWindow for the lifetime of `window`.
+    unsafe { ptr.as_ref() }.is_some_and(|window| window.inLiveResize())
+}
+
+/// Back to the default width and a fully automatic height.
+fn reset_panel_size(state: &mut TrayState) {
+    state.panel_size = PanelSize::default();
+    state.panel_size_dirty = true;
+    save_panel_size(state);
+    let visible_h = anchor_visible_height(state.last_anchor);
+    fit_window_to_content(state, visible_h);
+}
+
+fn panel_size_path() -> Option<std::path::PathBuf> {
+    Some(
+        crate::cache::xdg_cache_dir()
+            .ok()?
+            .join("ai-usagebar")
+            .join("tray-panel.json"),
+    )
+}
+
+fn load_panel_size() -> PanelSize {
+    panel_size_path()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| PanelSize::parse(&bytes))
+        .unwrap_or_default()
+}
+
+/// Best-effort: a size that fails to save only means the next run starts at
+/// the default size.
+fn save_panel_size(state: &mut TrayState) {
+    if !state.panel_size_dirty {
+        return;
+    }
+    let (Some(path), Ok(bytes)) = (panel_size_path(), serde_json::to_vec(&state.panel_size)) else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // Stay dirty on failure, so the next close or quit tries again.
+    if crate::cache::atomic_write(&path, &bytes).is_ok() {
+        state.panel_size_dirty = false;
     }
 }
 
@@ -1077,6 +1210,7 @@ fn guard_blur(state: &mut TrayState) {
 fn hide_popover(state: &mut TrayState) {
     state.window.set_visible(false);
     state.popover_open = false;
+    save_panel_size(state);
     if let Some(webview) = state.webview.as_ref() {
         let _ =
             webview.evaluate_script("window.__AIUB_VISIBLE__ && window.__AIUB_VISIBLE__(false)");
@@ -1091,7 +1225,7 @@ fn toggle_popover_from_keyboard(state: &mut TrayState) {
     }
 }
 
-fn position_popover(state: &TrayState) {
+fn position_popover(state: &mut TrayState) {
     let (icon_x, icon_y) = state.last_anchor.unwrap_or_else(cocoa_mouse);
     let (screen, visible) = screen_pair_containing(icon_x, icon_y).unwrap_or((
         CocoaRect {
@@ -1108,14 +1242,15 @@ fn position_popover(state: &TrayState) {
         },
     ));
     let below_y = status_bar_bottom_y(screen).unwrap_or_else(|| menu_bar_bottom_y(screen, visible));
-    let height = clamp_popover_height(state.popover_height, visible.h);
+    let height = fit_popover_height(state.popover_height, visible.h, state.panel_size.max_height);
     let frame = cocoa_popover_frame(PopoverPlacement {
         visible,
         below_y,
         icon_x,
-        popover_w: WINDOW_WIDTH,
+        popover_w: state.panel_size.width,
         popover_h: height,
     });
+    state.applied_height = frame.h;
     apply_cocoa_frame(&state.window, frame);
 }
 

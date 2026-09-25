@@ -73,7 +73,7 @@ export function ResetTimeline({ events, nowMs, timeFormat }: ResetTimelineProps)
               {last ? null : <span className="w-[1.5px] min-h-[10px] flex-1 bg-border" />}
             </span>
             <span className={cn("flex min-w-0 flex-1 items-baseline gap-2", last ? "pb-0" : "pb-2.5")}>
-              <span className="min-w-0 truncate text-[length:var(--sz-support)]">
+              <span className="min-w-0 [overflow-wrap:anywhere] text-[length:var(--sz-support)]">
                 {formatResetExact(event.atMs, nowMs, { timeFormat, locale: language })}
               </span>
               <span className="min-w-2 flex-1" />

@@ -38,6 +38,16 @@ try {
   }
 
   assert.equal(note('exact'), 'Redefine hoje às 12:00');
+  // Tabs name the provider in full and draw its icon: never a short code or initials.
+  const named = renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
+    React.createElement(MacDashboard, {
+      cards: [{ ...card, id: 'anthropic@principal', title: 'Claude · principal' }], layout: emptyLayout(), nowMs,
+      payload: { ...payload, entries: [{ id: 'anthropic@principal', shortName: 'cld', status: 'ready' }], primary: 'anthropic@principal' },
+      onOpenCustomize() {},
+    })));
+  assert.match(named, /<span class="mac-tab-name">Claude · principal<\/span>/);
+  assert.doesNotMatch(named, />cld</);
+  assert.doesNotMatch(named, />CL</);
   assert.equal(note('countdown'), 'Redefine em 1h 0m');
   const withGoal = renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
     React.createElement(MacDashboard, {
@@ -58,7 +68,7 @@ try {
     onAlwaysShowPace() {}, onUsageGoal() {}, onLanguage() {}, onOpenCustomize() {},
     onOpenProvider() {}, onReorderProviders() {}, onToggleProvider() {},
     onResetCustomization() {}, onResetTimes() {}, onShowAs() {},
-    onTheme() {}, onTimeFormat() {}, onTabChange() {},
+    onTheme() {}, onTimeFormat() {}, onPanelView() {}, onShowPlan() {}, onTabChange() {},
   };
   function settingsTab(tab) {
     return renderToStaticMarkup(React.createElement(TooltipProvider, {},
@@ -66,6 +76,8 @@ try {
         React.createElement(Settings, { ...settingsProps, tab }))));
   }
   const general = settingsTab('general');
+  const panelViewTab = ['general', 'preferences'].map(settingsTab).find((html) => /Visualização do painel/.test(html));
+  assert.ok(panelViewTab, 'the Panel View picker is on a macOS settings tab');
   assert.match(general, /role="tablist"/);
   assert.match(general, /Iniciar ao entrar/);
   assert.doesNotMatch(general, /Alertas de limite/);

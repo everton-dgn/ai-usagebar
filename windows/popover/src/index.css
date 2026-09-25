@@ -176,9 +176,12 @@ body:has(.mac-panel) {
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* Tabs size to their word and share the spare width; a panel too narrow for
+   all five scrolls the row sideways instead of breaking a word. */
 .mac-panel .settings-tabs {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: none;
   gap: 2px;
   padding: 3px;
   border-radius: 10px;
@@ -186,18 +189,20 @@ body:has(.mac-panel) {
   box-shadow: inset 0 0 0 0.5px var(--separator);
 }
 
+.mac-panel .settings-tabs::-webkit-scrollbar {
+  display: none;
+}
+
 .mac-panel .settings-tab {
-  min-width: 0;
-  overflow: hidden;
+  flex: 1 0 auto;
   border: 0;
   border-radius: 7px;
-  padding: 7px 2px;
+  padding: 7px 8px;
   background: transparent;
   color: var(--label-2);
   font: inherit;
   font-size: 10px;
   font-weight: 600;
-  text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
 }
@@ -225,7 +230,46 @@ body:has(.mac-panel) {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding: 12px 12px 6px;
+  padding: 4px 4px 6px;
+}
+
+/* Shared by the list and the tabs view, so it sits outside .mac-dashboard. */
+.mac-panel .mac-dashboard-header {
+  gap: 8px;
+  padding: 8px 4px 0;
+  margin-bottom: 12px;
+}
+
+.mac-view-switch {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 10px;
+  background: var(--control-fill);
+}
+
+.mac-view-switch .mac-icon-button {
+  width: 25px;
+  height: 25px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--label-2);
+}
+
+.mac-view-switch .mac-icon-button[data-active="true"] {
+  background: var(--control-fill-hover);
+  color: var(--blue);
+}
+
+/* The list view: one column in a narrow panel, two once the panel is wide
+   enough for two full cards. Cards keep their own height. */
+.provider-grid {
+  display: grid;
+  /* min(): a panel narrower than one column still fits it, never cut. */
+  grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
+  align-items: start;
+  gap: var(--section-gap);
 }
 
 .mac-dashboard-header,
@@ -303,6 +347,15 @@ body:has(.mac-panel) {
   display: none;
 }
 
+.mac-provider-tabs[data-dragging] {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.mac-provider-tabs[data-dragging] .mac-provider-tab {
+  cursor: grabbing;
+}
+
 .mac-provider-tab {
   display: flex;
   flex: none;
@@ -378,19 +431,15 @@ body:has(.mac-panel) {
 }
 
 .mac-provider-title strong {
-  overflow: hidden;
   font-size: 14px;
   font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .mac-provider-title small {
-  overflow: hidden;
   color: var(--label-2);
   font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .mac-provider-refresh {
@@ -542,11 +591,11 @@ body:has(.mac-panel) {
 }
 
 .mac-dashboard-status {
+  flex-wrap: wrap;
   gap: 6px;
   padding: 0 2px;
   color: var(--label-2);
   font-size: 10px;
-  white-space: nowrap;
 }
 
 ::-webkit-scrollbar {

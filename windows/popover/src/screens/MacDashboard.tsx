@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useEffect, useRef, useState, type MouseEvent, type PointerEvent } from "react";
 import MdiCogOutline from "~icons/mdi/cog-outline";
 import MdiRefresh from "~icons/mdi/refresh";
+import MdiTab from "~icons/mdi/tab";
+import MdiViewAgendaOutline from "~icons/mdi/view-agenda-outline";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { useI18n } from "@/lib/i18n";
-import type { Card, Layout, MetricRow, Payload, Row } from "@/lib/types";
-import { nextUpdateLabel, resetText, sendCommand, usageGoal } from "../model.js";
+import type { Card, Layout, MetricRow, PanelView, Payload, Row } from "@/lib/types";
+import { nextUpdateLabel, providerIconId, resetText, sendCommand, usageGoal } from "../model.js";
 
 interface MacDashboardProps {
   cards: Card[];
@@ -12,7 +14,53 @@ interface MacDashboardProps {
   nowMs: number;
   payload: Payload;
   onOpenCustomize: () => void;
+}
+
+interface MacPanelHeaderProps {
+  view: PanelView;
+  onView: (view: PanelView) => void;
   onOpenSettings: () => void;
+}
+
+/** The macOS dashboard header, shared by both views: title, view switch, refresh, settings. */
+export function MacPanelHeader({ view, onView, onOpenSettings }: MacPanelHeaderProps) {
+  const { t } = useI18n();
+  const views: [PanelView, string, typeof MdiTab][] = [
+    ["list", t("List"), MdiViewAgendaOutline],
+    ["tabs", t("Tabs"), MdiTab],
+  ];
+  return (
+    <header className="mac-dashboard-header">
+      <div>
+        <h1>AI Usage</h1>
+        <p>{t("Usage and balance")}</p>
+      </div>
+      <div className="mac-dashboard-actions">
+        <div className="mac-view-switch" role="group" aria-label={t("Panel View")}>
+          {views.map(([id, label, Icon]) => (
+            <button
+              key={id}
+              type="button"
+              className="mac-icon-button"
+              aria-label={label}
+              aria-pressed={view === id}
+              data-active={view === id}
+              title={label}
+              onClick={() => onView(id)}
+            >
+              <Icon aria-hidden />
+            </button>
+          ))}
+        </div>
+        <button type="button" className="mac-icon-button" aria-label={t("Refresh")} title={t("Refresh")} onClick={() => sendCommand("refresh")}>
+          <MdiRefresh aria-hidden />
+        </button>
+        <button type="button" className="mac-icon-button" aria-label={t("Settings")} title={t("Settings")} onClick={onOpenSettings}>
+          <MdiCogOutline aria-hidden />
+        </button>
+      </div>
+    </header>
+  );
 }
 
 function primaryMetric(card: Card): MetricRow | undefined {
@@ -106,10 +154,94 @@ function DetailRow({ row, layout, nowMs }: { row: Row; layout: Layout; nowMs: nu
   );
 }
 
+/** Pointer travel before a press on the tab row counts as a drag, not a click. */
+const DRAG_THRESHOLD = 4;
+
+/**
+ * The tab row scrolls sideways with its scrollbar hidden, so a mouse gets two
+ * ways in: drag the row, or turn the wheel. A drag never also selects a tab.
+ */
+function useDragScroll() {
+  const ref = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ x: number; left: number; moved: boolean; id: number } | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  useEffect(() => {
+    const row = ref.current;
+    if (!row) return;
+    // Native and non-passive: a vertical wheel over the row must scroll it
+    // sideways instead of scrolling the panel underneath.
+    const onWheel = (event: WheelEvent) => {
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+      const max = row.scrollWidth - row.clientWidth;
+      const next = Math.min(max, Math.max(0, row.scrollLeft + event.deltaY));
+      // At either end the row cannot move, so the panel keeps the scroll.
+      if (next === row.scrollLeft) return;
+      row.scrollLeft = next;
+      event.preventDefault();
+    };
+    row.addEventListener("wheel", onWheel, { passive: false });
+    return () => row.removeEventListener("wheel", onWheel);
+  }, []);
+
+  function onPointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || event.pointerType !== "mouse") return;
+    drag.current = { x: event.clientX, left: event.currentTarget.scrollLeft, moved: false, id: event.pointerId };
+  }
+
+  function onPointerMove(event: PointerEvent<HTMLDivElement>) {
+    const state = drag.current;
+    if (!state) return;
+    const dx = event.clientX - state.x;
+    if (!state.moved && Math.abs(dx) > DRAG_THRESHOLD) {
+      state.moved = true;
+      event.currentTarget.setPointerCapture(state.id);
+      setDragging(true);
+    }
+    if (state.moved) event.currentTarget.scrollLeft = state.left - dx;
+  }
+
+  function onPointerEnd(event: PointerEvent<HTMLDivElement>) {
+    const state = drag.current;
+    if (state?.moved && event.currentTarget.hasPointerCapture(state.id)) {
+      event.currentTarget.releasePointerCapture(state.id);
+    }
+    setDragging(false);
+    if (!state?.moved || event.type === "pointercancel") {
+      drag.current = null;
+      return;
+    }
+    // Keep `moved` for the click that ends this press (dispatched in the same
+    // task), then drop it: a press with no click must not swallow the next one.
+    window.setTimeout(() => {
+      if (drag.current === state) drag.current = null;
+    }, 0);
+  }
+
+  function onClickCapture(event: MouseEvent<HTMLDivElement>) {
+    if (drag.current?.moved) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    drag.current = null;
+  }
+
+  return {
+    ref,
+    "data-dragging": dragging || undefined,
+    onClickCapture,
+    onPointerCancel: onPointerEnd,
+    onPointerDown,
+    onPointerMove,
+    onPointerUp: onPointerEnd,
+  };
+}
+
 /** A compact provider switcher for the macOS menu bar popover. */
-export function MacDashboard({ cards, layout, nowMs, payload, onOpenCustomize, onOpenSettings }: MacDashboardProps) {
+export function MacDashboard({ cards, layout, nowMs, payload, onOpenCustomize }: MacDashboardProps) {
   const { language, t } = useI18n();
   const [selectedId, setSelectedId] = useState("");
+  const tabRow = useDragScroll();
   const selected = cards.find((card) => card.id === selectedId)
     ?? cards.find((card) => card.id === payload.primary)
     ?? cards.find((card) => primaryMetric(card))
@@ -121,27 +253,11 @@ export function MacDashboard({ cards, layout, nowMs, payload, onOpenCustomize, o
 
   return (
     <div className="mac-dashboard">
-      <header className="mac-dashboard-header">
-        <div>
-          <h1>AI Usage</h1>
-          <p>{t("Usage and balance")}</p>
-        </div>
-        <div className="mac-dashboard-actions">
-          <button type="button" className="mac-icon-button" aria-label={t("Refresh")} title={t("Refresh")} onClick={() => sendCommand("refresh") }>
-            <MdiRefresh aria-hidden />
-          </button>
-          <button type="button" className="mac-icon-button" aria-label={t("Settings")} title={t("Settings")} onClick={onOpenSettings}>
-            <MdiCogOutline aria-hidden />
-          </button>
-        </div>
-      </header>
-
       {cards.length ? (
         <>
-          <div className="mac-provider-tabs" role="group" aria-label={t("Providers")}>
+          <div className="mac-provider-tabs" role="group" aria-label={t("Providers")} {...tabRow}>
             {cards.map((card) => {
               const active = selected?.id === card.id;
-              const name = payload.entries.find((entry) => entry.id === card.id)?.shortName || card.title;
               return (
                 <button
                   key={card.id}
@@ -151,8 +267,8 @@ export function MacDashboard({ cards, layout, nowMs, payload, onOpenCustomize, o
                   data-active={active}
                   onClick={() => setSelectedId(card.id)}
                 >
-                  <ProviderIcon slug={card.id} title={card.title} size={17} />
-                  <span className="mac-tab-name">{name}</span>
+                  <ProviderIcon slug={providerIconId(card.id)} title={card.title} size={17} />
+                  <span className="mac-tab-name">{card.title}</span>
                   <span className="mac-tab-value">{providerPreview(card)}</span>
                 </button>
               );
@@ -162,10 +278,10 @@ export function MacDashboard({ cards, layout, nowMs, payload, onOpenCustomize, o
           {selected ? (
             <section className="mac-provider-card" aria-label={selected.title}>
               <div className="mac-provider-heading">
-                <span className="mac-provider-mark"><ProviderIcon slug={selected.id} title={selected.title} size={25} /></span>
+                <span className="mac-provider-mark"><ProviderIcon slug={providerIconId(selected.id)} title={selected.title} size={25} /></span>
                 <span className="mac-provider-title">
                   <strong>{selected.title}</strong>
-                  <small>{selected.plan || (selectedEntry?.status === "ready" ? t("Current usage") : t("Usage unavailable"))}{selected.stale ? ` · ${t("Cached")}` : ""}</small>
+                  <small>{(layout.showPlan !== false && selected.plan) || (selectedEntry?.status === "ready" ? t("Current usage") : t("Usage unavailable"))}{selected.stale ? ` · ${t("Cached")}` : ""}</small>
                 </span>
                 <button type="button" className="mac-provider-refresh" title={`${t("Refresh")} ${selected.title}`} aria-label={`${t("Refresh")} ${selected.title}`} onClick={() => sendCommand("refresh-entry", { id: selected.id })}>
                   <MdiRefresh aria-hidden />

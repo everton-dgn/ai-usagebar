@@ -9,6 +9,36 @@ Each release is also published at
 
 ## [Unreleased]
 
+### Added
+
+- **Resize the macOS tray popover.** Drag any edge to make the panel wider or
+  shorter; the size is remembered across runs and the panel re-centres under
+  the menu bar icon when you let go. The height still follows the
+  content, but never grows past the height you chose, and the list scrolls
+  when the content is taller. **Options → Reset Panel Size** restores the
+  default width and the automatic height.
+- **List and Tabs views in the macOS popover.** The List view is back as the
+  default: every provider stacked, with the account star, collapse and
+  reordering, in two columns once the panel is wide enough. Tabs keeps the
+  one-provider-at-a-time view. Switch from the header or Settings →
+  Preferences → Panel View.
+- **Rename a provider card and hide its plan.** Give any card your own name
+  (such as "Codex trabalho" for `Codex · conta2`) from its Customize screen,
+  with a button to restore the original. **Settings → Preferences → Show plan**
+  hides the gray plan name beside each provider. Both live in the popover's
+  own settings; the TUI and the menu bar keep the report's names.
+
+### Fixed
+
+- **The macOS popover never shows letters for a provider.** Tabs used the
+  three-letter short name and two-letter initials for named accounts; they now
+  show the provider's icon and full name, and a provider with no icon of its
+  own gets a generic one.
+- **Popover text wraps instead of being cut.** Provider names, plans, labels
+  and values wrap onto another line rather than ending in "…", and cards
+  shrink to a panel narrower than one column instead of losing their right
+  side.
+
 ## [1.23.0] — 2026-09-24
 
 ### Fixed

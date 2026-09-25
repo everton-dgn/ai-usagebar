@@ -37,7 +37,7 @@ export function About({ nowMs, payload }: AboutProps) {
         </div>
         {payload.repository ? (
           <div className="flex items-center px-[var(--card-pad)] py-[var(--pad-control)]">
-            <span className="min-w-0 truncate text-[length:var(--sz-label)] font-semibold leading-none">
+            <span className="min-w-0 [overflow-wrap:anywhere] text-[length:var(--sz-label)] font-semibold leading-none">
               {t("Source on GitHub")}
             </span>
             <span className="min-w-2 flex-1" />

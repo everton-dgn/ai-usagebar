@@ -13,6 +13,7 @@ import MdiPower from "~icons/mdi/power";
 import MdiRefresh from "~icons/mdi/refresh";
 import MdiUpdate from "~icons/mdi/update";
 import MdiRestore from "~icons/mdi/restore";
+import MdiResize from "~icons/mdi/resize";
 import MdiTune from "~icons/mdi/tune-variant";
 import {
   DropdownMenu,
@@ -42,7 +43,7 @@ export function TopBar({ onBack, onReset, resetArmed, resetLabel, title }: TopBa
       <button type="button" aria-label={t("Back")} className="circle-btn" title={t("Back")} onClick={onBack}>
         <MdiChevronLeft className="size-4" />
       </button>
-      <h1 className="m-0 truncate text-center text-[13px] font-semibold">{title}</h1>
+      <h1 className="m-0 [overflow-wrap:anywhere] text-center text-[13px] font-semibold">{title}</h1>
       {onReset ? (
         <button
           type="button"
@@ -131,6 +132,9 @@ export function Footer({
           <MenuItem icon={<MdiRefresh />} label={t("Refresh")} onSelect={() => sendCommand("refresh")} />
           <MenuItem icon={<MdiMagnifyScan />} label={t("Detect Providers")} onSelect={() => sendCommand("detect")} />
           <MenuItem icon={<MdiConsole />} label={t("Open TUI")} onSelect={() => sendCommand("open-tui")} />
+          {payload.os === "macos" ? (
+            <MenuItem icon={<MdiResize />} label={t("Reset Panel Size")} onSelect={() => sendCommand("reset-panel-size")} />
+          ) : null}
           <DropdownMenuSeparator />
           <MenuItem
             checked={payload.startupEnabled}
@@ -197,8 +201,8 @@ export function ScreenCrossLinkRow({ icon, subtitle, title, onClick }: ScreenCro
     >
       <span className="grid size-[18px] shrink-0 place-items-center text-label-2 [&_svg]:size-[15px]">{icon}</span>
       <span className="flex min-w-0 flex-1 flex-col">
-        <span className="truncate text-[length:var(--sz-header)] font-semibold">{title}</span>
-        <span className="truncate text-[length:var(--sz-badge)] text-label-2">{subtitle}</span>
+        <span className="[overflow-wrap:anywhere] text-[length:var(--sz-header)] font-semibold">{title}</span>
+        <span className="[overflow-wrap:anywhere] text-[length:var(--sz-badge)] text-label-2">{subtitle}</span>
       </span>
       <MdiChevronRight className="size-3.5 shrink-0 text-label-3" />
     </button>

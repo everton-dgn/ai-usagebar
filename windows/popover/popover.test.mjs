@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import {
   accountSwitchFor,
+  applyCardNames,
+  renameCard,
   formatDuration,
   nextUpdateLabel,
   parseHostPayload,
@@ -1418,6 +1420,33 @@ assert.equal(resolvedTheme('system'), 'light');
   assert.equal(accountSwitchFor('cursor@x', payload.accounts), null);
   assert.equal(accountSwitchFor('openai@work', {}), null);
   assert.deepEqual(parseHostPayload(JSON.stringify({ entries: [] })).accounts, {});
+}
+
+// Custom card names: applied over the report's name, kept apart from it, cleared by an empty name.
+{
+  const cards = [{ id: 'openai@conta2', title: 'Codex · conta2' }, { id: 'zai', title: 'Z.AI' }];
+  const names = renameCard({}, 'openai@conta2', '  Codex trabalho\n ');
+  assert.deepEqual(names, { 'openai@conta2': 'Codex trabalho' });
+  const named = applyCardNames(cards, names);
+  assert.equal(named[0].title, 'Codex trabalho');
+  assert.equal(named[0].defaultTitle, 'Codex · conta2');
+  assert.equal(named[1].title, 'Z.AI');
+  assert.equal(named[1].defaultTitle, undefined);
+  assert.deepEqual(renameCard(names, 'openai@conta2', '   '), {});
+  assert.deepEqual(normalizeLayout({ names: { 'zai': 'GLM', '': 'x', bad: 42 } }).names, { zai: 'GLM', bad: '42' });
+  assert.equal(normalizeLayout({}).showPlan, true);
+  assert.equal(normalizeLayout({ showPlan: false }).showPlan, false);
+}
+
+// Every provider id finds its own mark: the report slug uses a dash where the icon file has an underscore.
+assert.equal(providerIconId('opencode-go'), 'opencode_go');
+assert.equal(providerIconId('opencode-go@work'), 'opencode_go');
+
+// macOS panel view: the list is the default, and only "tabs" switches it.
+{
+  assert.equal(normalizeLayout({}).panelView, 'list');
+  assert.equal(normalizeLayout({ panelView: 'tabs' }).panelView, 'tabs');
+  assert.equal(normalizeLayout({ panelView: 'grid' }).panelView, 'list');
 }
 
 console.log('ok');

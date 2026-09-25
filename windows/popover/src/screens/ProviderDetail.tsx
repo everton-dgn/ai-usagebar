@@ -7,7 +7,7 @@ import {
   type DragStartEvent,
 } from "@dnd-kit/core";
 import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DragHandle } from "@/components/DragHandle";
 import {
   handleRowDragEnd,
@@ -33,13 +33,14 @@ interface ProviderDetailProps {
   onReorderRows: (lists: RowLists) => void;
   onToggleRow: (key: string, on: boolean) => void;
   onToggleStar: (key: string) => void;
+  onRename?: (name: string) => void;
 }
 
 /**
  * CustomizeProviderDetailView (L2): Always Visible and On Demand grouped cards. Rows drag within
  * a card or across the divider; an empty card shows the dashed "Drag metrics here" target.
  */
-export function ProviderDetail({ card, layout, starError, onReorderRows, onToggleRow, onToggleStar }: ProviderDetailProps) {
+export function ProviderDetail({ card, layout, starError, onReorderRows, onToggleRow, onToggleStar, onRename }: ProviderDetailProps) {
   const { t } = useI18n();
   const sensors = useTraySensors();
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -88,6 +89,7 @@ export function ProviderDetail({ card, layout, starError, onReorderRows, onToggl
       }}
     >
       <div className="flex flex-col gap-[var(--section-gap)]">
+        {onRename ? <NameField card={card} onRename={onRename} /> : null}
         <MetricSection
           byKey={byKey}
           cardId={card.id}
@@ -122,6 +124,52 @@ export function ProviderDetail({ card, layout, starError, onReorderRows, onToggl
         ) : null}
       </DragOverlay>
     </DndContext>
+  );
+}
+
+/** The card's own name; empty or the report's name goes back to the report's name. */
+function NameField({ card, onRename }: { card: Card; onRename: (name: string) => void }) {
+  const { t } = useI18n();
+  const original = card.defaultTitle || card.title;
+  const [draft, setDraft] = useState(card.title);
+  useEffect(() => setDraft(card.title), [card.title]);
+
+  function save() {
+    const name = draft.trim();
+    if (name === card.title) return;
+    onRename(name === original ? "" : name);
+  }
+
+  return (
+    <div className="flex flex-col gap-[var(--header-card-gap)]">
+      <div className="section-title">{t("Name")}</div>
+      <div className="card-surface flex flex-wrap items-center gap-2 p-2">
+        <input
+          type="text"
+          maxLength={80}
+          className="h-7 min-w-0 flex-1 rounded-[6px] border border-[var(--border)] bg-[var(--control-fill)] px-1.5"
+          aria-label={t("Name")}
+          placeholder={original}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={save}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+            if (event.key === "Escape") {
+              // Cancel the edit only; the screen's own Escape must not also go back.
+              event.stopPropagation();
+              event.nativeEvent.stopImmediatePropagation();
+              setDraft(card.title);
+            }
+          }}
+        />
+        {card.defaultTitle ? (
+          <button type="button" className="plain-btn text-label-2" onClick={() => onRename("")}>
+            {t("Restore original name")}
+          </button>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -193,7 +241,7 @@ function MetricTuneRow({ enabled, handle, row, starred, onStar, onToggle }: Metr
   return (
     <div data-row-key={rowKey(row)} className="flex items-center gap-[10px] px-[var(--pad-control)] py-[var(--pad-control)]">
       <DragHandle attributes={handle?.attributes} listeners={handle?.listeners} />
-      <span className="min-w-0 flex-1 truncate">{title}</span>
+      <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{title}</span>
       {onStar ? (
         <button
           type="button"

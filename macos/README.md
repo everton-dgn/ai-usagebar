@@ -27,7 +27,18 @@ cargo build --release --bin ai-usagebar-tray
 Needs Node.js 20+ on PATH for the first build (`windows/popover/` Vite bundle).
 Click either mouse button on the status item to toggle the popover. Display
 options are in Settings; the footer's Options menu has Detect Providers,
-Open TUI, Start at Login, and Quit. No Dock icon.
+Open TUI, Reset Panel Size, Start at Login, and Quit. No Dock icon.
+
+Drag any edge of the popover to resize it. The width and the height you pick
+are remembered across runs (`~/Library/Caches/ai-usagebar/tray-panel.json`). The panel
+still shrinks to short content, never grows past the height you chose, and
+scrolls the list when the content is taller. **Options → Reset Panel Size**
+goes back to the default width and a fully automatic height.
+
+The header switches between two views, also under **Settings → Preferences →
+Panel View**: **List** (default) stacks every provider, with the account star,
+and uses two columns in a wide panel; **Tabs** shows one provider at a time,
+with the providers in one row that scrolls sideways.
 
 ![Previous chart-only mode in the macOS menu bar, next to the Cursor, Claude, Antigravity, Codex and Claude Code icons](../screenshots/macos-tray-icon.png)
 

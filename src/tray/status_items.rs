@@ -30,7 +30,7 @@ const MARK_SIDE: f64 = 15.0;
 
 const ITEM_PADDING: &str = "  ";
 const PADDING_KERN: f64 = -2.0;
-const CHART_GAP_KERN: f64 = 10.0;
+const CHART_GAP_KERN: f64 = 20.0;
 
 /// What a provider item or its menu reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

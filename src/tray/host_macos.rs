@@ -1241,7 +1241,16 @@ fn install_outside_click_monitor(proxy: EventLoopProxy<UserEvent>) -> Option<Ret
     let block = RcBlock::new(move |_event: NonNull<NSEvent>| {
         let _ = proxy.send_event(UserEvent::OutsideClick);
     });
-    NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &block)
+    let monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &block);
+    if monitor.is_none() {
+        // Losing focus still closes the popover; only presses that take no
+        // focus (the menu bar, another status item) will not.
+        eprintln!(
+            "ai-usagebar-tray: could not watch clicks outside the popover; \
+             clicks in the menu bar will not close it"
+        );
+    }
+    monitor
 }
 
 /// Whether a mouse button is down over our status item right now.

@@ -39,6 +39,7 @@ import {
   LAYOUT_KEY,
   normalizeLayout,
   normalizeColorThresholds,
+  commitColorThresholds,
   usageColor,
   resetText,
   resetAlternate,
@@ -469,6 +470,12 @@ assert.deepEqual(normalizeColorThresholds({ yellow: 'x', red: 150 }), { yellow: 
 assert.deepEqual(normalizeColorThresholds({ yellow: 90, red: 80 }), { yellow: 90, red: 91 });
 assert.deepEqual(normalizeColorThresholds({ yellow: 100, red: 100 }), { yellow: 99, red: 100 });
 assert.deepEqual(normalizeLayout({ colorThresholds: { yellow: 60 } }).colorThresholds, { yellow: 60, red: 85 });
+// A settings edit commits the typed strings normalized, and only when they change something.
+assert.deepEqual(commitColorThresholds({ yellow: '60', red: '80' }, { yellow: 70, red: 85 }), { next: { yellow: 60, red: 80 }, changed: true });
+assert.deepEqual(commitColorThresholds({ yellow: '70', red: '85' }, { yellow: 70, red: 85 }), { next: { yellow: 70, red: 85 }, changed: false });
+// Red typed at or below yellow is kept above it, which the inputs' bounds announce.
+assert.deepEqual(commitColorThresholds({ yellow: '70', red: '60' }, { yellow: 70, red: 85 }), { next: { yellow: 70, red: 71 }, changed: true });
+assert.deepEqual(commitColorThresholds({ yellow: '', red: 'x' }, { yellow: 50, red: 60 }), { next: { yellow: 70, red: 85 }, changed: true });
 
 // --- resetText / resetAlternate / formatResetExact ---------------------------
 

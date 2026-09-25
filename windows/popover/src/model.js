@@ -401,6 +401,17 @@ export function normalizeColorThresholds(value) {
 }
 
 /**
+ * The thresholds a settings edit commits: the typed `draft` normalized, and
+ * whether that differs from `current` (nothing to save when it does not).
+ * @returns {{ next: import("./lib/types").ColorThresholds, changed: boolean }}
+ */
+export function commitColorThresholds(draft, current) {
+  const next = normalizeColorThresholds(draft);
+  const now = normalizeColorThresholds(current);
+  return { next, changed: next.yellow !== now.yellow || next.red !== now.red };
+}
+
+/**
  * A usage bar's color from how much of the quota is used: green, then
  * yellow and red at the configured thresholds. A spent quota is red whatever
  * the number says. Pace keeps its own signal (the flame note).

@@ -60,7 +60,7 @@ const portuguese: Record<string, string> = {
   "Installing…": "Instalando…",
   "Language": "Idioma",
   "Bar colors": "Cores das barras",
-  "Bars are green below the yellow threshold. Percentages count what is used, like the Claude Code statusline.": "As barras ficam verdes abaixo do limite do amarelo. Os percentuais contam o que já foi usado, como na statusline do Claude Code.",
+  "Bars are green below the yellow threshold, and red must be above yellow. Percentages count what is used, like the Claude Code statusline.": "As barras ficam verdes abaixo do limite do amarelo, e o vermelho precisa ficar acima do amarelo. Os percentuais contam o que já foi usado, como na statusline do Claude Code.",
   "Default": "Padrão",
   "Red from": "Vermelho a partir de",
   "Yellow from": "Amarelo a partir de",

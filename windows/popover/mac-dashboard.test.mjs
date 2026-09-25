@@ -8,6 +8,7 @@ const server = await createServer({ server: { middlewareMode: true, hmr: false, 
 
 try {
   const { MacDashboard } = await server.ssrLoadModule('/src/screens/MacDashboard.tsx');
+  const { ProviderSection } = await server.ssrLoadModule('/src/components/ProviderSection.tsx');
   const { Settings } = await server.ssrLoadModule('/src/screens/Settings.tsx');
   const { TooltipProvider } = await server.ssrLoadModule('/src/components/ui/tooltip.tsx');
   const { LanguageProvider } = await server.ssrLoadModule('/src/lib/i18n.tsx');
@@ -97,6 +98,28 @@ try {
   assert.match(preferences, /Exibição do uso/);
   assert.match(preferences, /Meta de uso/);
   assert.doesNotMatch(preferences, /Barra de menus/);
+  // Both views color the bar by what is used, with the thresholds from the layout.
+  const at = (used) => ({ ...card, rows: [{ ...card.rows[0], usedPercent: used, leftPercent: 100 - used, value: `${used}%` }] });
+  const tabsColor = (used, colorThresholds) => renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
+    React.createElement(MacDashboard, {
+      cards: [at(used)], layout: { ...emptyLayout(), colorThresholds }, nowMs, payload,
+      onOpenCustomize() {}, onOpenSettings() {},
+    }))).match(/class="mac-meter-fill" data-color="(\w+)"/)?.[1];
+  const listColor = (used, colorThresholds) => renderToStaticMarkup(React.createElement(TooltipProvider, {},
+    React.createElement(LanguageProvider, { language: 'pt-BR' },
+      React.createElement(ProviderSection, { card: at(used), layout: { ...emptyLayout(), colorThresholds }, nowMs })))).match(/class="meter-fill" data-color="(\w+)"/)?.[1];
+  for (const color of [tabsColor, listColor]) {
+    assert.equal(color(46, { yellow: 70, red: 85 }), 'green');
+    assert.equal(color(75, { yellow: 70, red: 85 }), 'yellow');
+    assert.equal(color(90, { yellow: 70, red: 85 }), 'red');
+    assert.equal(color(75, { yellow: 80, red: 95 }), 'green');
+  }
+  // The threshold inputs carry the red-above-yellow rule as their bounds.
+  const colors = renderToStaticMarkup(React.createElement(TooltipProvider, {},
+    React.createElement(LanguageProvider, { language: 'pt-BR' },
+      React.createElement(Settings, { ...settingsProps, layout: { ...emptyLayout(), colorThresholds: { yellow: 60, red: 80 } }, tab: 'preferences' }))));
+  assert.match(colors, /min="1" max="79"[^>]*aria-label="Amarelo a partir de"/);
+  assert.match(colors, /min="61" max="100"[^>]*aria-label="Vermelho a partir de"/);
   console.log('macOS dashboard reset display: ok');
 } finally {
   await server.close();

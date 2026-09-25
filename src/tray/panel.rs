@@ -75,6 +75,7 @@ pub struct PanelSize {
 }
 
 impl Default for PanelSize {
+    /// The first-run size: the default width and the automatic height.
     fn default() -> Self {
         Self {
             width: WINDOW_WIDTH,

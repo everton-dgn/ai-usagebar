@@ -91,6 +91,7 @@ function providerPreview(card: Card): string {
   return balance?.kind === "text" ? balance.value : "—";
 }
 
+/** One usage metric in the tabs view: label and percent, the colored meter, then the reset note. */
 function Metric({ row, layout, nowMs }: { row: MetricRow; layout: Layout; nowMs: number }) {
   const { language, metricLabel, t } = useI18n();
   const percent = Math.min(100, Math.max(0, Number(row.usedPercent) || 0));

@@ -346,6 +346,7 @@ interface HeaderActionProps {
   onClick: () => void;
 }
 
+/** An icon button in a provider header (Customize, Reset) that keeps its keys and presses from the drag handle. */
 function HeaderAction({ className, icon, label, onClick }: HeaderActionProps) {
   return (
     <button

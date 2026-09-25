@@ -369,6 +369,7 @@ export function headlineAlternate(row, showAs) {
   return percentHeadline(row, showAs === "used" ? "left" : "used");
 }
 
+/** A percent row's headline in the given reading: "N% used" or "N% left". */
 function percentHeadline(row, showAs) {
   if (showAs === "used") return row.usedPercent + "% used";
   return row.leftPercent + "% left";
@@ -597,6 +598,7 @@ export function usageGoal(row, nowMs) {
   return { percent: clampPercent((now - startMs) * 100 / (resetMs - startMs)), estimated };
 }
 
+/** A number held to 0..100, with anything non-finite read as 0. */
 function clampPercent(value) {
   const number = finiteNumber(value);
   return Math.max(0, Math.min(100, number));

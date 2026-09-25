@@ -64,6 +64,7 @@ import {
   isStarred,
   seedStars,
   stripCommand,
+  normalizeMenuBarItems,
   MAX_STARS_PER_PROVIDER,
   expirySeverity,
   providerLinks,
@@ -1293,6 +1294,7 @@ assert.equal(resolvedTheme('system'), 'light');
     stars,
     order: ['anthropic'],
     names: {},
+    language: 'en',
   });
 }
 
@@ -1316,6 +1318,26 @@ assert.equal(resolvedTheme('system'), 'light');
   // Only visible cards' custom titles go to the host, cleaned like the layout's.
   const named = { ...layout, names: { openai: 'Work\u202e Codex', gone: 'Hidden' } };
   assert.deepEqual(stripCommand(named, cards).names, { openai: 'Work Codex' });
+  // The host builds its native provider menus in the popover's language.
+  assert.equal(stripCommand({ ...layout, language: 'pt-BR' }, cards).language, 'pt-BR');
+}
+
+{
+  // Per-provider menu-bar settings: known windows only, `null` for an unset value.
+  assert.deepEqual(normalizeMenuBarItems({
+    'openai@work': { window: 'session', hide_value: true },
+    zai: { hidden: true, window: 'yearly' },
+    '': { hidden: true },
+    kimi: 'x',
+  }), {
+    'openai@work': { window: 'session', hideValue: true, hidden: false },
+    zai: { window: 'auto', hideValue: null, hidden: true },
+  });
+  assert.deepEqual(normalizeMenuBarItems(null), {});
+  const parsed = parseHostPayload({ menu_bar_items: { zai: { hidden: true } }, menu_bar_active_account_only: true });
+  assert.equal(parsed.menuBarItems.zai.hidden, true);
+  assert.equal(parsed.menuBarActiveAccountOnly, true);
+  assert.equal(parseHostPayload({}).menuBarActiveAccountOnly, false);
 }
 
 {

@@ -239,6 +239,10 @@ export interface Payload {
   menuBarProvider: string;
   menuBarWindow: "auto" | "session" | "weekly" | "monthly";
   menuBarChart: boolean;
+  /** Per-provider menu-bar settings, keyed by entry id; absent ids follow the menu bar. */
+  menuBarItems: Record<string, MenuBarItem>;
+  /** With several accounts of one provider, the menu bar shows only the one in use. */
+  menuBarActiveAccountOnly: boolean;
   notificationsEnabled: boolean;
   notificationsThreshold: number;
   /** Host OS: macos, windows, or linux. */
@@ -259,3 +263,10 @@ export interface Payload {
 }
 
 export type Screen = "about" | "customize" | "dashboard" | "provider" | "settings";
+
+/** One provider's menu-bar settings. `hideValue: null` follows the menu bar. */
+export interface MenuBarItem {
+  window: "auto" | "session" | "weekly" | "monthly";
+  hideValue: boolean | null;
+  hidden: boolean;
+}

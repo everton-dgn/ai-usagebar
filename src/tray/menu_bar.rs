@@ -8,9 +8,12 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
+use crate::config::MenuBarItemConfig;
+
 pub const HIGHEST_PROVIDER: &str = "highest";
 
-/// Space between two providers in the menu bar.
+/// Space between two providers in the plain-text menu bar the tests read.
+#[cfg(test)]
 pub const CHIP_GAP: &str = "     ";
 
 /// The popover's bundled provider marks (`windows/popover/src/icons/providers`),
@@ -86,6 +89,7 @@ const MARK_ALIASES: &[(&str, &str)] = &[("supergrok", "grok"), ("opencode-go", "
 /// the tooltip and for when the mark cannot be drawn, and its value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chip {
+    pub id: String,
     pub mark: Option<&'static str>,
     pub name: String,
     pub value: Option<String>,
@@ -225,25 +229,55 @@ pub fn next_id(
     Some(ids[(index + 1) % ids.len()].to_owned())
 }
 
-/// The menu bar's providers, in display order. `names` are the popover's
-/// custom card titles, which win over the report's names.
-pub fn chips(
-    payload: &Value,
-    remembered: &str,
-    show_all: bool,
-    show_value: bool,
-    window: UsageWindow,
-    visible: Option<&[String]>,
-    names: &BTreeMap<String, String>,
-) -> Vec<Chip> {
-    displayed_entries(payload, remembered, show_all, window, visible)
+/// What the menu bar shows and how: the `[tray]` settings, each provider's
+/// overrides, and the popover's card order and custom titles.
+#[derive(Debug, Clone, Copy)]
+pub struct View<'a> {
+    pub remembered: &'a str,
+    pub show_all: bool,
+    pub show_value: bool,
+    pub window: UsageWindow,
+    /// The popover's visible cards in order; `None` before it reports them.
+    pub visible: Option<&'a [String]>,
+    /// The popover's custom card titles, which win over the report's names.
+    pub names: &'a BTreeMap<String, String>,
+    pub items: &'a BTreeMap<String, MenuBarItemConfig>,
+    /// With several accounts of one provider, only the one in use shows.
+    pub active_account_only: bool,
+}
+
+impl View<'_> {
+    /// The quota window a provider's chip reads.
+    pub fn window_for(&self, id: &str) -> UsageWindow {
+        self.items
+            .get(id)
+            .and_then(|item| item.window.as_deref())
+            .map_or(self.window, UsageWindow::parse)
+    }
+
+    fn show_value_for(&self, id: &str) -> bool {
+        self.items
+            .get(id)
+            .and_then(|item| item.hide_value)
+            .map_or(self.show_value, |hide| !hide)
+    }
+
+    fn hidden(&self, id: &str) -> bool {
+        self.items.get(id).is_some_and(|item| item.hidden)
+    }
+}
+
+/// The menu bar's providers, in display order.
+pub fn chips(payload: &Value, view: &View) -> Vec<Chip> {
+    displayed_entries(payload, view)
         .into_iter()
-        .map(|entry| chip(entry, show_value, window, names))
+        .map(|entry| chip(entry, view))
         .filter(|chip| chip.mark.is_some() || !chip.name.is_empty())
         .collect()
 }
 
 /// The menu bar as plain text: every chip's name and value.
+#[cfg(test)]
 pub fn text(chips: &[Chip]) -> String {
     chips
         .iter()
@@ -255,18 +289,13 @@ pub fn text(chips: &[Chip]) -> String {
 
 /// Rendered by the macOS status item only; the Linux test build never calls it.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn tooltip(
-    payload: &Value,
-    remembered: &str,
-    show_all: bool,
-    window: UsageWindow,
-    visible: Option<&[String]>,
-    names: &BTreeMap<String, String>,
-) -> String {
-    let lines: Vec<String> = displayed_entries(payload, remembered, show_all, window, visible)
+pub fn tooltip(payload: &Value, view: &View) -> String {
+    let lines: Vec<String> = displayed_entries(payload, view)
         .into_iter()
         .map(|entry| {
-            let name = entry_name(entry, names).unwrap_or("AI Usage");
+            let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
+            let window = view.window_for(id);
+            let name = entry_name(entry, view.names).unwrap_or("AI Usage");
             let stale = if entry.get("stale").and_then(Value::as_bool) == Some(true) {
                 " · cached"
             } else {
@@ -286,15 +315,16 @@ pub fn tooltip(
     }
 }
 
-fn displayed_entries<'a>(
-    payload: &'a Value,
-    remembered: &'a str,
-    show_all: bool,
-    window: UsageWindow,
-    visible: Option<&[String]>,
-) -> Vec<&'a Value> {
-    let entries = eligible_entries(payload, visible);
-    if show_all {
+fn displayed_entries<'a>(payload: &'a Value, view: &View) -> Vec<&'a Value> {
+    let accounts = payload.get("accounts");
+    let entries: Vec<&Value> = eligible_entries(payload, view.visible)
+        .into_iter()
+        .filter(|entry| {
+            let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
+            !view.hidden(id) && (!view.active_account_only || is_active_account(id, accounts))
+        })
+        .collect();
+    if view.show_all {
         let ready: Vec<&Value> = entries
             .iter()
             .copied()
@@ -304,7 +334,7 @@ fn displayed_entries<'a>(
             return ready;
         }
     }
-    let selected = selected_id(payload, remembered, window, visible);
+    let selected = selected_id(payload, view.remembered, view.window, view.visible);
     entries
         .into_iter()
         .filter(|entry| entry.get("id").and_then(Value::as_str) == selected)
@@ -368,6 +398,24 @@ fn best_metric(entry: &Value, window: UsageWindow, fallback: bool) -> Option<&Va
     })
 }
 
+/// Whether an entry is the account in use for its provider. Providers without
+/// switchable accounts always count; with them, the unnamed entry stands for
+/// the live login only when no named account holds it.
+fn is_active_account(id: &str, accounts: Option<&Value>) -> bool {
+    let (vendor, label) = match id.split_once('@') {
+        Some((vendor, label)) => (vendor, Some(label)),
+        None => (id, None),
+    };
+    let Some(info) = accounts.and_then(|accounts| accounts.get(vendor)) else {
+        return true;
+    };
+    let active = info
+        .get("active")
+        .and_then(Value::as_str)
+        .filter(|active| !active.is_empty());
+    label == active
+}
+
 /// The custom title for an entry, else the report's name.
 fn entry_name<'a>(entry: &'a Value, names: &'a BTreeMap<String, String>) -> Option<&'a str> {
     let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
@@ -381,19 +429,17 @@ fn entry_name<'a>(entry: &'a Value, names: &'a BTreeMap<String, String>) -> Opti
 
 /// One entry's chip: its mark, its name (custom, reported, short, or the id's
 /// vendor) and, unless values are hidden, its headline.
-fn chip(
-    entry: &Value,
-    show_value: bool,
-    window: UsageWindow,
-    names: &BTreeMap<String, String>,
-) -> Chip {
+fn chip(entry: &Value, view: &View) -> Chip {
     let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
-    let name = entry_name(entry, names)
+    let window = view.window_for(id);
+    let show_value = view.show_value_for(id);
+    let name = entry_name(entry, view.names)
         .or_else(|| entry.get("short_name").and_then(Value::as_str))
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| id.split('@').next().unwrap_or(""));
     let name = safe_text(name, 24);
     Chip {
+        id: id.to_owned(),
         mark: mark_for(id),
         value: (show_value && !name.is_empty()).then(|| headline(entry, window)),
         name,
@@ -497,7 +543,29 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// `title` without custom names, as every report-only case reads it.
+    static NO_NAMES: BTreeMap<String, String> = BTreeMap::new();
+    static NO_ITEMS: BTreeMap<String, MenuBarItemConfig> = BTreeMap::new();
+
+    fn view<'a>(
+        remembered: &'a str,
+        show_all: bool,
+        show_value: bool,
+        window: UsageWindow,
+        visible: Option<&'a [String]>,
+    ) -> View<'a> {
+        View {
+            remembered,
+            show_all,
+            show_value,
+            window,
+            visible,
+            names: &NO_NAMES,
+            items: &NO_ITEMS,
+            active_account_only: false,
+        }
+    }
+
+    /// The plain-text menu bar with only the `[tray]` settings.
     fn title(
         payload: &Value,
         remembered: &str,
@@ -508,13 +576,90 @@ mod tests {
     ) -> String {
         text(&chips(
             payload,
-            remembered,
-            show_all,
-            show_value,
-            window,
-            visible,
-            &BTreeMap::new(),
+            &view(remembered, show_all, show_value, window, visible),
         ))
+    }
+
+    #[test]
+    fn providers_can_be_hidden_or_read_their_own_window_and_value() {
+        let report = json!({"primary":"anthropic", "entries":[
+            {"id":"anthropic", "display_name":"Claude", "status":"ready", "sections":[
+                {"type":"metric", "label":"Session", "percent":40, "window_secs":18000},
+                {"type":"metric", "label":"Weekly", "percent":70, "window_secs":604800}
+            ]},
+            {"id":"openai", "display_name":"Codex", "status":"ready", "sections":[
+                {"type":"metric", "label":"Session", "percent":10, "window_secs":18000},
+                {"type":"metric", "label":"Weekly", "percent":30, "window_secs":604800}
+            ]},
+            {"id":"kilo", "display_name":"Kilo", "status":"ready", "sections":[
+                {"type":"metric", "label":"Weekly", "percent":5}
+            ]}
+        ]});
+        let items = BTreeMap::from([
+            (
+                "anthropic".to_string(),
+                MenuBarItemConfig {
+                    window: Some("session".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "openai".to_string(),
+                MenuBarItemConfig {
+                    hide_value: Some(true),
+                    ..Default::default()
+                },
+            ),
+            (
+                "kilo".to_string(),
+                MenuBarItemConfig {
+                    hidden: true,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let view = View {
+            items: &items,
+            ..view("", true, true, UsageWindow::Weekly, None)
+        };
+        let shown = chips(&report, &view);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown[0].value.as_deref(), Some("40%"));
+        assert_eq!(shown[1].value, None);
+        assert_eq!(view.window_for("openai"), UsageWindow::Weekly);
+        assert!(!tooltip(&report, &view).contains("Kilo"));
+    }
+
+    #[test]
+    fn active_account_only_keeps_the_login_in_use() {
+        let report = json!({"primary":"anthropic",
+        "accounts": {"anthropic": {"active": "work", "labels": ["work", "home"]}},
+        "entries":[
+            {"id":"anthropic", "display_name":"Claude", "status":"ready"},
+            {"id":"anthropic@work", "display_name":"Claude · work", "status":"ready"},
+            {"id":"anthropic@home", "display_name":"Claude · home", "status":"ready"},
+            {"id":"openai", "display_name":"Codex", "status":"ready"}
+        ]});
+        let all = chips(&report, &view("", true, false, UsageWindow::Auto, None));
+        assert_eq!(all.len(), 4);
+        let active = View {
+            active_account_only: true,
+            ..view("", true, false, UsageWindow::Auto, None)
+        };
+        let ids: Vec<String> = chips(&report, &active)
+            .into_iter()
+            .map(|chip| chip.id)
+            .collect();
+        assert_eq!(ids, ["anthropic@work", "openai"]);
+
+        // No named account holds the login: the unnamed entry is the one in use.
+        let mut report = report;
+        report["accounts"]["anthropic"]["active"] = Value::Null;
+        let ids: Vec<String> = chips(&report, &active)
+            .into_iter()
+            .map(|chip| chip.id)
+            .collect();
+        assert_eq!(ids, ["anthropic", "openai"]);
     }
 
     #[test]
@@ -528,7 +673,11 @@ mod tests {
             ]}
         ]});
         let names = BTreeMap::from([("anthropic".to_string(), "Work \u{202e}Claude".to_string())]);
-        let shown = chips(&report, "", true, true, UsageWindow::Auto, None, &names);
+        let named = View {
+            names: &names,
+            ..view("", true, true, UsageWindow::Auto, None)
+        };
+        let shown = chips(&report, &named);
         assert_eq!(shown[0].name, "Work Claude");
         assert_eq!(shown[0].value.as_deref(), Some("21%"));
         assert!(shown[0].mark.is_some());
@@ -536,12 +685,15 @@ mod tests {
         assert_eq!(shown[1].mark, None);
         assert_eq!(shown[1].text(), "Kilo 5%");
         assert_eq!(text(&shown), "Work Claude 21%     Kilo 5%");
-        assert!(
-            tooltip(&report, "", true, UsageWindow::Auto, None, &names)
-                .starts_with("Work Claude · 21%")
-        );
+        assert!(tooltip(&report, &named).starts_with("Work Claude · 21%"));
         // Hidden values leave the mark alone, or the name without a mark.
-        let bare = chips(&report, "", true, false, UsageWindow::Auto, None, &names);
+        let bare = chips(
+            &report,
+            &View {
+                show_value: false,
+                ..named
+            },
+        );
         assert_eq!(bare[0].value, None);
         assert_eq!(bare[1].text(), "Kilo");
     }

@@ -122,6 +122,24 @@ pub struct TrayConfig {
     pub menu_bar_hide_value: bool,
     /// Which quota window the macOS menu bar displays.
     pub menu_bar_window: Option<String>,
+    /// Per-provider overrides for the macOS menu bar, keyed by report entry
+    /// id (`[tray.menu_bar_items."openai@work"]`).
+    pub menu_bar_items: BTreeMap<String, MenuBarItemConfig>,
+    /// With several accounts of one provider, the menu bar shows only the one
+    /// in use.
+    pub menu_bar_active_account_only: bool,
+}
+
+/// One provider's menu-bar settings. Unset fields follow the `[tray]` ones.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct MenuBarItemConfig {
+    /// Quota window for this provider: `auto`, `session`, `weekly`, `monthly`.
+    pub window: Option<String>,
+    /// Hide this provider's value, leaving its icon or name.
+    pub hide_value: Option<bool>,
+    /// Keep this provider out of the menu bar.
+    pub hidden: bool,
 }
 
 /// Poll intervals the tray offers, in minutes. The provider cache TTL is
@@ -713,6 +731,60 @@ pub fn set_tray_value(path: &Path, key: &str, value: Option<toml_edit::Value>) -
     let mut doc = read_config_document(path)?;
     let before = doc.to_string();
     set_value(&mut doc, "tray", key, value)?;
+    if doc.to_string() == before {
+        return Ok(());
+    }
+    write_config_document(path, &doc)
+}
+
+/// Set or clear one key of a provider's `[tray.menu_bar_items."<id>"]`
+/// table, leaving other config and comments alone. A table left empty is
+/// removed.
+pub fn set_menu_bar_item_value(
+    path: &Path,
+    id: &str,
+    key: &str,
+    value: Option<toml_edit::Value>,
+) -> Result<()> {
+    if !matches!(key, "window" | "hide_value" | "hidden") || id.trim().is_empty() {
+        return Err(AppError::Other(format!(
+            "invalid menu bar item setting: {key}"
+        )));
+    }
+    let mut doc = read_config_document(path)?;
+    let before = doc.to_string();
+    let tray = doc
+        .entry("tray")
+        .or_insert_with(toml_edit::table)
+        .as_table_mut()
+        .ok_or_else(|| AppError::Other("config.toml: [tray] is not a table".into()))?;
+    let items = tray
+        .entry("menu_bar_items")
+        .or_insert_with(toml_edit::table)
+        .as_table_mut()
+        .ok_or_else(|| AppError::Other("config.toml: menu_bar_items is not a table".into()))?;
+    items.set_implicit(true);
+    let item = items
+        .entry(id)
+        .or_insert_with(toml_edit::table)
+        .as_table_mut()
+        .ok_or_else(|| {
+            AppError::Other(format!("config.toml: menu_bar_items.{id} is not a table"))
+        })?;
+    match value {
+        Some(value) => {
+            item.insert(key, toml_edit::Item::Value(value));
+        }
+        None => {
+            item.remove(key);
+        }
+    }
+    if item.is_empty() {
+        items.remove(id);
+    }
+    if items.is_empty() {
+        tray.remove("menu_bar_items");
+    }
     if doc.to_string() == before {
         return Ok(());
     }
@@ -5009,6 +5081,33 @@ enabled = true
         let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
         set_tray_value(&path, "shortcut", None).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+    }
+
+    #[test]
+    fn menu_bar_items_are_written_per_provider_and_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[tray]\n# mine\nmenu_bar_window = \"weekly\"\n").unwrap();
+
+        set_menu_bar_item_value(&path, "openai@work", "window", Some("session".into())).unwrap();
+        set_menu_bar_item_value(&path, "openai@work", "hidden", Some(true.into())).unwrap();
+        set_menu_bar_item_value(&path, "zai", "hide_value", Some(true.into())).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# mine"), "{text}");
+        let tray = Config::load_from(&path).unwrap().tray;
+        assert_eq!(tray.menu_bar_window.as_deref(), Some("weekly"));
+        let work = &tray.menu_bar_items["openai@work"];
+        assert_eq!(work.window.as_deref(), Some("session"));
+        assert!(work.hidden);
+        assert_eq!(tray.menu_bar_items["zai"].hide_value, Some(true));
+
+        // Clearing every key drops the provider's table, then the parent.
+        set_menu_bar_item_value(&path, "openai@work", "window", None).unwrap();
+        set_menu_bar_item_value(&path, "openai@work", "hidden", None).unwrap();
+        set_menu_bar_item_value(&path, "zai", "hide_value", None).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("menu_bar_items"), "{text}");
+        assert!(set_menu_bar_item_value(&path, "zai", "color", None).is_err());
     }
 
     #[test]

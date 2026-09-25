@@ -40,6 +40,14 @@ Each release is also published at
 
 ### Changed
 
+- **Each provider has its own item in the macOS menu bar.** A click opens the
+  popover under that item, on that provider's tab; a second click closes it.
+  A right click opens the provider's menu: its quota window (5 hours, weekly,
+  monthly, or the menu bar's), whether its value shows, and hiding it. The
+  same settings live in **Settings → Menu → Providers in the Menu Bar**, saved
+  per provider under `[tray.menu_bar_items."<id>"]`. **Only the Account in
+  Use** keeps one account per provider, the one the `claude` or `codex` login
+  holds. The chart item stays on the right and opens the popover as before.
 - **The macOS menu bar shows each provider's icon instead of its name.** Every
   provider with a bundled mark reads as icon and value (`[icon] 46%`), drawn in
   the menu bar's text color; with values hidden only the icon is left. The name

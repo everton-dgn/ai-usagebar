@@ -12,20 +12,14 @@ use block2::RcBlock;
 use fs2::FileExt;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
-use objc2::{AnyThread, Message};
-use objc2_app_kit::NSAttributedStringAttachmentConveniences;
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSCellImagePosition, NSColor,
-    NSCompositingOperation, NSEvent, NSEventMask, NSFont, NSFontAttributeName, NSGlassEffectView,
-    NSGlassEffectViewStyle, NSImage, NSImageScaling, NSRectFillUsingOperation, NSScreen,
-    NSTextAttachment, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
-    NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowOrderingMode,
+    NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSColor, NSEvent, NSEventMask,
+    NSGlassEffectView, NSGlassEffectViewStyle, NSImage, NSImageScaling, NSScreen, NSView,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindow, NSWindowOrderingMode,
 };
-use objc2_foundation::{
-    MainThreadMarker, NSAttributedString, NSData, NSDictionary, NSMutableAttributedString, NSPoint,
-    NSRect, NSSize, NSString,
-};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use objc2_quartz_core::kCACornerCurveContinuous;
 use serde_json::{Value, json};
 use tao::dpi::LogicalSize;
@@ -52,13 +46,14 @@ use super::panel::{
 use super::payload::{
     AccountSwitchFact, HostFacts, UpdateFact, fact_after_check, host_payload, wrap_report,
 };
+use super::status_items::{self, ItemAction, MenuLine, ProviderItems};
 use super::strip::{
     BARS_PIXEL_SIDE, BARS_POINT_SIDE, Stars, StripStyle, bar_fill, bars_layout, bars_rgba,
     content_from_payload, parse_strip_ipc, parse_strip_names,
 };
 use super::update_flow;
 use super::{startup, tui_launch};
-use crate::config::Config;
+use crate::config::{Config, MenuBarItemConfig};
 
 const INDEX_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/popover/index.html"));
 const POPOVER_CSS: &str = include_str!(concat!(env!("OUT_DIR"), "/popover/popover.css"));
@@ -77,6 +72,8 @@ enum UserEvent {
     /// A mouse press in another app, the menu bar or the desktop, at this
     /// Cocoa screen point.
     OutsideClick(f64, f64),
+    /// A click on a provider's own menu-bar item, or a pick in its menu.
+    ProviderItem(ItemAction),
 }
 
 enum WorkerCmd {
@@ -160,6 +157,16 @@ struct TrayState {
     menu_bar_hide_value: bool,
     menu_bar_window: UsageWindow,
     menu_bar_chart: bool,
+    menu_bar_items: std::collections::BTreeMap<String, MenuBarItemConfig>,
+    menu_bar_active_account_only: bool,
+    /// The providers' own menu-bar items, left of the chart glyph.
+    provider_items: ProviderItems,
+    /// The provider whose item opened the popover, if one did.
+    focused_provider: Option<String>,
+    /// The popover's language, for the native provider menus.
+    language: String,
+    /// The provider whose native menu is open.
+    menu_provider: Option<String>,
     notifications_enabled: bool,
     notifications_threshold: u8,
 }
@@ -267,6 +274,18 @@ fn run_loop() -> Result<(), String> {
         menu_bar_hide_value: config.tray.menu_bar_hide_value,
         menu_bar_window,
         menu_bar_chart,
+        menu_bar_items: config.tray.menu_bar_items.clone(),
+        menu_bar_active_account_only: config.tray.menu_bar_active_account_only,
+        provider_items: {
+            let proxy = proxy.clone();
+            let mtm = MainThreadMarker::new().ok_or("the tray runs on the main thread")?;
+            ProviderItems::new(mtm, move |action| {
+                let _ = proxy.send_event(UserEvent::ProviderItem(action));
+            })
+        },
+        focused_provider: None,
+        language: "en".into(),
+        menu_provider: None,
         notifications_enabled: config.notifications.enabled,
         notifications_threshold: config.notifications.threshold,
     };
@@ -276,6 +295,9 @@ fn run_loop() -> Result<(), String> {
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(UserEvent::Tray(tray_event)) => handle_tray(&mut state, tray_event),
+            Event::UserEvent(UserEvent::ProviderItem(action)) => {
+                handle_provider_item(&mut state, action);
+            }
             Event::UserEvent(UserEvent::Ipc(body)) => handle_ipc(&mut state, &body, control_flow),
             Event::UserEvent(UserEvent::Report(payload)) => apply_payload(&mut state, payload),
             Event::UserEvent(UserEvent::Entry(entry)) => apply_entry(&mut state, entry),
@@ -283,8 +305,9 @@ fn run_loop() -> Result<(), String> {
             Event::UserEvent(UserEvent::Hotkey) => toggle_popover_from_keyboard(&mut state),
             Event::UserEvent(UserEvent::ResizeSettle) => settle_user_resize(&mut state),
             Event::UserEvent(UserEvent::OutsideClick(x, y)) => {
-                let on_status_item =
-                    status_item_frame(&state.tray).is_some_and(|frame| frame.contains(x, y));
+                let on_status_item = status_item_frames(&state)
+                    .iter()
+                    .any(|frame| frame.contains(x, y));
                 if on_status_item {
                     state.status_item_pressed_at = Some(Instant::now());
                 }
@@ -306,7 +329,7 @@ fn run_loop() -> Result<(), String> {
                     && !state.pinned
                     && close_on_blur(
                         blur_guarded(&state),
-                        press_on_status_item(&state.tray) || status_item_just_pressed(&state),
+                        press_on_status_item(&state) || status_item_just_pressed(&state),
                     )
                 {
                     hide_popover(&mut state);
@@ -620,14 +643,22 @@ fn apply_strip_icon(state: &mut TrayState) {
     let visible = state
         .strip_order_known
         .then_some(state.strip_order.as_slice());
-    let tooltip = menu_bar::tooltip(
-        &state.payload,
-        &state.menu_bar_provider,
-        state.menu_bar_show_all,
-        state.menu_bar_window,
+    let view = menu_bar::View {
+        remembered: &state.menu_bar_provider,
+        show_all: state.menu_bar_show_all,
+        show_value: !state.menu_bar_hide_value,
+        window: state.menu_bar_window,
         visible,
-        &state.strip_names,
-    );
+        names: &state.strip_names,
+        items: &state.menu_bar_items,
+        active_account_only: state.menu_bar_active_account_only,
+    };
+    let tooltip = menu_bar::tooltip(&state.payload, &view);
+    let chips = if state.menu_bar_chart {
+        Vec::new()
+    } else {
+        menu_bar::chips(&state.payload, &view)
+    };
     let _ = state.tray.set_tooltip(Some(tooltip.as_str()));
     match state.strip_style {
         StripStyle::Bars => {
@@ -639,32 +670,14 @@ fn apply_strip_icon(state: &mut TrayState) {
                 let _ = state.tray.set_icon(Some(icon));
             }
             state.tray.set_icon_as_template(true);
-            if state.menu_bar_chart {
-                // tray-icon's macOS set_title(None) leaves the old title in
-                // NSStatusBarButton. An empty title actually clears it.
-                state.tray.set_title(Some(""));
-            } else {
-                let chips = menu_bar::chips(
-                    &state.payload,
-                    &state.menu_bar_provider,
-                    state.menu_bar_show_all,
-                    !state.menu_bar_hide_value,
-                    state.menu_bar_window,
-                    visible,
-                    &state.strip_names,
-                );
-                // A plain title clears the attributed one, so it goes first.
-                let text = menu_bar::text(&chips);
-                let text = if text.is_empty() {
-                    text
-                } else {
-                    format!("{text}{CHART_GAP}")
-                };
-                state.tray.set_title(Some(text.as_str()));
-                set_status_button_chips(&chips);
-            }
+            // The chart item carries only the glyph; each provider has its own
+            // item to its left. tray-icon's macOS set_title(None) leaves the
+            // old title in NSStatusBarButton; an empty title clears it.
+            state.tray.set_title(Some(""));
+            let tips: Vec<String> = chips.iter().map(status_items::tooltip_line).collect();
+            state.provider_items.sync(&chips, &tips);
             if let Some(image) = template_bars_image(&fractions) {
-                set_status_button_image(&image);
+                set_status_button_image(&state.tray, &image);
             }
         }
         StripStyle::Text => {
@@ -797,6 +810,8 @@ fn popover_payload(state: &TrayState) -> String {
     payload["menu_bar_window"] = json!(state.menu_bar_window.as_str());
     payload["menu_bar_provider"] = json!(state.menu_bar_provider);
     payload["menu_bar_chart"] = json!(state.menu_bar_chart);
+    payload["menu_bar_items"] = json!(state.menu_bar_items);
+    payload["menu_bar_active_account_only"] = json!(state.menu_bar_active_account_only);
     payload["notifications_enabled"] = json!(state.notifications_enabled);
     payload["notifications_threshold"] = json!(state.notifications_threshold);
     host_payload(&payload)
@@ -811,15 +826,215 @@ fn handle_tray(state: &mut TrayState, event: TrayIconEvent) {
     {
         match button {
             MouseButton::Left | MouseButton::Right => {
-                if state.popover_open {
+                if state.popover_open && state.focused_provider.is_none() {
                     hide_popover(state);
                 } else {
+                    // The chart opens the popover as it was, not on a provider.
+                    focus_provider(state, None);
                     state.last_anchor = Some(cocoa_mouse());
-                    show_popover(state);
+                    if state.popover_open {
+                        position_popover(state);
+                    } else {
+                        show_popover(state);
+                    }
                 }
             }
             MouseButton::Middle => next_menu_bar_provider(state),
         }
+    }
+}
+
+/// A provider item's click opens the popover under it on that provider's tab
+/// (a second click closes it); its right click opens the provider's menu.
+fn handle_provider_item(state: &mut TrayState, action: ItemAction) {
+    match action {
+        ItemAction::Click { index, right } => {
+            let Some(id) = state.provider_items.id_at(index).map(str::to_owned) else {
+                return;
+            };
+            if right {
+                let lines = provider_menu(state, &id);
+                state.provider_items.show_menu(index, &lines);
+                return;
+            }
+            if state.popover_open && state.focused_provider.as_deref() == Some(id.as_str()) {
+                hide_popover(state);
+                return;
+            }
+            let frame = state
+                .provider_items
+                .frames()
+                .into_iter()
+                .find(|(item, _)| *item == id)
+                .map(|(_, frame)| ns_rect_to_cocoa(frame));
+            state.last_anchor = frame
+                .map(|frame| (frame.x + frame.w / 2.0, frame.y + frame.h / 2.0))
+                .or_else(|| Some(cocoa_mouse()));
+            focus_provider(state, Some(id));
+            if state.popover_open {
+                position_popover(state);
+            } else {
+                show_popover(state);
+            }
+        }
+        ItemAction::Menu { tag } => apply_provider_menu_pick(state, tag),
+    }
+}
+
+/// Tell the popover which provider to open on, or to open as it was.
+fn focus_provider(state: &mut TrayState, id: Option<String>) {
+    state.focused_provider = id;
+    if let Some(webview) = state.webview.as_ref() {
+        let arg = serde_json::to_string(&state.focused_provider).unwrap_or_else(|_| "null".into());
+        let _ = webview.evaluate_script(&format!(
+            "window.__AIUB_FOCUS__ && window.__AIUB_FOCUS__({arg})"
+        ));
+    }
+}
+
+/// A provider menu's tags name the pick only; the provider is the one whose
+/// menu is open (`menu_provider`), since item indexes shift between refreshes.
+const MENU_WINDOWS: [(isize, UsageWindow); 4] = [
+    (1, UsageWindow::Auto),
+    (2, UsageWindow::Session),
+    (3, UsageWindow::Weekly),
+    (4, UsageWindow::Monthly),
+];
+const MENU_TOGGLE_VALUE: isize = 10;
+const MENU_HIDE: isize = 11;
+const MENU_ACTIVE_ACCOUNT_ONLY: isize = 12;
+const MENU_OPEN: isize = 13;
+
+fn provider_menu(state: &mut TrayState, id: &str) -> Vec<MenuLine> {
+    state.menu_provider = Some(id.to_owned());
+    let pt = state.language == "pt-BR";
+    let label = |en: &str, br: &str| (if pt { br } else { en }).to_owned();
+    let item = state.menu_bar_items.get(id).cloned().unwrap_or_default();
+    let window = item.window.as_deref().map(UsageWindow::parse);
+    let hide_value = item.hide_value.unwrap_or(state.menu_bar_hide_value);
+    let name = state
+        .strip_names
+        .get(id)
+        .cloned()
+        .or_else(|| {
+            state.payload["entries"]
+                .as_array()?
+                .iter()
+                .find(|entry| entry["id"].as_str() == Some(id))?["display_name"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| id.to_owned());
+    let mut lines = vec![
+        MenuLine::Heading(name),
+        MenuLine::Pick {
+            title: label("Open", "Abrir"),
+            tag: MENU_OPEN,
+            checked: false,
+        },
+        MenuLine::Separator,
+        MenuLine::Heading(label("Window", "Janela")),
+    ];
+    for (tag, choice) in MENU_WINDOWS {
+        let title = match choice {
+            UsageWindow::Auto => label("Same as the menu bar", "Igual ao menu bar"),
+            UsageWindow::Session => label("5 hours", "5 horas"),
+            UsageWindow::Weekly => label("Weekly", "Semanal"),
+            UsageWindow::Monthly => label("Monthly", "Mensal"),
+        };
+        let checked = match (window, choice) {
+            (None, UsageWindow::Auto) => true,
+            (Some(set), choice) => set == choice && choice != UsageWindow::Auto,
+            _ => false,
+        };
+        lines.push(MenuLine::Pick {
+            title,
+            tag,
+            checked,
+        });
+    }
+    lines.push(MenuLine::Separator);
+    lines.push(MenuLine::Pick {
+        title: label("Show value", "Mostrar valor"),
+        tag: MENU_TOGGLE_VALUE,
+        checked: !hide_value,
+    });
+    lines.push(MenuLine::Pick {
+        title: label("Only the account in use", "Só a conta em uso"),
+        tag: MENU_ACTIVE_ACCOUNT_ONLY,
+        checked: state.menu_bar_active_account_only,
+    });
+    lines.push(MenuLine::Separator);
+    lines.push(MenuLine::Pick {
+        title: label("Hide from the menu bar", "Ocultar do menu bar"),
+        tag: MENU_HIDE,
+        checked: false,
+    });
+    lines
+}
+
+fn apply_provider_menu_pick(state: &mut TrayState, tag: isize) {
+    let Some(id) = state.menu_provider.clone() else {
+        return;
+    };
+    if tag == MENU_OPEN {
+        if let Some(index) = state.provider_items.index_of(&id) {
+            handle_provider_item(
+                state,
+                ItemAction::Click {
+                    index,
+                    right: false,
+                },
+            );
+        }
+        return;
+    }
+    if tag == MENU_ACTIVE_ACCOUNT_ONLY {
+        state.menu_bar_active_account_only = !state.menu_bar_active_account_only;
+        persist_menu_bar_value(
+            "menu_bar_active_account_only",
+            state.menu_bar_active_account_only.into(),
+        );
+    } else if let Some((_, window)) = MENU_WINDOWS.iter().find(|(t, _)| *t == tag) {
+        let value = (*window != UsageWindow::Auto).then(|| window.as_str().to_owned());
+        set_menu_bar_item(state, &id, "window", value.map(Into::into));
+    } else if tag == MENU_TOGGLE_VALUE {
+        let hidden = state
+            .menu_bar_items
+            .get(&id)
+            .and_then(|item| item.hide_value)
+            .unwrap_or(state.menu_bar_hide_value);
+        set_menu_bar_item(state, &id, "hide_value", Some((!hidden).into()));
+    } else if tag == MENU_HIDE {
+        set_menu_bar_item(state, &id, "hidden", Some(true.into()));
+    } else {
+        return;
+    }
+    apply_strip_icon(state);
+    push_to_webview(state);
+}
+
+/// Change one provider's menu-bar setting in memory and in config.toml.
+fn set_menu_bar_item(state: &mut TrayState, id: &str, key: &str, value: Option<toml_edit::Value>) {
+    let item = state.menu_bar_items.entry(id.to_owned()).or_default();
+    match key {
+        "window" => item.window = value.as_ref().and_then(|v| v.as_str()).map(str::to_owned),
+        "hide_value" => item.hide_value = value.as_ref().and_then(toml_edit::Value::as_bool),
+        "hidden" => {
+            item.hidden = value
+                .as_ref()
+                .and_then(toml_edit::Value::as_bool)
+                .unwrap_or(false)
+        }
+        _ => return,
+    }
+    if *item == MenuBarItemConfig::default() {
+        state.menu_bar_items.remove(id);
+    }
+    // `false` and "same as the menu bar" are the defaults, so they clear the key.
+    let value = value.filter(|v| v.as_bool() != Some(false));
+    if let Some(path) = config_path() {
+        let _ = crate::config::set_menu_bar_item_value(&path, id, key, value);
     }
 }
 
@@ -1030,6 +1245,31 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
                 push_to_webview(state);
             }
         }
+        "set-menu-bar-item" => {
+            let id = value.get("id").and_then(Value::as_str).unwrap_or("").trim();
+            let key = value.get("key").and_then(Value::as_str).unwrap_or("");
+            if id.is_empty() || !matches!(key, "window" | "hide_value" | "hidden") {
+                return;
+            }
+            let setting = match value.get("value") {
+                Some(Value::Bool(flag)) => Some(toml_edit::Value::from(*flag)),
+                Some(Value::String(window)) if key == "window" && window != "auto" => {
+                    Some(UsageWindow::parse(window).as_str().into())
+                }
+                _ => None,
+            };
+            set_menu_bar_item(state, id, key, setting);
+            apply_strip_icon(state);
+            push_to_webview(state);
+        }
+        "set-menu-bar-active-account-only" => {
+            if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
+                state.menu_bar_active_account_only = enabled;
+                persist_menu_bar_value("menu_bar_active_account_only", enabled.into());
+                apply_strip_icon(state);
+                push_to_webview(state);
+            }
+        }
         "strip" => {
             let (style, stars, order) = parse_strip_ipc(&value);
             state.strip_style = style;
@@ -1037,6 +1277,9 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
             state.strip_order = order;
             state.strip_order_known = true;
             state.strip_names = parse_strip_names(&value);
+            if let Some(language) = value.get("language").and_then(Value::as_str) {
+                state.language = language.to_owned();
+            }
             apply_strip_icon(state);
         }
         "open-url" => {
@@ -1275,15 +1518,28 @@ fn install_outside_click_monitor(proxy: EventLoopProxy<UserEvent>) -> Option<Ret
 }
 
 /// Whether a mouse button is down over our status item right now.
-fn press_on_status_item(tray: &TrayIcon) -> bool {
+fn press_on_status_item(state: &TrayState) -> bool {
     if NSEvent::pressedMouseButtons() == 0 {
         return false;
     }
-    let Some(frame) = status_item_frame(tray) else {
-        return false;
-    };
     let (x, y) = cocoa_mouse();
-    frame.contains(x, y)
+    status_item_frames(state)
+        .iter()
+        .any(|frame| frame.contains(x, y))
+}
+
+/// The chart item's frame and every provider item's, in Cocoa screen space.
+fn status_item_frames(state: &TrayState) -> Vec<CocoaRect> {
+    status_item_frame(&state.tray)
+        .into_iter()
+        .chain(
+            state
+                .provider_items
+                .frames()
+                .into_iter()
+                .map(|(_, frame)| ns_rect_to_cocoa(frame)),
+        )
+        .collect()
 }
 
 /// The status item's frame in Cocoa screen space, like `NSEvent::mouseLocation`.
@@ -1321,6 +1577,7 @@ fn guard_blur(state: &mut TrayState) {
 fn hide_popover(state: &mut TrayState) {
     state.window.set_visible(false);
     state.popover_open = false;
+    state.focused_provider = None;
     save_panel_size(state);
     if let Some(webview) = state.webview.as_ref() {
         let _ =
@@ -1683,126 +1940,17 @@ fn fill_round_rect(x: f64, y: f64, w: f64, h: f64, radius: f64, alpha: f64) {
     NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius).fill();
 }
 
-/// Space between the providers and the chart glyph on their right.
-const CHART_GAP: &str = "          ";
-
-/// Side of a provider mark in the menu bar, in points.
-const MARK_SIDE: f64 = 15.0;
-
-/// Draws the chips as marks and values. A chip whose mark AppKit cannot load
-/// (SVG needs macOS 14) keeps its name, so older systems read as before.
-fn set_status_button_chips(chips: &[menu_bar::Chip]) {
+/// The chart glyph on tray-icon's own item. Looking the button up among the
+/// app's windows would now find a provider item as easily as this one.
+fn set_status_button_image(tray: &TrayIcon, image: &NSImage) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    if chips.iter().all(|chip| chip.mark.is_none()) {
-        return;
-    }
-    let Some(button) = find_status_bar_button(mtm) else {
-        return;
-    };
-    let font = NSFont::menuBarFontOfSize(0.0);
-    let font_object: &AnyObject = font.as_ref();
-    // SAFETY: NSFontAttributeName is an immutable AppKit constant.
-    let font_key = unsafe { NSFontAttributeName };
-    let attributes = NSDictionary::from_slices(&[font_key], &[font_object]);
-    let run = |text: &str| {
-        // SAFETY: the attributes map NSFontAttributeName to an NSFont.
-        unsafe {
-            NSAttributedString::initWithString_attributes(
-                NSAttributedString::alloc(),
-                &NSString::from_str(text),
-                Some(&attributes),
-            )
-        }
-    };
-    let title = NSMutableAttributedString::new();
-    for (index, chip) in chips.iter().enumerate() {
-        if index > 0 {
-            title.appendAttributedString(&run(menu_bar::CHIP_GAP));
-        }
-        let Some(image) = chip.mark.and_then(mark_image) else {
-            title.appendAttributedString(&run(&chip.text()));
-            continue;
-        };
-        let attachment = NSTextAttachment::new();
-        attachment.setImage(Some(&image));
-        // Centred on the menu bar font's x-height rather than sitting on its baseline.
-        let offset = (font.capHeight() - MARK_SIDE) / 2.0;
-        attachment.setBounds(NSRect::new(
-            NSPoint::new(0.0, offset),
-            NSSize::new(MARK_SIDE, MARK_SIDE),
-        ));
-        title.appendAttributedString(&NSAttributedString::attributedStringWithAttachment(
-            &attachment,
-        ));
-        if let Some(value) = &chip.value {
-            title.appendAttributedString(&run(&format!(" {value}")));
-        }
-    }
-    title.appendAttributedString(&run(CHART_GAP));
-    button.setAttributedTitle(&title);
-}
-
-/// A provider mark in the menu bar's text color, or `None` where AppKit
-/// cannot read SVG. An image inside an attributed title is never tinted as a
-/// template, so the mark is filled with `labelColor` each time it is drawn and
-/// follows the menu bar between light and dark.
-fn mark_image(svg: &str) -> Option<Retained<NSImage>> {
-    // Only the shape's alpha is kept; a concrete fill keeps AppKit from
-    // guessing what `currentColor` means outside a document.
-    let svg = svg.replace("currentColor", "#000");
-    let data = NSData::with_bytes(svg.as_bytes());
-    let shape = NSImage::initWithData(NSImage::alloc(), &data)?;
-    let size = NSSize::new(MARK_SIDE, MARK_SIDE);
-    shape.setSize(size);
-    let handler = RcBlock::new(move |rect: NSRect| -> Bool {
-        shape.drawInRect(rect);
-        NSColor::labelColor().set();
-        NSRectFillUsingOperation(rect, NSCompositingOperation::SourceAtop);
-        Bool::YES
-    });
-    Some(NSImage::imageWithSize_flipped_drawingHandler(
-        size, false, &handler,
-    ))
-}
-
-fn set_status_button_image(image: &NSImage) {
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    let Some(button) = find_status_bar_button(mtm) else {
+    let Some(button) = tray.ns_status_item().and_then(|item| item.button(mtm)) else {
         return;
     };
     button.setImageScaling(NSImageScaling::ScaleNone);
-    // The chart glyph sits after the providers, at the item's right edge.
-    button.setImagePosition(NSCellImagePosition::ImageTrailing);
     button.setImage(Some(image));
-}
-
-fn find_status_bar_button(mtm: MainThreadMarker) -> Option<Retained<NSButton>> {
-    let app = NSApplication::sharedApplication(mtm);
-    let button_class = AnyClass::get(c"NSStatusBarButton")?;
-    for window in app.windows().iter() {
-        if let Some(root) = window.contentView()
-            && let Some(button) = find_classed_button(&root, button_class)
-        {
-            return Some(button);
-        }
-    }
-    None
-}
-
-fn find_classed_button(view: &NSView, class: &AnyClass) -> Option<Retained<NSButton>> {
-    if view.class() == class {
-        return view.retain().downcast().ok();
-    }
-    for sub in view.subviews().iter() {
-        if let Some(button) = find_classed_button(&sub, class) {
-            return Some(button);
-        }
-    }
-    None
 }
 
 struct SingleInstance {

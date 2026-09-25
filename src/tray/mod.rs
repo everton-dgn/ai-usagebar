@@ -22,6 +22,8 @@ mod startup;
 #[cfg(target_os = "macos")]
 #[path = "startup_macos.rs"]
 mod startup;
+#[cfg(target_os = "macos")]
+mod status_items;
 #[cfg(windows)]
 mod tui_launch;
 #[cfg(target_os = "macos")]

@@ -15,6 +15,8 @@ interface MacDashboardProps {
   layout: Layout;
   nowMs: number;
   payload: Payload;
+  /** A provider to show first, when its menu-bar item opened the popover. */
+  focusId?: string;
   onOpenCustomize: () => void;
 }
 
@@ -256,9 +258,12 @@ function useDragScroll() {
 }
 
 /** A compact provider switcher for the macOS menu bar popover. */
-export function MacDashboard({ cards, layout, nowMs, payload, onOpenCustomize }: MacDashboardProps) {
+export function MacDashboard({ cards, layout, nowMs, payload, focusId, onOpenCustomize }: MacDashboardProps) {
   const { language, t } = useI18n();
-  const [selectedId, setSelectedId] = useState("");
+  const [selectedId, setSelectedId] = useState(focusId || "");
+  useEffect(() => {
+    if (focusId) setSelectedId(focusId);
+  }, [focusId]);
   const tabRow = useDragScroll();
   const selected = cards.find((card) => card.id === selectedId)
     ?? cards.find((card) => card.id === payload.primary)

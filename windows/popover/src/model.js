@@ -42,6 +42,8 @@ export function emptyPayload(hostError) {
     menuBarProvider: "highest",
     menuBarWindow: "auto",
     menuBarChart: false,
+    menuBarItems: {},
+    menuBarActiveAccountOnly: false,
     notificationsEnabled: true,
     notificationsThreshold: 97,
     os: "",
@@ -68,6 +70,30 @@ function clean(value, max) {
   return text.slice(0, limit - 1) + "…";
 }
 
+const MENU_BAR_WINDOWS = ["session", "weekly", "monthly"];
+
+/**
+ * Per-provider menu-bar settings from the host: a window ("auto" when it
+ * follows the menu bar), whether the value is hidden, and whether the
+ * provider is left out.
+ * @returns {Record<string, import("./lib/types").MenuBarItem>}
+ */
+export function normalizeMenuBarItems(value) {
+  const out = {};
+  if (!isPlainObject(value)) return out;
+  for (const key of Object.keys(value).slice(0, 64)) {
+    const id = clean(key, 180).trim();
+    const raw = value[key];
+    if (!id || !isPlainObject(raw)) continue;
+    out[id] = {
+      window: MENU_BAR_WINDOWS.includes(raw.window) ? raw.window : "auto",
+      hideValue: typeof raw.hide_value === "boolean" ? raw.hide_value : null,
+      hidden: raw.hidden === true,
+    };
+  }
+  return out;
+}
+
 /** @returns {Payload} */
 function normalizePayload(parsed) {
   const entriesIn = Array.isArray(parsed.entries) ? parsed.entries : [];
@@ -87,6 +113,8 @@ function normalizePayload(parsed) {
     menuBarProvider: clean(parsed.menu_bar_provider || "highest", 180),
     menuBarWindow: ["session", "weekly", "monthly"].includes(parsed.menu_bar_window) ? parsed.menu_bar_window : "auto",
     menuBarChart: parsed.menu_bar_chart === true,
+    menuBarItems: normalizeMenuBarItems(parsed.menu_bar_items),
+    menuBarActiveAccountOnly: parsed.menu_bar_active_account_only === true,
     notificationsEnabled: parsed.notifications_enabled !== false,
     notificationsThreshold: Number.isInteger(parsed.notifications_threshold) && parsed.notifications_threshold >= 1 && parsed.notifications_threshold <= 100 ? parsed.notifications_threshold : 97,
     os: normalizeOs(parsed.os),
@@ -968,7 +996,8 @@ export function stripCommand(layout, cards) {
   for (const id of order) {
     if (custom[id]) names[id] = custom[id];
   }
-  return { style: "bars", stars, order, names };
+  const language = layout && layout.language === "pt-BR" ? "pt-BR" : "en";
+  return { style: "bars", stars, order, names, language };
 }
 
 function cleanIdList(list) {

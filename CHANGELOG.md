@@ -46,6 +46,10 @@ Each release is also published at
   and values wrap onto another line rather than ending in "…", and cards
   shrink to a panel narrower than one column instead of losing their right
   side.
+- **The macOS popover keeps its border around the footer.** The hairline was
+  an inset shadow on the panel, which is painted under its children, so the
+  footer (and the top bar on inner screens) drew over it. It is now drawn
+  above the content.
 
 ## [1.23.0] — 2026-09-24
 

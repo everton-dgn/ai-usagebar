@@ -1420,4 +1420,11 @@ assert.equal(resolvedTheme('system'), 'light');
   assert.deepEqual(parseHostPayload(JSON.stringify({ entries: [] })).accounts, {});
 }
 
+// macOS panel view: the list is the default, and only "tabs" switches it.
+{
+  assert.equal(normalizeLayout({}).panelView, 'list');
+  assert.equal(normalizeLayout({ panelView: 'tabs' }).panelView, 'tabs');
+  assert.equal(normalizeLayout({ panelView: 'grid' }).panelView, 'list');
+}
+
 console.log('ok');

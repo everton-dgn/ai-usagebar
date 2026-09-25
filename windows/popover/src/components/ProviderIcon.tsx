@@ -15,6 +15,7 @@ import OpenaiMark from "~icons/aiub/openai";
 import OpencodeGoMark from "~icons/aiub/opencode_go";
 import OpenrouterMark from "~icons/aiub/openrouter";
 import ZaiMark from "~icons/aiub/zai";
+import MdiRobotOutline from "~icons/mdi/robot-outline";
 
 import { cn } from "@/lib/utils";
 
@@ -46,27 +47,12 @@ interface ProviderIconProps {
   title: string;
 }
 
-/** ProviderIcon: the provider's mark filled with the gray icon tint, or two-letter initials. */
-export function ProviderIcon({ className, size = 16, slug, title }: ProviderIconProps) {
-  const Mark = MARKS[slug];
+/**
+ * ProviderIcon: the provider's mark filled with the gray icon tint. A provider
+ * without its own mark gets a generic icon, never letters.
+ */
+export function ProviderIcon({ className, size = 16, slug }: ProviderIconProps) {
+  const Mark = MARKS[slug] ?? MdiRobotOutline;
   const length = typeof size === "number" ? `${size}px` : size;
-
-  if (Mark) {
-    return <Mark aria-hidden className={cn("shrink-0", className)} style={{ height: length, width: length }} />;
-  }
-
-  const initials = title.trim().slice(0, 2).toUpperCase() || "?";
-
-  return (
-    <span
-      aria-hidden
-      className={cn(
-        "grid shrink-0 place-items-center rounded-[4px] bg-[var(--fill-quaternary)] font-bold text-[var(--label-2)]",
-        className,
-      )}
-      style={{ fontSize: `calc(${length} * 0.5)`, height: length, width: length }}
-    >
-      {initials}
-    </span>
-  );
+  return <Mark aria-hidden className={cn("shrink-0", className)} style={{ height: length, width: length }} />;
 }

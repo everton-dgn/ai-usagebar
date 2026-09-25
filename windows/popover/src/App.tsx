@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 import { About } from "@/screens/About";
 import { Customize } from "@/screens/Customize";
 import { Dashboard } from "@/screens/Dashboard";
-import { MacDashboard } from "@/screens/MacDashboard";
+import { MacDashboard, MacPanelHeader } from "@/screens/MacDashboard";
 import { ProviderDetail } from "@/screens/ProviderDetail";
 import { Settings, type SettingsTab } from "@/screens/Settings";
 import {
@@ -356,16 +356,22 @@ export default function App() {
           )}
         >
           {screen === "dashboard" ? (
-            payload.os === "macos" ? (
-              <MacDashboard
-                cards={visible}
-                layout={layout}
-                nowMs={nowMs}
-                payload={payload}
-                onOpenCustomize={() => go("customize")}
-                onOpenSettings={() => go("settings")}
-              />
+            payload.os === "macos" && layout.panelView === "tabs" ? (
+              <>
+                <MacPanelHeader view={layout.panelView} onView={(panelView) => commit({ ...layout, panelView })} onOpenSettings={() => go("settings")} />
+                <MacDashboard
+                  cards={visible}
+                  layout={layout}
+                  nowMs={nowMs}
+                  payload={payload}
+                  onOpenCustomize={() => go("customize")}
+                />
+              </>
             ) : (
+              <>
+              {payload.os === "macos" ? (
+                <MacPanelHeader view={layout.panelView} onView={(panelView) => commit({ ...layout, panelView })} onOpenSettings={() => go("settings")} />
+              ) : null}
               <Dashboard
               cards={cards}
               hint={hintPending(layout)}
@@ -389,6 +395,7 @@ export default function App() {
               }}
               onToggleShowAs={toggleShowAs}
               />
+              </>
             )
           ) : null}
           {screen === "customize" ? (
@@ -458,6 +465,7 @@ export default function App() {
               onShowAs={(showAs) => commit({ ...layout, showAs })}
               onTheme={(theme) => commit({ ...layout, theme })}
               onTimeFormat={(timeFormat) => commit({ ...layout, timeFormat })}
+              onPanelView={(panelView) => commit({ ...layout, panelView })}
             />
           ) : null}
         </div>

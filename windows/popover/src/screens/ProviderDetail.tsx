@@ -193,7 +193,7 @@ function MetricTuneRow({ enabled, handle, row, starred, onStar, onToggle }: Metr
   return (
     <div data-row-key={rowKey(row)} className="flex items-center gap-[10px] px-[var(--pad-control)] py-[var(--pad-control)]">
       <DragHandle attributes={handle?.attributes} listeners={handle?.listeners} />
-      <span className="min-w-0 flex-1 truncate">{title}</span>
+      <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{title}</span>
       {onStar ? (
         <button
           type="button"

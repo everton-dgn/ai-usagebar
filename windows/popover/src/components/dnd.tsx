@@ -18,6 +18,7 @@ import {
   SortableContext,
   sortableKeyboardCoordinates,
   useSortable,
+  rectSortingStrategy,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -88,11 +89,14 @@ export function VerticalDnd({
   onReorder,
   overlay,
   children,
+  grid = false,
 }: {
   items: string[];
   onReorder: (ids: string[]) => void;
   overlay?: (activeId: string) => ReactNode;
   children: ReactNode;
+  /** The items may sit in more than one column: drag on both axes. */
+  grid?: boolean;
 }) {
   const sensors = useTraySensors();
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -116,12 +120,12 @@ export function VerticalDnd({
     <DndContext
       sensors={sensors}
       collisionDetection={closestCorners}
-      modifiers={[restrictToVerticalAxis]}
+      modifiers={grid ? [] : [restrictToVerticalAxis]}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onDragCancel={() => setActiveId(null)}
     >
-      <SortableContext items={items} strategy={verticalListSortingStrategy}>
+      <SortableContext items={items} strategy={grid ? rectSortingStrategy : verticalListSortingStrategy}>
         {children}
       </SortableContext>
       <DragOverlay dropAnimation={null}>{activeId && overlay ? overlay(activeId) : null}</DragOverlay>

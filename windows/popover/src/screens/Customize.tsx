@@ -90,7 +90,7 @@ function ProviderListRow({ card, enabled, handle, onOpen, onToggle }: ProviderLi
       <button type="button" className="plain-btn flex min-w-0 flex-1 items-center gap-[10px]" onClick={onOpen}>
         <ProviderIcon className="text-label-2" size={18} slug={providerIconId(card.id)} title={card.title} />
         <span className="flex min-w-0 flex-col">
-          <span className="truncate text-[length:var(--sz-header)] font-semibold">{card.title}</span>
+          <span className="[overflow-wrap:anywhere] text-[length:var(--sz-header)] font-semibold">{card.title}</span>
           <span className="text-[length:var(--sz-badge)] text-label-2">
             {count} {language === "pt-BR" ? (count === 1 ? "métrica" : "métricas") : (count === 1 ? "metric" : "metrics")}
           </span>

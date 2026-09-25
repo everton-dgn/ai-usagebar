@@ -35,6 +35,10 @@ still shrinks to short content, never grows past the height you chose, and
 scrolls the list when the content is taller. **Options → Reset Panel Size**
 goes back to the default width and a fully automatic height.
 
+The header switches between two views, also under **Settings → Preferences →
+Panel View**: **List** (default) stacks every provider, with the account star,
+and uses two columns in a wide panel; **Tabs** shows one provider at a time.
+
 ![Previous chart-only mode in the macOS menu bar, next to the Cursor, Claude, Antigravity, Codex and Claude Code icons](../screenshots/macos-tray-icon.png)
 
 Star up to two metrics per provider from **Settings → Providers**, then open

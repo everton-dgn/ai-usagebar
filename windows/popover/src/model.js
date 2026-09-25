@@ -771,6 +771,7 @@ export function emptyLayout() {
     hideExtras: false,
     hintDismissed: false,
     language: "en",
+    panelView: "list",
     resetTimes: "countdown",
     rows: {},
     seeded: false,
@@ -780,6 +781,15 @@ export function emptyLayout() {
     theme: "system",
     timeFormat: "auto",
   };
+}
+
+/**
+ * The macOS dashboard: every provider stacked ("list"), or one provider at a
+ * time behind a switcher ("tabs").
+ * @returns {import("./lib/types").PanelView}
+ */
+function normalizePanelView(value) {
+  return value === "tabs" ? "tabs" : "list";
 }
 
 /** @returns {TimeFormat} */
@@ -915,6 +925,7 @@ export function normalizeLayout(raw) {
   layout.hideExtras = raw.hideExtras === true;
   layout.hintDismissed = raw.hintDismissed === true;
   layout.language = raw.language === "pt-BR" ? "pt-BR" : "en";
+  layout.panelView = normalizePanelView(raw.panelView);
   layout.seeded = raw.seeded === true;
   layout.resetTimes = normalizeResetTimes(raw.resetTimes);
   layout.showAs = normalizeShowAs(raw.showAs);
@@ -1002,6 +1013,7 @@ export function syncLayout(layout, cardIds) {
     hideExtras: layout.hideExtras === true,
     hintDismissed: layout.hintDismissed === true,
     language: layout.language === "pt-BR" ? "pt-BR" : "en",
+    panelView: normalizePanelView(layout.panelView),
     resetTimes: normalizeResetTimes(layout.resetTimes),
     seeded: layout.seeded === true,
     rows,

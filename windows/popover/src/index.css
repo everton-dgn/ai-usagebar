@@ -197,8 +197,7 @@ body:has(.mac-panel) {
   font: inherit;
   font-size: 10px;
   font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
 
@@ -225,7 +224,45 @@ body:has(.mac-panel) {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding: 12px 12px 6px;
+  padding: 4px 4px 6px;
+}
+
+/* Shared by the list and the tabs view, so it sits outside .mac-dashboard. */
+.mac-panel .mac-dashboard-header {
+  gap: 8px;
+  padding: 8px 4px 0;
+  margin-bottom: 12px;
+}
+
+.mac-view-switch {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 10px;
+  background: var(--control-fill);
+}
+
+.mac-view-switch .mac-icon-button {
+  width: 25px;
+  height: 25px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--label-2);
+}
+
+.mac-view-switch .mac-icon-button[data-active="true"] {
+  background: var(--control-fill-hover);
+  color: var(--blue);
+}
+
+/* The list view: one column in a narrow panel, two once the panel is wide
+   enough for two full cards. Cards keep their own height. */
+.provider-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  align-items: start;
+  gap: var(--section-gap);
 }
 
 .mac-dashboard-header,
@@ -291,16 +328,12 @@ body:has(.mac-panel) {
   outline-offset: 2px;
 }
 
+/* Tabs wrap onto more rows rather than scrolling out of sight. */
 .mac-provider-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 7px;
-  overflow-x: auto;
   padding: 1px 1px 5px;
-  scrollbar-width: none;
-}
-
-.mac-provider-tabs::-webkit-scrollbar {
-  display: none;
 }
 
 .mac-provider-tab {
@@ -317,7 +350,8 @@ body:has(.mac-panel) {
   cursor: pointer;
   font: inherit;
   font-size: 11px;
-  white-space: nowrap;
+  max-width: 100%;
+  text-align: left;
 }
 
 .dark .mac-provider-tab {
@@ -332,7 +366,9 @@ body:has(.mac-panel) {
 }
 
 .mac-tab-name {
+  min-width: 0;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .mac-tab-value {
@@ -378,19 +414,15 @@ body:has(.mac-panel) {
 }
 
 .mac-provider-title strong {
-  overflow: hidden;
   font-size: 14px;
   font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .mac-provider-title small {
-  overflow: hidden;
   color: var(--label-2);
   font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .mac-provider-refresh {
@@ -542,11 +574,11 @@ body:has(.mac-panel) {
 }
 
 .mac-dashboard-status {
+  flex-wrap: wrap;
   gap: 6px;
   padding: 0 2px;
   color: var(--label-2);
   font-size: 10px;
-  white-space: nowrap;
 }
 
 ::-webkit-scrollbar {

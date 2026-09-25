@@ -220,7 +220,7 @@ function ResetCreditsRow({ condensedTop, demand, layout, nowMs, row }: ResetCred
               <Badge variant={index === 0 ? "warning" : "default"} className="size-6 rounded-full p-0 text-[11px]">
                 {index + 1}
               </Badge>
-              <span className="min-w-0 flex-1 truncate font-medium">{item.date}</span>
+              <span className="min-w-0 flex-1 [overflow-wrap:anywhere] font-medium">{item.date}</span>
               <span className="shrink-0 text-label-2">{item.remaining}</span>
             </div>
           ))}
@@ -267,7 +267,7 @@ export function ProviderSectionHeader({
     >
       <ProviderIcon className="text-label-2" size="var(--sz-icon)" slug={providerIconId(card.id)} title={card.title} />
       <div className="flex min-w-0 items-baseline gap-[5px]">
-        <span className="min-w-0 truncate text-[length:var(--sz-header)] font-semibold">{card.title}</span>
+        <span className="min-w-0 [overflow-wrap:anywhere] text-[length:var(--sz-header)] font-semibold">{card.title}</span>
         {plan ? <span className="shrink-0 text-[length:var(--sz-badge)] text-label-2">{plan}</span> : null}
         {card.stale ? <span className="text-[length:var(--sz-badge)] text-label-3">{t("stale")}</span> : null}
       </div>
@@ -390,7 +390,7 @@ function MetricRow({ demand, layout, nowMs, onToggleShowAs, row }: MetricRowProp
   return (
     <div className="flex flex-col gap-[var(--row-inner)] px-[var(--card-pad)] py-[var(--pad-bar-row)]">
       <div className="flex items-center gap-[6px]">
-        <span className={cn("truncate font-semibold", demand ? "text-[length:var(--sz-demand)]" : "text-[length:var(--sz-label)]")}>{metricLabel(row.label)}</span>
+        <span className={cn("[overflow-wrap:anywhere] font-semibold", demand ? "text-[length:var(--sz-demand)]" : "text-[length:var(--sz-label)]")}>{metricLabel(row.label)}</span>
         {spent ? (
           <span className="ml-auto flex shrink-0 items-center gap-[3px] text-[length:var(--sz-support)] text-label-2">
             <MdiFire className="size-[11px] text-meter-red" />
@@ -426,7 +426,7 @@ function MetricRow({ demand, layout, nowMs, onToggleShowAs, row }: MetricRowProp
       <div className="flex items-baseline gap-2 text-[length:var(--sz-support)] tabular-nums">
         <button
           type="button"
-          className="plain-btn truncate"
+          className="plain-btn [overflow-wrap:anywhere]"
           title={headlineAlt || undefined}
           onClick={onToggleShowAs}
         >
@@ -439,7 +439,7 @@ function MetricRow({ demand, layout, nowMs, onToggleShowAs, row }: MetricRowProp
             nowMs={nowMs}
             timeFormat={layout.timeFormat}
           >
-            <button type="button" className="plain-btn truncate text-label-2">
+            <button type="button" className="plain-btn [overflow-wrap:anywhere] text-label-2">
               {reset}
             </button>
           </ResetPopover>
@@ -514,7 +514,7 @@ function ProviderLinks({ links }: { links: Array<{ label: string; url: string }>
     <div className="flex gap-2 px-[var(--card-pad)] py-[var(--pad-text-row)]">
       {links.map((link) => (
         <Chip key={link.url} variant="link" onClick={() => sendCommand("open-url", { url: link.url })}>
-          <span className="truncate">{t(link.label)}</span>
+          <span className="[overflow-wrap:anywhere]">{t(link.label)}</span>
           <MdiArrowTopRight className="size-2.5 shrink-0 text-label-2" />
         </Chip>
       ))}

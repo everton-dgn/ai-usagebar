@@ -9,6 +9,8 @@ export interface RowPrefs {
 export type TimeFormat = "12" | "24" | "auto";
 export type Language = "en" | "pt-BR";
 
+export type PanelView = "list" | "tabs";
+
 export interface Layout {
   alwaysShowPace: boolean;
   usageGoal: boolean;
@@ -18,6 +20,8 @@ export interface Layout {
   hideExtras: boolean;
   hintDismissed: boolean;
   language: Language;
+  /** macOS dashboard: all providers stacked, or one at a time behind tabs. */
+  panelView: PanelView;
   resetTimes: string;
   rows: Record<string, RowPrefs>;
   seeded: boolean;

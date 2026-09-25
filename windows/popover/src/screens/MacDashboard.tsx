@@ -1,10 +1,12 @@
 import { useState } from "react";
 import MdiCogOutline from "~icons/mdi/cog-outline";
 import MdiRefresh from "~icons/mdi/refresh";
+import MdiTab from "~icons/mdi/tab";
+import MdiViewAgendaOutline from "~icons/mdi/view-agenda-outline";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { useI18n } from "@/lib/i18n";
-import type { Card, Layout, MetricRow, Payload, Row } from "@/lib/types";
-import { nextUpdateLabel, resetText, sendCommand, usageGoal } from "../model.js";
+import type { Card, Layout, MetricRow, PanelView, Payload, Row } from "@/lib/types";
+import { nextUpdateLabel, providerIconId, resetText, sendCommand, usageGoal } from "../model.js";
 
 interface MacDashboardProps {
   cards: Card[];
@@ -12,7 +14,53 @@ interface MacDashboardProps {
   nowMs: number;
   payload: Payload;
   onOpenCustomize: () => void;
+}
+
+interface MacPanelHeaderProps {
+  view: PanelView;
+  onView: (view: PanelView) => void;
   onOpenSettings: () => void;
+}
+
+/** The macOS dashboard header, shared by both views: title, view switch, refresh, settings. */
+export function MacPanelHeader({ view, onView, onOpenSettings }: MacPanelHeaderProps) {
+  const { t } = useI18n();
+  const views: [PanelView, string, typeof MdiTab][] = [
+    ["list", t("List"), MdiViewAgendaOutline],
+    ["tabs", t("Tabs"), MdiTab],
+  ];
+  return (
+    <header className="mac-dashboard-header">
+      <div>
+        <h1>AI Usage</h1>
+        <p>{t("Usage and balance")}</p>
+      </div>
+      <div className="mac-dashboard-actions">
+        <div className="mac-view-switch" role="group" aria-label={t("Panel View")}>
+          {views.map(([id, label, Icon]) => (
+            <button
+              key={id}
+              type="button"
+              className="mac-icon-button"
+              aria-label={label}
+              aria-pressed={view === id}
+              data-active={view === id}
+              title={label}
+              onClick={() => onView(id)}
+            >
+              <Icon aria-hidden />
+            </button>
+          ))}
+        </div>
+        <button type="button" className="mac-icon-button" aria-label={t("Refresh")} title={t("Refresh")} onClick={() => sendCommand("refresh")}>
+          <MdiRefresh aria-hidden />
+        </button>
+        <button type="button" className="mac-icon-button" aria-label={t("Settings")} title={t("Settings")} onClick={onOpenSettings}>
+          <MdiCogOutline aria-hidden />
+        </button>
+      </div>
+    </header>
+  );
 }
 
 function primaryMetric(card: Card): MetricRow | undefined {
@@ -107,7 +155,7 @@ function DetailRow({ row, layout, nowMs }: { row: Row; layout: Layout; nowMs: nu
 }
 
 /** A compact provider switcher for the macOS menu bar popover. */
-export function MacDashboard({ cards, layout, nowMs, payload, onOpenCustomize, onOpenSettings }: MacDashboardProps) {
+export function MacDashboard({ cards, layout, nowMs, payload, onOpenCustomize }: MacDashboardProps) {
   const { language, t } = useI18n();
   const [selectedId, setSelectedId] = useState("");
   const selected = cards.find((card) => card.id === selectedId)
@@ -121,27 +169,11 @@ export function MacDashboard({ cards, layout, nowMs, payload, onOpenCustomize, o
 
   return (
     <div className="mac-dashboard">
-      <header className="mac-dashboard-header">
-        <div>
-          <h1>AI Usage</h1>
-          <p>{t("Usage and balance")}</p>
-        </div>
-        <div className="mac-dashboard-actions">
-          <button type="button" className="mac-icon-button" aria-label={t("Refresh")} title={t("Refresh")} onClick={() => sendCommand("refresh") }>
-            <MdiRefresh aria-hidden />
-          </button>
-          <button type="button" className="mac-icon-button" aria-label={t("Settings")} title={t("Settings")} onClick={onOpenSettings}>
-            <MdiCogOutline aria-hidden />
-          </button>
-        </div>
-      </header>
-
       {cards.length ? (
         <>
           <div className="mac-provider-tabs" role="group" aria-label={t("Providers")}>
             {cards.map((card) => {
               const active = selected?.id === card.id;
-              const name = payload.entries.find((entry) => entry.id === card.id)?.shortName || card.title;
               return (
                 <button
                   key={card.id}
@@ -151,8 +183,8 @@ export function MacDashboard({ cards, layout, nowMs, payload, onOpenCustomize, o
                   data-active={active}
                   onClick={() => setSelectedId(card.id)}
                 >
-                  <ProviderIcon slug={card.id} title={card.title} size={17} />
-                  <span className="mac-tab-name">{name}</span>
+                  <ProviderIcon slug={providerIconId(card.id)} title={card.title} size={17} />
+                  <span className="mac-tab-name">{card.title}</span>
                   <span className="mac-tab-value">{providerPreview(card)}</span>
                 </button>
               );
@@ -162,7 +194,7 @@ export function MacDashboard({ cards, layout, nowMs, payload, onOpenCustomize, o
           {selected ? (
             <section className="mac-provider-card" aria-label={selected.title}>
               <div className="mac-provider-heading">
-                <span className="mac-provider-mark"><ProviderIcon slug={selected.id} title={selected.title} size={25} /></span>
+                <span className="mac-provider-mark"><ProviderIcon slug={providerIconId(selected.id)} title={selected.title} size={25} /></span>
                 <span className="mac-provider-title">
                   <strong>{selected.title}</strong>
                   <small>{selected.plan || (selectedEntry?.status === "ready" ? t("Current usage") : t("Usage unavailable"))}{selected.stale ? ` · ${t("Cached")}` : ""}</small>

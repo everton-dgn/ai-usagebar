@@ -91,6 +91,7 @@ export function Dashboard({
     {welcome}
     {banner}
     <VerticalDnd
+      grid={payload.os === "macos"}
       items={ids}
       onReorder={onReorder}
       overlay={(id) => {
@@ -99,7 +100,7 @@ export function Dashboard({
         return <ProviderSection card={card} layout={layout} lifted nowMs={nowMs} />;
       }}
     >
-      <div className="flex flex-col gap-[var(--section-gap)]">
+      <div className={payload.os === "macos" ? "provider-grid" : "flex flex-col gap-[var(--section-gap)]"}>
         {visible.map((card) => (
           <SortableItem key={card.id} id={card.id}>
             {({ attributes, listeners }) => (

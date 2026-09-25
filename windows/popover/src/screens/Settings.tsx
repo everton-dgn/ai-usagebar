@@ -42,6 +42,7 @@ interface SettingsProps {
   onShowAs: (showAs: string) => void;
   onTheme: (theme: string) => void;
   onTimeFormat: (timeFormat: Layout["timeFormat"]) => void;
+  onPanelView: (view: Layout["panelView"]) => void;
 }
 
 /** Settings screen with compact macOS tabs; Windows retains its section layout. */
@@ -65,6 +66,7 @@ export function Settings({
   onShowAs,
   onTheme,
   onTimeFormat,
+  onPanelView,
 }: SettingsProps) {
   const { language, t } = useI18n();
   const [busy, startBusy] = useBusyLabel();
@@ -303,6 +305,18 @@ export function Settings({
       </Section>
       <Section title={t("Usage Display")}>
         {payload.os === "macos" ? (
+          <SettingRow hint={t("List shows every provider at once. Tabs shows one provider at a time.")} label={t("Panel View")}>
+            <Picker
+              options={[
+                ["list", t("List")],
+                ["tabs", t("Tabs")],
+              ]}
+              value={layout.panelView}
+              onChange={onPanelView}
+            />
+          </SettingRow>
+        ) : null}
+        {payload.os === "macos" ? (
           <SettingRow hint={t("Show a goal based on time elapsed in each usage window. Monthly goals may be estimated.")} label={t("Usage goal")}>
             <Switch
               checked={layout.usageGoal}
@@ -406,7 +420,7 @@ function SettingRow({ children, hint, label }: SettingRowProps) {
   return (
     <div className="flex items-center gap-[10px] px-[var(--pad-control)] py-[var(--pad-control)]">
       <span className="flex min-w-0 items-center gap-1">
-        <span className="truncate">{label}</span>
+        <span className="[overflow-wrap:anywhere]">{label}</span>
         {hint ? <SettingHint label={label} text={hint} /> : null}
       </span>
       <span className="min-w-2 flex-1" />

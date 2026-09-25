@@ -16,6 +16,21 @@ Each release is also published at
   content, but never grows past the height you chose, and the list scrolls
   when the content is taller. **Options → Reset Panel Size** restores the
   default width and the automatic height.
+- **List and Tabs views in the macOS popover.** The List view is back as the
+  default: every provider stacked, with the account star, collapse and
+  reordering, in two columns once the panel is wide enough. Tabs keeps the
+  one-provider-at-a-time view. Switch from the header or Settings →
+  Preferences → Panel View.
+
+### Fixed
+
+- **The macOS popover never shows letters for a provider.** Tabs used the
+  three-letter short name and two-letter initials for named accounts; they now
+  show the provider's icon and full name, and a provider with no icon of its
+  own gets a generic one.
+- **Popover text wraps instead of being cut.** Provider names, plans, labels
+  and values wrap onto another line rather than ending in "…", and provider
+  tabs wrap onto more rows instead of scrolling out of sight.
 
 ## [1.23.0] — 2026-09-24
 

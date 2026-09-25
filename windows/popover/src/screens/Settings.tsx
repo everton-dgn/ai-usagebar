@@ -9,7 +9,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import type { Card, Language, Layout, Payload } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { useBusyLabel } from "@/lib/useBusyLabel";
-import { sendCommand, updateModeLabel, updateStatusLabel } from "../model.js";
+import { DEFAULT_COLOR_THRESHOLDS, commitColorThresholds, normalizeColorThresholds, sendCommand, updateModeLabel, updateStatusLabel } from "../model.js";
 import { Customize } from "./Customize";
 
 export type SettingsTab = "general" | "providers" | "menu" | "preferences" | "alerts";
@@ -44,6 +44,7 @@ interface SettingsProps {
   onTimeFormat: (timeFormat: Layout["timeFormat"]) => void;
   onPanelView: (view: Layout["panelView"]) => void;
   onShowPlan: (on: boolean) => void;
+  onColorThresholds: (thresholds: Layout["colorThresholds"]) => void;
 }
 
 /** Settings screen with compact macOS tabs; Windows retains its section layout. */
@@ -69,6 +70,7 @@ export function Settings({
   onTimeFormat,
   onPanelView,
   onShowPlan,
+  onColorThresholds,
 }: SettingsProps) {
   const { language, t } = useI18n();
   const [busy, startBusy] = useBusyLabel();
@@ -103,6 +105,7 @@ export function Settings({
     sendCommand(hostButton.cmd);
   }
 
+  /** Arrow keys, Home and End move between the settings tabs, as in a native tab list. */
   function onTabKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, current: SettingsTab) {
     const index = SETTINGS_TABS.findIndex(([name]) => name === current);
     let next = index;
@@ -318,6 +321,12 @@ export function Settings({
             />
           </SettingRow>
         ) : null}
+        <SettingRow
+          hint={t("Bars are green below the yellow threshold, and red must be above yellow. Percentages count what is used, like the Claude Code statusline.")}
+          label={t("Bar colors")}
+        >
+          <ColorThresholdInputs value={layout.colorThresholds} onChange={onColorThresholds} />
+        </SettingRow>
         <SettingRow hint={t("Show the subscription plan next to each provider's name.")} label={t("Show plan")}>
           <Switch
             checked={layout.showPlan !== false}
@@ -410,11 +419,67 @@ interface SectionProps {
   title: string;
 }
 
+/** A titled group of setting rows on one card. */
 function Section({ children, title }: SectionProps) {
   return (
     <div className="flex flex-col gap-[var(--header-card-gap)]">
       <div className="section-title">{title}</div>
       <div className="card-surface">{children}</div>
+    </div>
+  );
+}
+
+/** Two percentages, committed on blur or Enter and normalized there. */
+function ColorThresholdInputs({
+  value,
+  onChange,
+}: {
+  value: Layout["colorThresholds"];
+  onChange: (thresholds: Layout["colorThresholds"]) => void;
+}) {
+  const { t } = useI18n();
+  const current = normalizeColorThresholds(value);
+  const [draft, setDraft] = useState({ yellow: String(current.yellow), red: String(current.red) });
+  useEffect(() => setDraft({ yellow: String(current.yellow), red: String(current.red) }), [current.yellow, current.red]);
+  const isDefault = current.yellow === DEFAULT_COLOR_THRESHOLDS.yellow && current.red === DEFAULT_COLOR_THRESHOLDS.red;
+
+  /** Commits both drafts on blur or Enter, showing the value that was kept. */
+  function save() {
+    const { next, changed } = commitColorThresholds(draft, current);
+    setDraft({ yellow: String(next.yellow), red: String(next.red) });
+    if (changed) onChange(next);
+  }
+
+  const field = (key: "yellow" | "red", label: string, swatch: string) => (
+    <label className="flex items-center gap-1">
+      <span aria-hidden className="inline-block size-[8px] rounded-full" style={{ background: swatch }} />
+      <input
+        type="number"
+        // Red stays above yellow; the bounds show it before a blur corrects it.
+        min={key === "red" ? current.yellow + 1 : 1}
+        max={key === "yellow" ? current.red - 1 : 100}
+        step={1}
+        inputMode="numeric"
+        className="h-7 w-12 rounded-[6px] border border-[var(--border)] bg-[var(--control-fill)] px-1.5 text-right tabular-nums"
+        aria-label={label}
+        value={draft[key]}
+        onChange={(event) => setDraft({ ...draft, [key]: event.target.value })}
+        onBlur={save}
+        onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
+      />
+      <span className="text-label-2">%</span>
+    </label>
+  );
+
+  return (
+    <div className="flex flex-wrap items-center justify-end gap-2">
+      {field("yellow", t("Yellow from"), "var(--yellow)")}
+      {field("red", t("Red from"), "var(--red)")}
+      {isDefault ? null : (
+        <button type="button" className="plain-btn text-label-2" onClick={() => onChange({ ...DEFAULT_COLOR_THRESHOLDS })}>
+          {t("Default")}
+        </button>
+      )}
     </div>
   );
 }

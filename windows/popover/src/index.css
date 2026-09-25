@@ -514,12 +514,11 @@ body:has(.mac-panel) {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: var(--blue);
+  background: var(--green);
 }
 
-.mac-meter-fill[data-severity="mid"],
-.mac-meter-fill[data-severity="high"] { background: var(--orange); }
-.mac-meter-fill[data-severity="critical"] { background: var(--red); }
+.mac-meter-fill[data-color="yellow"] { background: var(--yellow); }
+.mac-meter-fill[data-color="red"] { background: var(--red); }
 
 .mac-usage-goal {
   margin-top: 9px;
@@ -658,7 +657,7 @@ body:has(.mac-panel) {
   inset: 0 auto 0 0;
   min-width: var(--meter-h);
   border-radius: inherit;
-  background: var(--blue);
+  background: var(--green);
   transition: width 420ms cubic-bezier(0.2, 0.9, 0.3, 1);
 }
 
@@ -673,23 +672,6 @@ body:has(.mac-panel) {
 .meter-fill[data-empty="true"] {
   min-width: 0;
   width: 0 !important;
-}
-
-/* Pace tick: where the fill would sit on an even burn (WidgetRowView's marker). */
-.meter-wrap {
-  position: relative;
-}
-
-.meter-tick {
-  position: absolute;
-  top: -2px;
-  bottom: -2px;
-  width: 2px;
-  border-radius: 1px;
-  background: var(--label-1);
-  opacity: 0.55;
-  transform: translateX(-50%);
-  pointer-events: none;
 }
 
 /* Reorder grip (line.3.horizontal, 12pt semibold, tertiary, 16×22). */

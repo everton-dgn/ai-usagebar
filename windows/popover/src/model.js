@@ -369,33 +369,61 @@ export function headlineAlternate(row, showAs) {
   return percentHeadline(row, showAs === "used" ? "left" : "used");
 }
 
+/** A percent row's headline in the given reading: "N% used" or "N% left". */
 function percentHeadline(row, showAs) {
   if (showAs === "used") return row.usedPercent + "% used";
   return row.leftPercent + "% left";
 }
 
 /**
- * Bar color follows OpenUsage's pace verdict, not the current fill:
- * blue while ≥10% is projected to spare, yellow inside the last 10% with
- * at least 1% cushion, red when projected to run out (or already spent).
- * Without a pace signal, fall back to the host's fill-level severity.
+ * Where a usage bar turns yellow and red, as percentages used. The defaults
+ * match the Claude Code statusline: yellow from 70%, red from 85%.
  */
-export function meterColor(severity, pace, spent) {
+export const DEFAULT_COLOR_THRESHOLDS = Object.freeze({ yellow: 70, red: 85 });
+
+/**
+ * Thresholds from settings: whole percentages in 1..100, and red above
+ * yellow. Anything unusable falls back to the defaults, one field at a time.
+ * @returns {import("./lib/types").ColorThresholds}
+ */
+export function normalizeColorThresholds(value) {
+  const raw = isPlainObject(value) ? value : {};
+  const pick = (field) => {
+    const n = Math.round(Number(raw[field]));
+    return Number.isFinite(n) && n >= 1 && n <= 100 ? n : DEFAULT_COLOR_THRESHOLDS[field];
+  };
+  let yellow = pick("yellow");
+  let red = pick("red");
+  if (red <= yellow) {
+    if (yellow >= 100) yellow = 99;
+    red = yellow + 1;
+  }
+  return { yellow, red };
+}
+
+/**
+ * The thresholds a settings edit commits: the typed `draft` normalized, and
+ * whether that differs from `current` (nothing to save when it does not).
+ * @returns {{ next: import("./lib/types").ColorThresholds, changed: boolean }}
+ */
+export function commitColorThresholds(draft, current) {
+  const next = normalizeColorThresholds(draft);
+  const now = normalizeColorThresholds(current);
+  return { next, changed: next.yellow !== now.yellow || next.red !== now.red };
+}
+
+/**
+ * A usage bar's color from how much of the quota is used: green, then
+ * yellow and red at the configured thresholds. A spent quota is red whatever
+ * the number says. Pace keeps its own signal (the flame note).
+ */
+export function usageColor(usedPercent, thresholds, spent) {
   if (spent) return "red";
-  if (pace && pace.state) {
-    if (pace.state === "behind") return "red";
-    if (pace.state === "onTrack") return pace.sparePercent >= 1 ? "yellow" : "red";
-    if (pace.state === "ahead") return "blue";
-  }
-  switch (severity) {
-    case "mid":
-    case "high":
-      return "yellow";
-    case "critical":
-      return "red";
-    default:
-      return "blue";
-  }
+  const { yellow, red } = normalizeColorThresholds(thresholds);
+  const used = Number(usedPercent) || 0;
+  if (used >= red) return "red";
+  if (used >= yellow) return "yellow";
+  return "green";
 }
 
 function dayKey(atMs, locale, timeZone) {
@@ -570,18 +598,10 @@ export function usageGoal(row, nowMs) {
   return { percent: clampPercent((now - startMs) * 100 / (resetMs - startMs)), estimated };
 }
 
+/** A number held to 0..100, with anything non-finite read as 0. */
 function clampPercent(value) {
   const number = finiteNumber(value);
   return Math.max(0, Math.min(100, number));
-}
-
-// Where the "you should be here" tick sits on the meter, as a percent of its
-// width. The meter fills with what is consumed in Used mode and with what
-// remains in Left mode, so the tick follows the same reading.
-export function paceTickPercent(pace, showAs) {
-  if (!pace) return null;
-  const elapsed = clampPercent(pace.elapsedPercent);
-  return showAs === "used" ? elapsed : 100 - elapsed;
 }
 
 // One-line pace verdict beside the row label, in OpenUsage's WidgetRowView
@@ -773,6 +793,7 @@ export function emptyLayout() {
     language: "en",
     names: {},
     panelView: "list",
+    colorThresholds: { ...DEFAULT_COLOR_THRESHOLDS },
     pinned: false,
     resetTimes: "countdown",
     rows: {},
@@ -975,6 +996,7 @@ export function normalizeLayout(raw) {
   layout.hintDismissed = raw.hintDismissed === true;
   layout.language = raw.language === "pt-BR" ? "pt-BR" : "en";
   layout.panelView = normalizePanelView(raw.panelView);
+  layout.colorThresholds = normalizeColorThresholds(raw.colorThresholds);
   layout.pinned = raw.pinned === true;
   layout.names = cleanNameMap(raw.names);
   layout.showPlan = raw.showPlan !== false;
@@ -1066,6 +1088,7 @@ export function syncLayout(layout, cardIds) {
     hintDismissed: layout.hintDismissed === true,
     language: layout.language === "pt-BR" ? "pt-BR" : "en",
     panelView: normalizePanelView(layout.panelView),
+    colorThresholds: normalizeColorThresholds(layout.colorThresholds),
     pinned: layout.pinned === true,
     names: cleanNameMap(layout.names),
     showPlan: layout.showPlan !== false,

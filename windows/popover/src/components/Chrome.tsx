@@ -94,19 +94,31 @@ export function Footer({
   const nextLabel = nextUpdateLabel(payload, nowMs, language);
   return (
     <footer className="bar-glass flex shrink-0 items-center gap-2 p-[var(--panel-pad)]">
-      <div className="flex min-w-0 flex-col text-[10px] leading-[14px] text-label-2">
-        <span className="flex items-center gap-[5px]">
-          {payload.version ? `AI Usage ${payload.version}` : "AI Usage"}
-          {updatePending ? (
-            <span
-              aria-label={t("Update available")}
-              className="inline-block size-[6px] shrink-0 rounded-full bg-meter-blue"
-              role="img"
-              title={t("Update available")}
-            />
-          ) : null}
-        </span>
-        {payload.os === "macos" ? null : (
+      {/* macOS shows the version in About; the footer carries the size reset instead. */}
+      {payload.os === "macos" ? (
+        <button
+          type="button"
+          className="capsule-btn min-w-0"
+          aria-label={t("Reset Panel Size")}
+          title={t("Reset Panel Size")}
+          onClick={() => sendCommand("reset-panel-size")}
+        >
+          <MdiResize className="size-[13px] shrink-0" />
+          <span className="truncate">{t("Reset Size")}</span>
+        </button>
+      ) : (
+        <div className="flex min-w-0 flex-col text-[10px] leading-[14px] text-label-2">
+          <span className="flex items-center gap-[5px]">
+            {payload.version ? `AI Usage ${payload.version}` : "AI Usage"}
+            {updatePending ? (
+              <span
+                aria-label={t("Update available")}
+                className="inline-block size-[6px] shrink-0 rounded-full bg-meter-blue"
+                role="img"
+                title={t("Update available")}
+              />
+            ) : null}
+          </span>
           <button
             type="button"
             className="plain-btn tabular-nums"
@@ -115,13 +127,21 @@ export function Footer({
           >
             {nextLabel}
           </button>
-        )}
-      </div>
+        </div>
+      )}
       <span className="min-w-2 flex-1" />
       <DropdownMenu modal={false} open={optionsOpen} onOpenChange={onOptionsOpenChange}>
         <DropdownMenuTrigger asChild>
           <button type="button" className="capsule-btn">
             {t("Options")}
+            {payload.os === "macos" && updatePending ? (
+              <span
+                aria-label={t("Update available")}
+                className="inline-block size-[6px] shrink-0 rounded-full bg-meter-blue"
+                role="img"
+                title={t("Update available")}
+              />
+            ) : null}
             <MdiChevronDown className="size-[13px]" />
           </button>
         </DropdownMenuTrigger>
@@ -132,9 +152,6 @@ export function Footer({
           <MenuItem icon={<MdiRefresh />} label={t("Refresh")} onSelect={() => sendCommand("refresh")} />
           <MenuItem icon={<MdiMagnifyScan />} label={t("Detect Providers")} onSelect={() => sendCommand("detect")} />
           <MenuItem icon={<MdiConsole />} label={t("Open TUI")} onSelect={() => sendCommand("open-tui")} />
-          {payload.os === "macos" ? (
-            <MenuItem icon={<MdiResize />} label={t("Reset Panel Size")} onSelect={() => sendCommand("reset-panel-size")} />
-          ) : null}
           <DropdownMenuSeparator />
           <MenuItem
             checked={payload.startupEnabled}

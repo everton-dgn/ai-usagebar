@@ -11,6 +11,10 @@ Each release is also published at
 
 ### Added
 
+- **Usage bar colors by how much is used.** Bars are green, turn yellow from
+  70% used and red from 85%, the same defaults as the Claude Code statusline,
+  in both the list and the tabs view. **Settings → Preferences → Bar colors**
+  sets both thresholds. The pace note and flame keep their own signal.
 - **Pin the macOS popover open.** The pin in the popover header keeps it
   open when focus moves or a click lands outside it; the menu bar icon and
   Escape still close it. The choice is remembered.
@@ -18,8 +22,9 @@ Each release is also published at
   shorter; the size is remembered across runs and the panel re-centres under
   the menu bar icon when you let go. The height still follows the
   content, but never grows past the height you chose, and the list scrolls
-  when the content is taller. **Options → Reset Panel Size** restores the
-  default width and the automatic height.
+  when the content is taller. **Reset Panel Size**, in the footer where the
+  version used to be (the version is under About), returns the panel to its
+  narrowest width (320 pt) and the automatic height.
 - **List and Tabs views in the macOS popover.** The List view is back as the
   default: every provider stacked, with the account star, collapse and
   reordering, in two columns once the panel is wide enough. Tabs keeps the

@@ -38,7 +38,9 @@ import {
   moveRowToList,
   LAYOUT_KEY,
   normalizeLayout,
-  meterColor,
+  normalizeColorThresholds,
+  commitColorThresholds,
+  usageColor,
   resetText,
   resetAlternate,
   formatResetExact,
@@ -53,7 +55,6 @@ import {
   emptyPayload,
   pace,
   paceText,
-  paceTickPercent,
   paceVisible,
   usageGoal,
   prettyMetricLabel,
@@ -452,19 +453,29 @@ assert.equal(updateStatusLabel({ update: null, updateCheckedAt: 0 }, 0, 'pt-BR')
   assert.equal(cleaned.resetTimes, 'countdown');
 }
 
-// --- meterColor --------------------------------------------------------------
+// --- usageColor / normalizeColorThresholds ------------------------------------
 
-assert.equal(meterColor('low'), 'blue');
-assert.equal(meterColor('mid'), 'yellow');
-assert.equal(meterColor('high'), 'yellow');
-assert.equal(meterColor('critical'), 'red');
-assert.equal(meterColor('nope'), 'blue');
-assert.equal(meterColor(undefined), 'blue');
-assert.equal(meterColor('low', { state: 'ahead', sparePercent: 40 }), 'blue');
-assert.equal(meterColor('low', { state: 'onTrack', sparePercent: 2 }), 'yellow');
-assert.equal(meterColor('low', { state: 'onTrack', sparePercent: 0 }), 'red');
-assert.equal(meterColor('low', { state: 'behind', sparePercent: -12 }), 'red');
-assert.equal(meterColor('low', null, true), 'red');
+// Defaults match the Claude Code statusline: green, yellow from 70%, red from 85%.
+assert.deepEqual(normalizeColorThresholds(undefined), { yellow: 70, red: 85 });
+assert.equal(usageColor(0), 'green');
+assert.equal(usageColor(69), 'green');
+assert.equal(usageColor(70), 'yellow');
+assert.equal(usageColor(84), 'yellow');
+assert.equal(usageColor(85), 'red');
+assert.equal(usageColor(10, undefined, true), 'red');
+assert.equal(usageColor(55, { yellow: 50, red: 60 }), 'yellow');
+assert.equal(usageColor(60, { yellow: 50, red: 60 }), 'red');
+// Unusable input falls back per field; red always stays above yellow.
+assert.deepEqual(normalizeColorThresholds({ yellow: 'x', red: 150 }), { yellow: 70, red: 85 });
+assert.deepEqual(normalizeColorThresholds({ yellow: 90, red: 80 }), { yellow: 90, red: 91 });
+assert.deepEqual(normalizeColorThresholds({ yellow: 100, red: 100 }), { yellow: 99, red: 100 });
+assert.deepEqual(normalizeLayout({ colorThresholds: { yellow: 60 } }).colorThresholds, { yellow: 60, red: 85 });
+// A settings edit commits the typed strings normalized, and only when they change something.
+assert.deepEqual(commitColorThresholds({ yellow: '60', red: '80' }, { yellow: 70, red: 85 }), { next: { yellow: 60, red: 80 }, changed: true });
+assert.deepEqual(commitColorThresholds({ yellow: '70', red: '85' }, { yellow: 70, red: 85 }), { next: { yellow: 70, red: 85 }, changed: false });
+// Red typed at or below yellow is kept above it, which the inputs' bounds announce.
+assert.deepEqual(commitColorThresholds({ yellow: '70', red: '60' }, { yellow: 70, red: 85 }), { next: { yellow: 70, red: 71 }, changed: true });
+assert.deepEqual(commitColorThresholds({ yellow: '', red: 'x' }, { yellow: 50, red: 60 }), { next: { yellow: 70, red: 85 }, changed: true });
 
 // --- resetText / resetAlternate / formatResetExact ---------------------------
 
@@ -735,18 +746,6 @@ assert.equal(resetAlternate(badStampRow, 'exact', resetNow, utc), '');
   assert.equal(spent.runsOutMs, null);
   assert.equal(paceText(spent, now), '');
   assert.equal(paceText(spent, now, { resetTimes: 'exact', timeZone: 'UTC' }), '');
-
-  // ASSERT: the tick follows the meter's reading — elapsed in Used mode, remaining in Left mode
-  assert.equal(paceTickPercent(behind, 'used'), 40);
-  assert.equal(paceTickPercent(behind, 'left'), 60);
-  assert.equal(paceTickPercent(ahead, 'used'), 50);
-  assert.equal(paceTickPercent(ahead, undefined), 50);
-  assert.equal(paceTickPercent({ ...ahead, elapsedPercent: 250 }, 'used'), 100);
-  assert.equal(paceTickPercent({ ...ahead, elapsedPercent: 250 }, 'left'), 0);
-  assert.equal(paceTickPercent({ ...ahead, elapsedPercent: -5 }, 'used'), 0);
-  assert.equal(paceTickPercent({ ...ahead, elapsedPercent: -5 }, 'left'), 100);
-  assert.equal(paceTickPercent({ ...ahead, elapsedPercent: NaN }, 'used'), 0);
-  assert.equal(paceTickPercent(null, 'used'), null);
 
   // ASSERT: no signal → null
   assert.equal(pace(row(50, 30_000), now), null); // 30s in: under the 1% / 60s floor

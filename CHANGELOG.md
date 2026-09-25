@@ -44,7 +44,9 @@ Each release is also published at
   provider with a bundled mark reads as icon and value (`[icon] 46%`), drawn in
   the menu bar's text color; with values hidden only the icon is left. The name
   stays in the tooltip, and a provider without a mark keeps its name. macOS 12
-  and 13 cannot load the marks and keep the names.
+  and 13 cannot load the marks and keep the names. The chart glyph moved to
+  the item's right edge, with more room between it and the providers and
+  between providers.
 
 ### Fixed
 

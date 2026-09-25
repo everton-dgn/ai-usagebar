@@ -266,7 +266,7 @@ export function ProviderSectionHeader({
       {...handle?.listeners}
     >
       <ProviderIcon className="text-label-2" size="var(--sz-icon)" slug={providerIconId(card.id)} title={card.title} />
-      <div className="flex min-w-0 items-baseline gap-[5px]">
+      <div className="flex min-w-0 flex-wrap items-baseline gap-x-[5px]">
         <span className="min-w-0 [overflow-wrap:anywhere] text-[length:var(--sz-header)] font-semibold">{card.title}</span>
         {plan ? <span className="shrink-0 text-[length:var(--sz-badge)] text-label-2">{plan}</span> : null}
         {card.stale ? <span className="text-[length:var(--sz-badge)] text-label-3">{t("stale")}</span> : null}

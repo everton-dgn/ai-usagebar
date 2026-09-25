@@ -48,6 +48,8 @@ Each release is also published at
   per provider under `[tray.menu_bar_items."<id>"]`. **Only the Account in
   Use** keeps one account per provider, the one the `claude` or `codex` login
   holds. The chart item stays on the right and opens the popover as before.
+  A provider's click waits for its tab's height before showing, so the popover
+  no longer opens at the list's height and then shrinks.
 - **The macOS menu bar shows each provider's icon instead of its name.** Every
   provider with a bundled mark reads as icon and value (`[icon] 46%`), drawn in
   the menu bar's text color; with values hidden only the icon is left. The name
@@ -58,6 +60,12 @@ Each release is also published at
 
 ### Fixed
 
+- **The account star no longer reopens Claude Desktop signed out.** A Claude
+  switch from the menu bar also switched the Desktop app, which quits and
+  reopens it; when the saved Desktop profile's claude.ai web session had been
+  revoked, the app came back asking to sign in. The star now switches only the
+  `claude` login (the CLI and the VS Code extension). `ai-usagebar account
+  switch <label> --desktop` still switches the app.
 - **Clicking the macOS menu bar icon closes the popover again.** On current
   macOS the status item is drawn out of process, so the outside-click watch saw
   the press on the icon and closed the popover, and that same click then opened

@@ -224,7 +224,7 @@ export default function App() {
       observer.disconnect();
       if (frame !== 0) window.clearTimeout(frame);
     };
-  }, [screen, payload, layout, popoverVisible]);
+  }, [screen, payload, layout, popoverVisible, focusId]);
 
   function onKeyDown(event: KeyboardEvent) {
     if (locked || event.defaultPrevented || optionsOpen || rowMenuOpen) return;

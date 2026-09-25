@@ -74,6 +74,8 @@ enum UserEvent {
     OutsideClick(f64, f64),
     /// A click on a provider's own menu-bar item, or a pick in its menu.
     ProviderItem(ItemAction),
+    /// Show a popover held back for the provider tab's height, if it still is.
+    ShowPending,
 }
 
 enum WorkerCmd {
@@ -167,6 +169,8 @@ struct TrayState {
     language: String,
     /// The provider whose native menu is open.
     menu_provider: Option<String>,
+    /// A provider click is waiting for its tab's height before showing.
+    show_pending: bool,
     notifications_enabled: bool,
     notifications_threshold: u8,
 }
@@ -286,6 +290,7 @@ fn run_loop() -> Result<(), String> {
         focused_provider: None,
         language: "en".into(),
         menu_provider: None,
+        show_pending: false,
         notifications_enabled: config.notifications.enabled,
         notifications_threshold: config.notifications.threshold,
     };
@@ -298,6 +303,7 @@ fn run_loop() -> Result<(), String> {
             Event::UserEvent(UserEvent::ProviderItem(action)) => {
                 handle_provider_item(&mut state, action);
             }
+            Event::UserEvent(UserEvent::ShowPending) => show_pending(&mut state),
             Event::UserEvent(UserEvent::Ipc(body)) => handle_ipc(&mut state, &body, control_flow),
             Event::UserEvent(UserEvent::Report(payload)) => apply_payload(&mut state, payload),
             Event::UserEvent(UserEvent::Entry(entry)) => apply_entry(&mut state, entry),
@@ -462,7 +468,7 @@ fn refresh_account_facts(facts: &SharedFacts) {
 }
 
 /// Run `account switch` out of process, through this binary's `account` mode,
-/// exactly as a terminal would: the Claude half may quit and reopen the Desktop app, and its errors
+/// as a terminal would, and its errors
 /// arrive on stderr, which becomes the card's message. Runs on its own thread,
 /// so a slow switch never holds up the refresh worker; the switch is a
 /// transaction with its own rollback, so it is left to finish rather than
@@ -488,6 +494,11 @@ fn switch_with(tray: &std::path::Path, vendor: &str, label: &str) -> String {
     command.args(["account", "switch", "--yes"]);
     if vendor == "openai" {
         command.arg("--codex");
+    } else {
+        // Only the `claude` login. Switching Claude Desktop quits and reopens
+        // it, and a saved Desktop profile whose claude.ai web session was
+        // revoked reopens signed out; `account switch --desktop` still does it.
+        command.arg("--cli");
     }
     command.arg("--").arg(label);
     match command.stdin(std::process::Stdio::null()).output() {
@@ -855,11 +866,30 @@ fn handle_provider_item(state: &mut TrayState, action: ItemAction) {
             focus_provider(state, Some(id));
             if state.popover_open {
                 position_popover(state);
+            } else if state.js_ready {
+                // The tab is shorter than the list the popover last measured;
+                // showing now would flash that height before the resize.
+                state.show_pending = true;
+                let proxy = state.proxy.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(PENDING_SHOW_TIMEOUT);
+                    let _ = proxy.send_event(UserEvent::ShowPending);
+                });
             } else {
                 show_popover(state);
             }
         }
         ItemAction::Menu { tag } => apply_provider_menu_pick(state, tag),
+    }
+}
+
+/// Longest a provider click waits for its tab's height before showing anyway.
+const PENDING_SHOW_TIMEOUT: Duration = Duration::from_millis(150);
+
+/// Show the popover a provider click held back, once.
+fn show_pending(state: &mut TrayState) {
+    if std::mem::take(&mut state.show_pending) && !state.popover_open {
+        show_popover(state);
     }
 }
 
@@ -1292,6 +1322,11 @@ fn handle_resize(state: &mut TrayState, value: &Value) {
     }
     let visible_h = anchor_visible_height(state.last_anchor);
     state.popover_height = clamp_popover_height(requested, visible_h);
+    if state.show_pending {
+        // The provider tab has its height: show it at that size.
+        show_pending(state);
+        return;
+    }
     // While the user drags an edge the content reports its own height; fitting
     // to it would fight the drag. The next report after the drag applies.
     if in_live_resize(&state.window) {

@@ -155,7 +155,12 @@ function NameField({ card, onRename }: { card: Card; onRename: (name: string) =>
           onBlur={save}
           onKeyDown={(event) => {
             if (event.key === "Enter") event.currentTarget.blur();
-            if (event.key === "Escape") setDraft(card.title);
+            if (event.key === "Escape") {
+              // Cancel the edit only; the screen's own Escape must not also go back.
+              event.stopPropagation();
+              event.nativeEvent.stopImmediatePropagation();
+              setDraft(card.title);
+            }
           }}
         />
         {card.defaultTitle ? (

@@ -172,9 +172,12 @@ function useDragScroll() {
     // Native and non-passive: a vertical wheel over the row must scroll it
     // sideways instead of scrolling the panel underneath.
     const onWheel = (event: WheelEvent) => {
-      if (row.scrollWidth <= row.clientWidth) return;
       if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
-      row.scrollLeft += event.deltaY;
+      const max = row.scrollWidth - row.clientWidth;
+      const next = Math.min(max, Math.max(0, row.scrollLeft + event.deltaY));
+      // At either end the row cannot move, so the panel keeps the scroll.
+      if (next === row.scrollLeft) return;
+      row.scrollLeft = next;
       event.preventDefault();
     };
     row.addEventListener("wheel", onWheel, { passive: false });

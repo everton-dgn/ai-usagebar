@@ -262,7 +262,8 @@ export function ProviderSectionHeader({
   onSwitchAccount,
 }: ProviderSectionHeaderProps) {
   const { t } = useI18n();
-  const plan = showPlan ? displayPlan(card.title, card.plan) : "";
+  // The report's name, not a custom one: the plan is shortened against it.
+  const plan = showPlan ? displayPlan(card.defaultTitle ?? card.title, card.plan) : "";
   return (
     <header
       className="group/header flex items-center gap-[5px] py-[2px] pr-1 pl-[2px]"

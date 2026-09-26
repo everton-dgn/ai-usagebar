@@ -1555,6 +1555,7 @@ fn toggle_startup(state: &mut TrayState) {
 /// Shows the popover under the status item and guards it against the blur
 /// that opening and focusing it can cause.
 fn show_popover(state: &mut TrayState) {
+    state.show_pending = false;
     if state.last_anchor.is_none() {
         state.last_anchor = Some(cocoa_mouse());
     }
@@ -1665,6 +1666,8 @@ fn hide_popover(state: &mut TrayState) {
     state.window.set_visible(false);
     state.popover_open = false;
     state.focused_provider = None;
+    // A provider click still waiting to show must not reopen what was closed.
+    state.show_pending = false;
     mark_open_item(state);
     save_panel_size(state);
     if let Some(webview) = state.webview.as_ref() {

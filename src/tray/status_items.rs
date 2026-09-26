@@ -156,10 +156,11 @@ impl CenterBar {
         unsafe { panel.setReleasedWhenClosed(false) };
         panel.setLevel(NSStatusWindowLevel);
         // Not FullScreenAuxiliary: a fullscreen app hides the menu bar, so
-        // the providers stay off its space too.
+        // the providers stay off its space too. Transient, not Stationary:
+        // Mission Control hides the menu bar, and the providers with it.
         panel.setCollectionBehavior(
             NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::Stationary
+                | NSWindowCollectionBehavior::Transient
                 | NSWindowCollectionBehavior::IgnoresCycle,
         );
         panel.setBackgroundColor(Some(&NSColor::clearColor()));

@@ -50,6 +50,14 @@ Each release is also published at
   holds; with several accounts shown, a small star marks the one in use. A thin
   vertical rule separates each provider from the next, and from the chart
   icon; accounts of one provider stay together.
+- **Center the macOS providers in the menu bar.** **Settings → Menu → Center
+  in the Menu Bar**, or any provider's right-click menu, moves the providers
+  from the right of the menu bar to its middle, on the main display; the chart
+  icon stays at the right. macOS only places status items at the right, so the
+  centered providers are a window of their own: menu bar managers such as
+  Bartender or Ice do not see them, they can sit over a long app menu, and they
+  stay visible when the menu bar hides itself. Saved as
+  `[tray] menu_bar_centered`.
   Providers follow the popover's card order. The chart item stays on
   the right and opens the popover as before.
   A provider's click waits for its tab's height before showing, so the popover

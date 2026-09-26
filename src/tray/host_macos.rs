@@ -162,6 +162,7 @@ struct TrayState {
     menu_bar_items: std::collections::BTreeMap<String, MenuBarItemConfig>,
     menu_bar_active_account_only: bool,
     menu_bar_color_value: bool,
+    menu_bar_centered: bool,
     /// The popover's bar-color thresholds, (yellow, red) in percent used.
     color_thresholds: (f64, f64),
     /// The providers' own menu-bar items, left of the chart glyph.
@@ -284,6 +285,7 @@ fn run_loop() -> Result<(), String> {
         menu_bar_items: config.tray.menu_bar_items.clone(),
         menu_bar_active_account_only: config.tray.menu_bar_active_account_only,
         menu_bar_color_value: config.tray.menu_bar_color_value.unwrap_or(true),
+        menu_bar_centered: config.tray.menu_bar_centered,
         color_thresholds: menu_bar::DEFAULT_THRESHOLDS,
         provider_items: {
             let proxy = proxy.clone();
@@ -675,7 +677,9 @@ fn apply_strip_icon(state: &mut TrayState) {
             // old title in NSStatusBarButton; an empty title clears it.
             state.tray.set_title(Some(""));
             let tips: Vec<String> = chips.iter().map(status_items::tooltip_line).collect();
-            state.provider_items.sync(&chips, &tips);
+            state
+                .provider_items
+                .sync(&chips, &tips, state.menu_bar_centered);
             if let Some(image) = template_bars_image(&fractions) {
                 set_status_button_image(&state.tray, &image);
             }
@@ -813,6 +817,7 @@ fn popover_payload(state: &TrayState) -> String {
     payload["menu_bar_items"] = json!(state.menu_bar_items);
     payload["menu_bar_active_account_only"] = json!(state.menu_bar_active_account_only);
     payload["menu_bar_color_value"] = json!(state.menu_bar_color_value);
+    payload["menu_bar_centered"] = json!(state.menu_bar_centered);
     payload["notifications_enabled"] = json!(state.notifications_enabled);
     payload["notifications_threshold"] = json!(state.notifications_threshold);
     host_payload(&payload)
@@ -925,6 +930,7 @@ const MENU_HIDE: isize = 11;
 const MENU_ACTIVE_ACCOUNT_ONLY: isize = 12;
 const MENU_OPEN: isize = 13;
 const MENU_TOGGLE_COLOR: isize = 14;
+const MENU_CENTERED: isize = 15;
 
 fn provider_menu(state: &mut TrayState, id: &str) -> Vec<MenuLine> {
     state.menu_provider = Some(id.to_owned());
@@ -990,6 +996,11 @@ fn provider_menu(state: &mut TrayState, id: &str) -> Vec<MenuLine> {
         tag: MENU_ACTIVE_ACCOUNT_ONLY,
         checked: state.menu_bar_active_account_only,
     });
+    lines.push(MenuLine::Pick {
+        title: label("Center in the menu bar", "Centralizar no menu bar"),
+        tag: MENU_CENTERED,
+        checked: state.menu_bar_centered,
+    });
     lines.push(MenuLine::Separator);
     lines.push(MenuLine::Pick {
         title: label("Hide from the menu bar", "Ocultar do menu bar"),
@@ -1015,7 +1026,10 @@ fn apply_provider_menu_pick(state: &mut TrayState, tag: isize) {
         }
         return;
     }
-    if tag == MENU_ACTIVE_ACCOUNT_ONLY {
+    if tag == MENU_CENTERED {
+        state.menu_bar_centered = !state.menu_bar_centered;
+        persist_menu_bar_value("menu_bar_centered", state.menu_bar_centered.into());
+    } else if tag == MENU_ACTIVE_ACCOUNT_ONLY {
         state.menu_bar_active_account_only = !state.menu_bar_active_account_only;
         persist_menu_bar_value(
             "menu_bar_active_account_only",
@@ -1300,6 +1314,14 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
             if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
                 state.menu_bar_color_value = enabled;
                 persist_menu_bar_value("menu_bar_color_value", enabled.into());
+                apply_strip_icon(state);
+                push_to_webview(state);
+            }
+        }
+        "set-menu-bar-centered" => {
+            if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
+                state.menu_bar_centered = enabled;
+                persist_menu_bar_value("menu_bar_centered", enabled.into());
                 apply_strip_icon(state);
                 push_to_webview(state);
             }

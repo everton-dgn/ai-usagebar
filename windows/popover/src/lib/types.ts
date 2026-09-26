@@ -245,6 +245,8 @@ export interface Payload {
   menuBarActiveAccountOnly: boolean;
   /** Color menu-bar percentages like the bars; providers may override it. */
   menuBarColorValue: boolean;
+  /** Draw the providers in the middle of the menu bar instead of at its right. */
+  menuBarCentered: boolean;
   notificationsEnabled: boolean;
   notificationsThreshold: number;
   /** Host OS: macos, windows, or linux. */

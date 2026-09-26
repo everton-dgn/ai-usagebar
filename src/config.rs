@@ -131,6 +131,9 @@ pub struct TrayConfig {
     /// Color menu-bar percentages green, yellow or red like the popover's
     /// bars; defaults to true.
     pub menu_bar_color_value: Option<bool>,
+    /// Draw the macOS providers in the middle of the menu bar instead of at
+    /// its right.
+    pub menu_bar_centered: bool,
 }
 
 /// One provider's menu-bar settings. Unset fields follow the `[tray]` ones.
@@ -5138,6 +5141,16 @@ enabled = true
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("menu_bar_items"), "{text}");
         assert!(set_menu_bar_item_value(&path, "zai", "color", None).is_err());
+    }
+
+    #[test]
+    fn centering_the_menu_bar_is_off_until_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[tray]\n").unwrap();
+        assert!(!Config::load_from(&path).unwrap().tray.menu_bar_centered);
+        set_tray_value(&path, "menu_bar_centered", Some(true.into())).unwrap();
+        assert!(Config::load_from(&path).unwrap().tray.menu_bar_centered);
     }
 
     #[test]

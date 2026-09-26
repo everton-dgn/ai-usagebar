@@ -10,17 +10,22 @@ use objc2::runtime::{AnyObject, Bool, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use std::ptr::NonNull;
 
+use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{
     NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
-    NSAttributedStringAttachmentConveniences, NSBaselineOffsetAttributeName, NSColor,
-    NSCompositingOperation, NSControlStateValueOn, NSEventMask, NSEventModifierFlags, NSEventType,
+    NSApplicationDidChangeScreenParametersNotification, NSAttributedStringAttachmentConveniences,
+    NSBackingStoreType, NSBaselineOffsetAttributeName, NSButton, NSColor, NSCompositingOperation,
+    NSControl, NSControlStateValueOn, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
     NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSKernAttributeName,
-    NSMenu, NSMenuItem, NSRectFillUsingOperation, NSStatusBar, NSStatusItem, NSTextAttachment,
-    NSVariableStatusItemLength,
+    NSLayoutAttribute, NSMenu, NSMenuItem, NSPanel, NSRectFillUsingOperation, NSResponder,
+    NSScreen, NSStackView, NSStatusBar, NSStatusItem, NSStatusWindowLevel, NSTextAttachment,
+    NSUserInterfaceLayoutOrientation, NSVariableStatusItemLength, NSView,
+    NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSData, NSDictionary, NSMutableAttributedString,
-    NSNumber, NSObject, NSPoint, NSRect, NSSize, NSString,
+    NSNotification, NSNotificationCenter, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRect,
+    NSSize, NSString,
 };
 
 use super::menu_bar::{Chip, Level};
@@ -32,6 +37,8 @@ const ITEM_PADDING: &str = "  ";
 const PADDING_KERN: f64 = -2.0;
 const CHART_GAP_KERN: f64 = 20.0;
 const PROVIDER_GAP_KERN: f64 = 17.0;
+/// Room between centered buttons, standing in for the status bar's own gap.
+const CENTER_SPACING: f64 = 16.0;
 
 /// What a provider item or its menu reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +98,135 @@ impl ItemTarget {
     }
 }
 
+define_class!(
+    // SAFETY: NSButton has no subclassing requirements and this class does not
+    // implement Drop.
+    #[unsafe(super(NSButton, NSControl, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "AiubCenterButton"]
+    struct CenterButton;
+
+    impl CenterButton {
+        /// A right click reports like a status item's does.
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, _event: &NSEvent) {
+            // SAFETY: the action and target are the ones `sync` set.
+            unsafe { self.sendAction_to(self.action(), self.target().as_deref()) };
+        }
+
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+    }
+);
+
+/// A borderless panel over the middle of the menu bar holding the centered
+/// providers. AppKit only places status items at the right, so centering
+/// needs a window of its own.
+struct CenterBar {
+    panel: Retained<NSPanel>,
+    stack: Retained<NSStackView>,
+    observer: Retained<ProtocolObject<dyn NSObjectProtocol>>,
+}
+
+impl CenterBar {
+    fn new(mtm: MainThreadMarker) -> Self {
+        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+            NSPanel::alloc(mtm),
+            NSRect::ZERO,
+            NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+            NSBackingStoreType::Buffered,
+            false,
+        );
+        // SAFETY: the panel is owned here and never closed through AppKit.
+        unsafe { panel.setReleasedWhenClosed(false) };
+        panel.setLevel(NSStatusWindowLevel);
+        // Not FullScreenAuxiliary: a fullscreen app hides the menu bar, so
+        // the providers stay off its space too.
+        panel.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::Stationary
+                | NSWindowCollectionBehavior::IgnoresCycle,
+        );
+        panel.setBackgroundColor(Some(&NSColor::clearColor()));
+        panel.setOpaque(false);
+        panel.setHasShadow(false);
+        panel.setHidesOnDeactivate(false);
+        panel.setBecomesKeyOnlyIfNeeded(true);
+        let stack = NSStackView::new(mtm);
+        stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+        stack.setAlignment(NSLayoutAttribute::CenterY);
+        stack.setSpacing(CENTER_SPACING);
+        panel.setContentView(Some(&stack));
+        let block = {
+            let (panel, stack) = (panel.clone(), stack.clone());
+            RcBlock::new(move |_: NonNull<NSNotification>| place(&panel, &stack))
+        };
+        // SAFETY: the block only touches main-thread objects and AppKit posts
+        // this notification on the main thread.
+        let observer = unsafe {
+            NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+                Some(NSApplicationDidChangeScreenParametersNotification),
+                None,
+                None,
+                &block,
+            )
+        };
+        Self {
+            panel,
+            stack,
+            observer,
+        }
+    }
+}
+
+impl Drop for CenterBar {
+    fn drop(&mut self) {
+        // SAFETY: the observer came from this notification center.
+        unsafe { NSNotificationCenter::defaultCenter().removeObserver(self.observer.as_ref()) };
+        self.panel.orderOut(None);
+    }
+}
+
+/// Size the panel to its buttons and center it in the primary display's menu
+/// bar, the one the status items live in.
+fn place(panel: &NSPanel, stack: &NSStackView) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(screen) = NSScreen::screens(mtm).firstObject() else {
+        return;
+    };
+    let frame = screen.frame();
+    let visible = screen.visibleFrame();
+    let top = frame.origin.y + frame.size.height;
+    let bar = (top - (visible.origin.y + visible.size.height))
+        .max(NSStatusBar::systemStatusBar().thickness());
+    let width = stack.fittingSize().width;
+    let x = frame.origin.x + (frame.size.width - width) / 2.0;
+    panel.setFrame_display(
+        NSRect::new(NSPoint::new(x, top - bar), NSSize::new(width, bar)),
+        true,
+    );
+    panel.orderFrontRegardless();
+}
+
+/// Where a provider is drawn: its own status item, or a button in the center.
+enum Slot {
+    Status(Retained<NSStatusItem>),
+    Center(Retained<NSButton>),
+}
+
+impl Slot {
+    fn button(&self, mtm: MainThreadMarker) -> Option<Retained<NSButton>> {
+        match self {
+            Slot::Status(item) => item.button(mtm).map(Retained::into_super),
+            Slot::Center(button) => Some(button.clone()),
+        }
+    }
+}
+
 /// One line of a provider's menu.
 pub enum MenuLine {
     /// A disabled heading, such as the provider's name.
@@ -106,7 +242,8 @@ pub enum MenuLine {
 
 /// The provider items currently in the menu bar, left to right.
 pub struct ProviderItems {
-    items: Vec<(String, Retained<NSStatusItem>)>,
+    items: Vec<(String, Slot)>,
+    center: Option<CenterBar>,
     target: Retained<ItemTarget>,
 }
 
@@ -114,25 +251,48 @@ impl ProviderItems {
     pub fn new(mtm: MainThreadMarker, callback: impl Fn(ItemAction) + 'static) -> Self {
         Self {
             items: Vec::new(),
+            center: None,
             target: ItemTarget::new(mtm, Box::new(callback)),
         }
     }
 
-    /// Show `chips`, one item each, with `tooltips` alongside. The items are
-    /// rebuilt only when the providers or their order change; otherwise each
-    /// one's title is redrawn in place.
-    pub fn sync(&mut self, chips: &[Chip], tooltips: &[String]) {
+    /// Show `chips`, one item each, with `tooltips` alongside, at the right
+    /// of the menu bar or in its middle. The items are rebuilt only when the
+    /// providers, their order or the placement change; otherwise each one's
+    /// title is redrawn in place.
+    pub fn sync(&mut self, chips: &[Chip], tooltips: &[String], centered: bool) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
         let same = self.items.len() == chips.len()
+            && self.center.is_some() == centered
             && self
                 .items
                 .iter()
                 .zip(chips)
                 .all(|((id, _), chip)| *id == chip.id);
-        if !same {
+        if !same && centered {
             self.clear();
+            let center = self.center.get_or_insert_with(|| CenterBar::new(mtm));
+            for (index, chip) in chips.iter().enumerate() {
+                // SAFETY: NSButton's init takes no arguments and returns the object.
+                let button: Retained<CenterButton> =
+                    unsafe { msg_send![CenterButton::alloc(mtm), init] };
+                let button: Retained<NSButton> = Retained::into_super(button);
+                button.setBordered(false);
+                button.setTag(index as isize);
+                // SAFETY: the target outlives the buttons (both live in
+                // `self`) and implements `itemClicked:`.
+                unsafe {
+                    button.setTarget(Some(&self.target));
+                    button.setAction(Some(sel!(itemClicked:)));
+                }
+                center.stack.addArrangedSubview(&button);
+                self.items.push((chip.id.clone(), Slot::Center(button)));
+            }
+        } else if !same {
+            self.clear();
+            self.center = None;
             let bar = NSStatusBar::systemStatusBar();
             // A new status item lands left of the existing ones, so the last
             // chip goes first and the first ends up leftmost.
@@ -149,7 +309,7 @@ impl ProviderItems {
                     }
                     button.sendActionOn(NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp);
                 }
-                created.push((chip.id.clone(), item));
+                created.push((chip.id.clone(), Slot::Status(item)));
             }
             created.reverse();
             self.items = created;
@@ -159,6 +319,7 @@ impl ProviderItems {
         {
             let after_rule = index > 0 && vendor(&chips[index - 1].id) != vendor(&chip.id);
             let edge = match chips.get(index + 1) {
+                None if centered => Edge::Account,
                 None => Edge::Chart,
                 Some(next) if vendor(&next.id) != vendor(&chip.id) => Edge::Provider,
                 Some(_) => Edge::Account,
@@ -168,13 +329,22 @@ impl ProviderItems {
                 button.setToolTip(Some(&NSString::from_str(tip)));
             }
         }
+        if let Some(center) = &self.center {
+            place(&center.panel, &center.stack);
+        }
     }
 
     /// Remove every provider item from the menu bar.
     pub fn clear(&mut self) {
         let bar = NSStatusBar::systemStatusBar();
-        for (_, item) in self.items.drain(..) {
-            bar.removeStatusItem(&item);
+        for (_, slot) in self.items.drain(..) {
+            match slot {
+                Slot::Status(item) => bar.removeStatusItem(&item),
+                Slot::Center(button) => button.removeFromSuperview(),
+            }
+        }
+        if let Some(center) = &self.center {
+            center.panel.orderOut(None);
         }
     }
 
@@ -188,16 +358,18 @@ impl ProviderItems {
         self.items.get(index).map(|(id, _)| id.as_str())
     }
 
-    /// Each item's window frame in AppKit screen coordinates.
+    /// Each item's frame in AppKit screen coordinates.
     pub fn frames(&self) -> Vec<(String, NSRect)> {
         let Some(mtm) = MainThreadMarker::new() else {
             return Vec::new();
         };
         self.items
             .iter()
-            .filter_map(|(id, item)| {
-                let window = item.button(mtm)?.window()?;
-                Some((id.clone(), window.frame()))
+            .filter_map(|(id, slot)| {
+                let button = slot.button(mtm)?;
+                let window = button.window()?;
+                let rect = button.convertRect_toView(button.bounds(), None);
+                Some((id.clone(), window.convertRectToScreen(rect)))
             })
             .collect()
     }
@@ -207,7 +379,7 @@ impl ProviderItems {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let Some(button) = self.items.get(index).and_then(|(_, item)| item.button(mtm)) else {
+        let Some(button) = self.items.get(index).and_then(|(_, slot)| slot.button(mtm)) else {
             return;
         };
         let menu = NSMenu::new(mtm);
@@ -284,9 +456,14 @@ fn chip_title(chip: &Chip, after_rule: bool, edge: Edge) -> Retained<NSMutableAt
     let font_object: &AnyObject = font.as_ref();
     // SAFETY: NSFontAttributeName is an immutable AppKit constant.
     let font_key = unsafe { NSFontAttributeName };
-    let attributes = NSDictionary::from_slices(&[font_key], &[font_object]);
+    let label = NSColor::labelColor();
+    let label_object: &AnyObject = label.as_ref();
+    // SAFETY: NSForegroundColorAttributeName is an immutable AppKit constant.
+    let color_key = unsafe { NSForegroundColorAttributeName };
+    let attributes =
+        NSDictionary::from_slices(&[font_key, color_key], &[font_object, label_object]);
     let run = |text: &str| {
-        // SAFETY: the attributes map NSFontAttributeName to an NSFont.
+        // SAFETY: the attributes map font and color keys to an NSFont and NSColor.
         unsafe {
             NSAttributedString::initWithString_attributes(
                 NSAttributedString::alloc(),
@@ -444,16 +621,15 @@ fn value_run(value: &str, level: Option<Level>, font: &NSFont) -> Retained<NSAtt
     let font_object: &AnyObject = font.as_ref();
     // SAFETY: NSFontAttributeName is an immutable AppKit constant.
     let font_key = unsafe { NSFontAttributeName };
-    let color = level.and_then(level_color);
-    let attributes = match &color {
-        Some(color) => {
-            // SAFETY: NSForegroundColorAttributeName is an immutable AppKit constant.
-            let color_key = unsafe { NSForegroundColorAttributeName };
-            let color_object: &AnyObject = color.as_ref();
-            NSDictionary::from_slices(&[font_key, color_key], &[font_object, color_object])
-        }
-        None => NSDictionary::from_slices(&[font_key], &[font_object]),
-    };
+    // An explicit color: a centered button dims a title that has none.
+    let color = level
+        .and_then(level_color)
+        .unwrap_or_else(NSColor::labelColor);
+    // SAFETY: NSForegroundColorAttributeName is an immutable AppKit constant.
+    let color_key = unsafe { NSForegroundColorAttributeName };
+    let color_object: &AnyObject = color.as_ref();
+    let attributes =
+        NSDictionary::from_slices(&[font_key, color_key], &[font_object, color_object]);
     // SAFETY: the attributes map font and color keys to an NSFont and NSColor.
     unsafe {
         NSAttributedString::initWithString_attributes(

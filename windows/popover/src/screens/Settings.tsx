@@ -292,6 +292,16 @@ export function Settings({
               onCheckedChange={(value) => sendCommand("set-menu-bar-active-account-only", { value: value === true })}
             />
           </SettingRow>
+          <SettingRow
+            hint={t("Providers sit in the middle of the menu bar instead of at its right.")}
+            label={t("Center in the Menu Bar")}
+          >
+            <Switch
+              checked={payload.menuBarCentered}
+              aria-label={t("Center in the Menu Bar")}
+              onCheckedChange={(value) => sendCommand("set-menu-bar-centered", { value: value === true })}
+            />
+          </SettingRow>
         </Section>
         <Section title={t("Providers in the Menu Bar")}>
           {payload.entries

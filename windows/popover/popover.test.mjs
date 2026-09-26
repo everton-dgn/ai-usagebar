@@ -1341,6 +1341,8 @@ assert.equal(resolvedTheme('system'), 'light');
   assert.equal(parseHostPayload({}).menuBarActiveAccountOnly, false);
   assert.equal(parseHostPayload({}).menuBarColorValue, true);
   assert.equal(parseHostPayload({ menu_bar_color_value: false }).menuBarColorValue, false);
+  assert.equal(parseHostPayload({}).menuBarCentered, false);
+  assert.equal(parseHostPayload({ menu_bar_centered: true }).menuBarCentered, true);
   assert.equal(normalizeMenuBarItems({ zai: { color_value: false } }).zai.colorValue, false);
 }
 

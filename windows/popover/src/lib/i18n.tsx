@@ -22,6 +22,8 @@ const portuguese: Record<string, string> = {
   "Cached": "Em cache",
   "Chart Icon Only": "Somente ícone do gráfico",
   "Only the Account in Use": "Só a conta em uso",
+  "Center in the Menu Bar": "Centralizar no menu bar",
+  "Providers sit in the middle of the menu bar instead of at its right.": "Os providers ficam no meio do menu bar em vez do canto direito.",
   "With several accounts of one provider, only the one in use shows in the menu bar.": "Com várias contas do mesmo provider, só a conta em uso aparece no menu bar.",
   "Providers in the Menu Bar": "Providers no menu bar",
   "Show in the Menu Bar": "Mostrar no menu bar",

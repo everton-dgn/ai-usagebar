@@ -52,7 +52,9 @@ Each release is also published at
   vertical rule separates each provider from the next, and from the chart
   icon, drawn as its own item so a provider's click area and highlight end at
   its content. Accounts of one provider stay together, closer than different
-  providers. Each item's accessibility label is its tooltip.
+  providers. Each item's accessibility label is its tooltip. The item whose
+  popover is open stays highlighted, the provider's or the chart's, like a
+  native menu.
 - **Center the macOS providers in the menu bar.** **Settings → Menu → Center
   in the Menu Bar**, or any provider's right-click menu, moves the providers
   from the right of the menu bar to the middle of the free stretch between the

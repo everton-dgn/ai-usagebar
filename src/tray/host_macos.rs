@@ -682,6 +682,7 @@ fn apply_strip_icon(state: &mut TrayState) {
             state
                 .provider_items
                 .sync(&chips, &tips, state.menu_bar_centered, chart_left);
+            mark_open_item(state);
             if let Some(image) = template_bars_image(&fractions) {
                 set_status_button_image(&state.tray, &image);
             }
@@ -915,6 +916,7 @@ fn show_pending(state: &mut TrayState) {
 /// Tell the popover which provider to open on, or to open as it was.
 fn focus_provider(state: &mut TrayState, id: Option<String>) {
     state.focused_provider = id;
+    mark_open_item(state);
     if let Some(webview) = state.webview.as_ref() {
         let arg = serde_json::to_string(&state.focused_provider).unwrap_or_else(|_| "null".into());
         let _ = webview.evaluate_script(&format!(
@@ -1560,6 +1562,7 @@ fn show_popover(state: &mut TrayState) {
     guard_blur(state);
     state.window.set_visible(true);
     state.popover_open = true;
+    mark_open_item(state);
     if let Some(webview) = state.webview.as_ref() {
         let _ = webview.evaluate_script(&format!(
             "window.__AIUB_LOCKCLICKS__ && window.__AIUB_LOCKCLICKS__({CLICK_LOCK_MS})"
@@ -1662,6 +1665,7 @@ fn hide_popover(state: &mut TrayState) {
     state.window.set_visible(false);
     state.popover_open = false;
     state.focused_provider = None;
+    mark_open_item(state);
     save_panel_size(state);
     if let Some(webview) = state.webview.as_ref() {
         let _ =
@@ -2027,6 +2031,27 @@ fn fill_round_rect(x: f64, y: f64, w: f64, h: f64, radius: f64, alpha: f64) {
 
 /// The chart glyph on tray-icon's own item. Looking the button up among the
 /// app's windows would now find a provider item as easily as this one.
+/// Keep the item that opened the popover highlighted while it is open, like a
+/// native status item's menu: the provider's own item, or the chart glyph.
+fn mark_open_item(state: &TrayState) {
+    let provider = state
+        .popover_open
+        .then_some(state.focused_provider.as_deref())
+        .flatten();
+    let chart = state.popover_open && provider.is_none();
+    if let Some(button) = MainThreadMarker::new().and_then(|mtm| {
+        state
+            .tray
+            .ns_status_item()
+            .and_then(|item| item.button(mtm))
+    }) {
+        status_items::mark_open(&button, chart);
+    }
+    state
+        .provider_items
+        .highlight(provider.and_then(|id| state.provider_items.index_of(id)));
+}
+
 fn set_status_button_image(tray: &TrayIcon, image: &NSImage) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;

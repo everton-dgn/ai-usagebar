@@ -12,14 +12,15 @@ use std::ptr::NonNull;
 
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{
-    NSAccessibility, NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
-    NSApplicationDidChangeScreenParametersNotification, NSAttributedStringAttachmentConveniences,
-    NSAttributedStringNSStringDrawing, NSBackingStoreType, NSBaselineOffsetAttributeName, NSButton,
-    NSColor, NSCompositingOperation, NSControl, NSControlStateValueOn, NSEvent, NSEventMask,
-    NSEventModifierFlags, NSEventType, NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
-    NSImage, NSLayoutAttribute, NSMenu, NSMenuItem, NSPanel, NSRectFillUsingOperation, NSResponder,
-    NSScreen, NSStackView, NSStatusBar, NSStatusItem, NSStatusWindowLevel, NSTextAttachment,
-    NSTextField, NSUserInterfaceLayoutOrientation, NSVariableStatusItemLength, NSView,
+    NSAccessibility, NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua,
+    NSAppearanceNameDarkAqua, NSApplication, NSApplicationDidChangeScreenParametersNotification,
+    NSAttributedStringAttachmentConveniences, NSAttributedStringNSStringDrawing,
+    NSBackingStoreType, NSBaselineOffsetAttributeName, NSButton, NSColor, NSCompositingOperation,
+    NSControl, NSControlStateValueOn, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
+    NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSLayoutAttribute,
+    NSMenu, NSMenuItem, NSPanel, NSRectFillUsingOperation, NSResponder, NSScreen, NSStackView,
+    NSStatusBar, NSStatusItem, NSStatusWindowLevel, NSTextAttachment, NSTextField,
+    NSUserInterfaceLayoutOrientation, NSVariableStatusItemLength, NSView,
     NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
     NSWorkspaceDidActivateApplicationNotification,
 };
@@ -47,6 +48,9 @@ const RULE_ROOM: f64 = 12.75;
 /// The centered row's gap between two accounts, and around a rule.
 const CENTER_ACCOUNT_GAP: f64 = 20.0;
 const CENTER_RULE_GAP: f64 = 28.0;
+/// Room a centered button keeps on each side of its content, where the
+/// highlight of an open item shows; taken back out of the row's spacing.
+const CENTER_ROOM: f64 = 6.0;
 
 /// What a provider item or its menu reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +130,13 @@ define_class!(
         fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
             true
         }
+
+        #[unsafe(method(intrinsicContentSize))]
+        fn intrinsic_content_size(&self) -> NSSize {
+            // SAFETY: NSButton implements intrinsicContentSize.
+            let size: NSSize = unsafe { msg_send![super(self), intrinsicContentSize] };
+            NSSize::new(size.width + 2.0 * CENTER_ROOM, size.height)
+        }
     }
 );
 
@@ -171,7 +182,7 @@ impl CenterBar {
         let stack = NSStackView::new(mtm);
         stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         stack.setAlignment(NSLayoutAttribute::CenterY);
-        stack.setSpacing(CENTER_RULE_GAP);
+        stack.setSpacing(CENTER_RULE_GAP - CENTER_ROOM);
         panel.setContentView(Some(&stack));
         eprintln!(
             "centered providers: accessibility {}",
@@ -425,9 +436,10 @@ impl ProviderItems {
                 button.setToolTip(Some(&tip));
                 button.setAccessibilityLabel(Some(&tip));
                 if let (Some(center), true) = (&self.center, before_account) {
-                    center
-                        .stack
-                        .setCustomSpacing_afterView(CENTER_ACCOUNT_GAP, &button);
+                    center.stack.setCustomSpacing_afterView(
+                        CENTER_ACCOUNT_GAP - 2.0 * CENTER_ROOM,
+                        &button,
+                    );
                 }
             }
         }
@@ -465,6 +477,25 @@ impl ProviderItems {
     /// The provider shown by the item at `index`.
     pub fn id_at(&self, index: usize) -> Option<&str> {
         self.items.get(index).map(|(id, _)| id.as_str())
+    }
+
+    /// Highlight the item at `open`, the one whose popover is showing, and
+    /// clear the rest, as a native status item's menu does.
+    pub fn highlight(&self, open: Option<usize>) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        for (index, (_, slot)) in self.items.iter().enumerate() {
+            let on = open == Some(index);
+            match slot {
+                Slot::Status(item) => {
+                    if let Some(button) = item.button(mtm) {
+                        mark_open(&button, on);
+                    }
+                }
+                Slot::Center(button) => mark_open(button, on),
+            }
+        }
     }
 
     /// Each item's frame in AppKit screen coordinates.
@@ -547,6 +578,37 @@ fn menu_item(mtm: MainThreadMarker, title: &str, action: Option<Sel>) -> Retaine
 enum Rule {
     Status(Retained<NSStatusItem>),
     Center(Retained<NSView>),
+}
+
+const PILL_RADIUS: f64 = 6.0;
+
+/// Draw or clear the open-item highlight behind `button`. A status item's
+/// button does not keep AppKit's highlight once its click ends, so the pill is
+/// drawn on the button's own layer, the same size as the hover highlight.
+pub fn mark_open(button: &NSButton, on: bool) {
+    let view: &NSView = button;
+    view.setWantsLayer(true);
+    if let Some(layer) = view.layer() {
+        let color = on.then(|| pill_color(view)).map(|c| c.CGColor());
+        layer.setBackgroundColor(color.as_deref());
+        layer.setCornerRadius(PILL_RADIUS);
+    }
+}
+
+/// The menu bar's highlight for an open item: a light wash on a dark bar, a
+/// dark one on a light bar.
+fn pill_color(view: &NSView) -> Retained<NSColor> {
+    // SAFETY: these appearance names are immutable AppKit constants.
+    let names = unsafe { NSArray::from_slice(&[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) };
+    let dark = view
+        .effectiveAppearance()
+        .bestMatchFromAppearancesWithNames(&names)
+        .is_some_and(|name| &*name == unsafe { NSAppearanceNameDarkAqua });
+    if dark {
+        NSColor::colorWithWhite_alpha(1.0, 0.2)
+    } else {
+        NSColor::colorWithWhite_alpha(0.0, 0.12)
+    }
 }
 
 fn vendor(id: &str) -> &str {

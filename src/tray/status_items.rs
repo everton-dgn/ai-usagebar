@@ -31,6 +31,7 @@ const MARK_SIDE: f64 = 15.0;
 const ITEM_PADDING: &str = "  ";
 const PADDING_KERN: f64 = -2.0;
 const CHART_GAP_KERN: f64 = 20.0;
+const PROVIDER_GAP_KERN: f64 = 17.0;
 
 /// What a provider item or its menu reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,12 +154,17 @@ impl ProviderItems {
             created.reverse();
             self.items = created;
         }
-        let last = self.items.len().saturating_sub(1);
         for (index, (((_, item), chip), tip)) in
             self.items.iter().zip(chips).zip(tooltips).enumerate()
         {
+            let after_rule = index > 0 && vendor(&chips[index - 1].id) != vendor(&chip.id);
+            let edge = match chips.get(index + 1) {
+                None => Edge::Chart,
+                Some(next) if vendor(&next.id) != vendor(&chip.id) => Edge::Provider,
+                Some(_) => Edge::Account,
+            };
             if let Some(button) = item.button(mtm) {
-                button.setAttributedTitle(&chip_title(chip, index == last));
+                button.setAttributedTitle(&chip_title(chip, after_rule, edge));
                 button.setToolTip(Some(&NSString::from_str(tip)));
             }
         }
@@ -258,7 +264,22 @@ fn menu_item(mtm: MainThreadMarker, title: &str, action: Option<Sel>) -> Retaine
 
 /// A chip as the item's title: its mark and value, or its name and value
 /// where the mark cannot be drawn (SVG needs macOS 14).
-fn chip_title(chip: &Chip, rightmost: bool) -> Retained<NSMutableAttributedString> {
+/// What follows an item on its right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Edge {
+    /// Another account of the same provider.
+    Account,
+    /// A different provider.
+    Provider,
+    /// The chart glyph.
+    Chart,
+}
+
+fn vendor(id: &str) -> &str {
+    id.split_once('@').map_or(id, |(vendor, _)| vendor)
+}
+
+fn chip_title(chip: &Chip, after_rule: bool, edge: Edge) -> Retained<NSMutableAttributedString> {
     let font = NSFont::menuBarFontOfSize(0.0);
     let font_object: &AnyObject = font.as_ref();
     // SAFETY: NSFontAttributeName is an immutable AppKit constant.
@@ -292,7 +313,9 @@ fn chip_title(chip: &Chip, rightmost: bool) -> Retained<NSMutableAttributedStrin
         }
     };
     let title = NSMutableAttributedString::new();
-    title.appendAttributedString(&padding(PADDING_KERN));
+    if !after_rule {
+        title.appendAttributedString(&padding(PADDING_KERN));
+    }
     match chip.mark.and_then(mark_image) {
         Some(image) => {
             let attachment = NSTextAttachment::new();
@@ -322,18 +345,23 @@ fn chip_title(chip: &Chip, rightmost: bool) -> Retained<NSMutableAttributedStrin
     if chip.active_account {
         title.appendAttributedString(&active_mark());
     }
-    if rightmost {
-        title.appendAttributedString(&padding(PADDING_KERN + CHART_GAP_KERN / 2.0));
-        title.appendAttributedString(&chart_separator(&font));
-        title.appendAttributedString(&padding(PADDING_KERN));
-    } else {
-        title.appendAttributedString(&padding(PADDING_KERN));
+    match edge {
+        Edge::Account => title.appendAttributedString(&padding(PADDING_KERN)),
+        Edge::Provider => {
+            title.appendAttributedString(&padding(PADDING_KERN + PROVIDER_GAP_KERN));
+            title.appendAttributedString(&separator(&font));
+        }
+        Edge::Chart => {
+            title.appendAttributedString(&padding(PADDING_KERN + CHART_GAP_KERN / 2.0));
+            title.appendAttributedString(&separator(&font));
+            title.appendAttributedString(&padding(PADDING_KERN));
+        }
     }
     title
 }
 
-/// A faint vertical rule between the last provider and the chart glyph.
-fn chart_separator(font: &NSFont) -> Retained<NSAttributedString> {
+/// A faint vertical rule between providers, and before the chart glyph.
+fn separator(font: &NSFont) -> Retained<NSAttributedString> {
     let font_object: &AnyObject = font.as_ref();
     let color = NSColor::secondaryLabelColor();
     let color_object: &AnyObject = color.as_ref();

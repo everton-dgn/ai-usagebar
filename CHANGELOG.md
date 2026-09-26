@@ -48,7 +48,8 @@ Each release is also published at
   per provider under `[tray.menu_bar_items."<id>"]`. **Only the Account in
   Use** keeps one account per provider, the one the `claude` or `codex` login
   holds; with several accounts shown, a small star marks the one in use. A thin
-  vertical rule separates the providers from the chart icon.
+  vertical rule separates each provider from the next, and from the chart
+  icon; accounts of one provider stay together.
   Providers follow the popover's card order. The chart item stays on
   the right and opens the popover as before.
   A provider's click waits for its tab's height before showing, so the popover

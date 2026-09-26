@@ -56,9 +56,9 @@ Each release is also published at
   no longer opens at the list's height and then shrinks, and the tab row
   scrolls to show that provider's tab. The tabs view's card has the account star
   too, to switch to that account.
-- **Menu bar percentages take the bar colors.** Each provider's value reads
-  green, yellow or red (Dracula's on a dark menu bar, darker tones on a light
-  one) at the thresholds set in **Settings → Preferences →
+- **Menu bar percentages take the bar colors.** Each provider's value turns
+  yellow or red (Dracula's on a dark menu bar, darker tones on a light one)
+  and otherwise keeps the menu bar's text color, at the thresholds set in **Settings → Preferences →
   Bar colors**. **Settings → Menu → Color the Values** turns it off, and each
   provider or account can override it there or from its right-click menu.
 - **The macOS menu bar shows each provider's icon instead of its name.** Every

@@ -378,11 +378,12 @@ fn separator(font: &NSFont) -> Retained<NSAttributedString> {
     }
 }
 
-/// Dracula's green, yellow and red on a dark menu bar; darker tones on a
-/// light one, where Dracula's pastels would not read.
-fn level_color(level: Level) -> Retained<NSColor> {
+/// Dracula's yellow and red on a dark menu bar; darker tones on a light one,
+/// where Dracula's pastels would not read. Green keeps the menu bar's text
+/// color, so only a quota running out draws the eye.
+fn level_color(level: Level) -> Option<Retained<NSColor>> {
     let (dark, light) = match level {
-        Level::Green => ((0x50, 0xfa, 0x7b), (0x1f, 0x8a, 0x3c)),
+        Level::Green => return None,
         Level::Yellow => ((0xf1, 0xfa, 0x8c), (0x9a, 0x74, 0x00)),
         Level::Red => ((0xff, 0x55, 0x55), (0xc4, 0x1e, 0x1e)),
     };
@@ -409,7 +410,7 @@ fn level_color(level: Level) -> Retained<NSColor> {
         },
     );
     // SAFETY: the provider returns colors it owns for as long as it lives.
-    unsafe { NSColor::colorWithName_dynamicProvider(None, &provider) }
+    Some(unsafe { NSColor::colorWithName_dynamicProvider(None, &provider) })
 }
 
 /// The popover's star for the account in use, small and raised after the value.
@@ -443,7 +444,7 @@ fn value_run(value: &str, level: Option<Level>, font: &NSFont) -> Retained<NSAtt
     let font_object: &AnyObject = font.as_ref();
     // SAFETY: NSFontAttributeName is an immutable AppKit constant.
     let font_key = unsafe { NSFontAttributeName };
-    let color = level.map(level_color);
+    let color = level.and_then(level_color);
     let attributes = match &color {
         Some(color) => {
             // SAFETY: NSForegroundColorAttributeName is an immutable AppKit constant.

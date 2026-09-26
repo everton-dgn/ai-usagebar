@@ -172,7 +172,14 @@ impl CenterBar {
         stack.setAlignment(NSLayoutAttribute::CenterY);
         stack.setSpacing(CENTER_RULE_GAP);
         panel.setContentView(Some(&stack));
-        menu_space::request_access();
+        eprintln!(
+            "centered providers: accessibility {}",
+            if menu_space::trusted() {
+                "granted"
+            } else {
+                "not granted"
+            }
+        );
         let menu_end = Rc::new(Cell::new(menu_space::app_menu_end()));
         let chart_left = Rc::new(Cell::new(None));
         let block = {

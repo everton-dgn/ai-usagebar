@@ -57,7 +57,7 @@ Each release is also published at
   from the right of the menu bar to the middle of the free stretch between the
   active app's menus and the status icons, on the main display; the chart icon
   stays at the right. Finding where the app's menus end needs the
-  Accessibility permission, which macOS asks for when centering is on; without
+  Accessibility permission, which macOS asks for when you turn centering on; without
   it the providers sit in the middle of the screen. `make install-tray-macos`
   installs the tray signed with your Apple development identity, so that
   permission survives rebuilds. macOS only places status items at the right, so the

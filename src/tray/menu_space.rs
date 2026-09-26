@@ -15,8 +15,15 @@ use objc2_core_foundation::{
 };
 use std::ptr::NonNull;
 
-/// Ask once for the Accessibility permission that reading the app's menus
-/// needs; macOS shows its own prompt when it is missing.
+/// Whether this process holds the Accessibility permission.
+pub fn trusted() -> bool {
+    // SAFETY: a plain query with no arguments.
+    unsafe { AXIsProcessTrusted() }
+}
+
+/// Ask for the Accessibility permission that reading the app's menus needs;
+/// macOS shows its own prompt when it is missing. Called only when the user
+/// turns centering on, never at launch, so a restart does not prompt again.
 pub fn request_access() {
     // SAFETY: an immutable HIServices constant.
     let key: &CFString = unsafe { kAXTrustedCheckOptionPrompt };
@@ -28,8 +35,7 @@ pub fn request_access() {
 /// Where the frontmost app's menus end, in screen points from the left, or
 /// `None` without the permission, for this app itself, or on any failure.
 pub fn app_menu_end() -> Option<f64> {
-    // SAFETY: a plain query with no arguments.
-    if !unsafe { AXIsProcessTrusted() } {
+    if !trusted() {
         return None;
     }
     let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
@@ -82,8 +88,7 @@ fn frame(element: &AXUIElement) -> Option<CGRect> {
 /// extras and `own` (this app's chart item, which Accessibility cannot ask
 /// this process about without blocking it).
 pub fn status_items_start(own: Option<f64>, bar_height: f64) -> Option<f64> {
-    // SAFETY: a plain query with no arguments.
-    if !unsafe { AXIsProcessTrusted() } {
+    if !trusted() {
         return own;
     }
     let me = std::process::id() as i32;

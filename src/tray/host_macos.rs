@@ -37,6 +37,7 @@ use super::browse;
 use super::hotkey::{self, HotkeyBinding};
 use super::icon::{Severity, tray_icon_rgba};
 use super::menu_bar::{self, UsageWindow};
+use super::menu_space;
 use super::panel::{
     CLICK_LOCK_MS, CORNER_RADIUS, CocoaRect, FALLBACK_WORK_AREA_HEIGHT, MIN_POPOVER_WIDTH,
     MIN_USER_HEIGHT, PanelSize, PopoverPlacement, WINDOW_HEIGHT, clamp_popover_height,
@@ -1029,6 +1030,9 @@ fn apply_provider_menu_pick(state: &mut TrayState, tag: isize) {
     }
     if tag == MENU_CENTERED {
         state.menu_bar_centered = !state.menu_bar_centered;
+        if state.menu_bar_centered {
+            menu_space::request_access();
+        }
         persist_menu_bar_value("menu_bar_centered", state.menu_bar_centered.into());
     } else if tag == MENU_ACTIVE_ACCOUNT_ONLY {
         state.menu_bar_active_account_only = !state.menu_bar_active_account_only;
@@ -1322,6 +1326,9 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
         "set-menu-bar-centered" => {
             if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
                 state.menu_bar_centered = enabled;
+                if enabled {
+                    menu_space::request_access();
+                }
                 persist_menu_bar_value("menu_bar_centered", enabled.into());
                 apply_strip_icon(state);
                 push_to_webview(state);

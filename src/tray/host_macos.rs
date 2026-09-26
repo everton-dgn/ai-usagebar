@@ -811,6 +811,9 @@ fn handle_tray(state: &mut TrayState, event: TrayIconEvent) {
     {
         match button {
             MouseButton::Left | MouseButton::Right => {
+                // The press this click ends has been handled; a later blur
+                // is not part of it.
+                state.status_item_pressed_at = None;
                 if state.popover_open {
                     hide_popover(state);
                 } else {
@@ -1329,6 +1332,7 @@ fn hide_popover(state: &mut TrayState) {
 }
 
 fn toggle_popover_from_keyboard(state: &mut TrayState) {
+    state.status_item_pressed_at = None;
     if state.popover_open {
         hide_popover(state);
     } else {

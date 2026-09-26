@@ -12,14 +12,14 @@ use std::ptr::NonNull;
 
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{
-    NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+    NSAccessibility, NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationDidChangeScreenParametersNotification, NSAttributedStringAttachmentConveniences,
-    NSBackingStoreType, NSBaselineOffsetAttributeName, NSButton, NSColor, NSCompositingOperation,
-    NSControl, NSControlStateValueOn, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
-    NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSKernAttributeName,
-    NSLayoutAttribute, NSMenu, NSMenuItem, NSPanel, NSRectFillUsingOperation, NSResponder,
+    NSAttributedStringNSStringDrawing, NSBackingStoreType, NSBaselineOffsetAttributeName, NSButton,
+    NSColor, NSCompositingOperation, NSControl, NSControlStateValueOn, NSEvent, NSEventMask,
+    NSEventModifierFlags, NSEventType, NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
+    NSImage, NSLayoutAttribute, NSMenu, NSMenuItem, NSPanel, NSRectFillUsingOperation, NSResponder,
     NSScreen, NSStackView, NSStatusBar, NSStatusItem, NSStatusWindowLevel, NSTextAttachment,
-    NSUserInterfaceLayoutOrientation, NSVariableStatusItemLength, NSView,
+    NSTextField, NSUserInterfaceLayoutOrientation, NSVariableStatusItemLength, NSView,
     NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
     NSWorkspaceDidActivateApplicationNotification,
 };
@@ -37,12 +37,16 @@ use std::rc::Rc;
 /// Side of a provider mark in the menu bar, in points.
 const MARK_SIDE: f64 = 15.0;
 
-const ITEM_PADDING: &str = "  ";
-const PADDING_KERN: f64 = -2.0;
-const CHART_GAP_KERN: f64 = 20.0;
-const PROVIDER_GAP_KERN: f64 = 17.0;
-/// Room between centered buttons, standing in for the status bar's own gap.
-const CENTER_SPACING: f64 = 16.0;
+/// Room on each side of a provider's content. Items get a fixed width, so
+/// the gap between two accounts is the status bar's spacing plus twice this,
+/// and the highlight stays even on both sides.
+const ITEM_ROOM: f64 = 3.25;
+/// Room on each side of a rule, which draws no highlight: providers sit
+/// further from a rule than from another account of their own.
+const RULE_ROOM: f64 = 10.75;
+/// The centered row's gap between two accounts, and around a rule.
+const CENTER_ACCOUNT_GAP: f64 = 24.0;
+const CENTER_RULE_GAP: f64 = 28.0;
 
 /// What a provider item or its menu reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,7 +170,7 @@ impl CenterBar {
         let stack = NSStackView::new(mtm);
         stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         stack.setAlignment(NSLayoutAttribute::CenterY);
-        stack.setSpacing(CENTER_SPACING);
+        stack.setSpacing(CENTER_RULE_GAP);
         panel.setContentView(Some(&stack));
         menu_space::request_access();
         let menu_end = Rc::new(Cell::new(menu_space::app_menu_end()));
@@ -289,6 +293,9 @@ pub enum MenuLine {
 /// The provider items currently in the menu bar, left to right.
 pub struct ProviderItems {
     items: Vec<(String, Slot)>,
+    /// The rules between providers and before the chart glyph: their own
+    /// items, so a provider's click area and highlight end at its content.
+    rules: Vec<Rule>,
     center: Option<CenterBar>,
     target: Retained<ItemTarget>,
 }
@@ -297,6 +304,7 @@ impl ProviderItems {
     pub fn new(mtm: MainThreadMarker, callback: impl Fn(ItemAction) + 'static) -> Self {
         Self {
             items: Vec::new(),
+            rules: Vec::new(),
             center: None,
             target: ItemTarget::new(mtm, Box::new(callback)),
         }
@@ -344,6 +352,18 @@ impl ProviderItems {
                 }
                 center.stack.addArrangedSubview(&button);
                 self.items.push((chip.id.clone(), Slot::Center(button)));
+                if rule_after(chips, index, centered) {
+                    let rule = NSTextField::labelWithAttributedString(
+                        &separator(&NSColor::secondaryLabelColor()),
+                        mtm,
+                    );
+                    rule.setAccessibilityElement(false);
+                    center.stack.addArrangedSubview(&rule);
+                    self.rules
+                        .push(Rule::Center(Retained::into_super(Retained::into_super(
+                            rule,
+                        ))));
+                }
             }
         } else if !same {
             self.clear();
@@ -353,6 +373,18 @@ impl ProviderItems {
             // chip goes first and the first ends up leftmost.
             let mut created = Vec::with_capacity(chips.len());
             for (index, chip) in chips.iter().enumerate().rev() {
+                if rule_after(chips, index, centered) {
+                    let rule = bar.statusItemWithLength(NSVariableStatusItemLength);
+                    if let Some(button) = rule.button(mtm) {
+                        // A disabled button dims its title on its own.
+                        let title = separator(&NSColor::labelColor());
+                        rule.setLength(title.size().width + 2.0 * RULE_ROOM);
+                        button.setAttributedTitle(&title);
+                        button.setEnabled(false);
+                        button.setAccessibilityElement(false);
+                    }
+                    self.rules.push(Rule::Status(rule));
+                }
                 let item = bar.statusItemWithLength(NSVariableStatusItemLength);
                 if let Some(button) = item.button(mtm) {
                     button.setTag(index as isize);
@@ -372,16 +404,23 @@ impl ProviderItems {
         for (index, (((_, item), chip), tip)) in
             self.items.iter().zip(chips).zip(tooltips).enumerate()
         {
-            let after_rule = index > 0 && vendor(&chips[index - 1].id) != vendor(&chip.id);
-            let edge = match chips.get(index + 1) {
-                None if centered => Edge::Account,
-                None => Edge::Chart,
-                Some(next) if vendor(&next.id) != vendor(&chip.id) => Edge::Provider,
-                Some(_) => Edge::Account,
-            };
+            let before_account = chips
+                .get(index + 1)
+                .is_some_and(|next| vendor(&next.id) == vendor(&chip.id));
+            let title = chip_title(chip);
+            if let Slot::Status(item) = item {
+                item.setLength(title.size().width + 2.0 * ITEM_ROOM);
+            }
             if let Some(button) = item.button(mtm) {
-                button.setAttributedTitle(&chip_title(chip, after_rule, edge));
-                button.setToolTip(Some(&NSString::from_str(tip)));
+                button.setAttributedTitle(&title);
+                let tip = NSString::from_str(tip);
+                button.setToolTip(Some(&tip));
+                button.setAccessibilityLabel(Some(&tip));
+                if let (Some(center), true) = (&self.center, before_account) {
+                    center
+                        .stack
+                        .setCustomSpacing_afterView(CENTER_ACCOUNT_GAP, &button);
+                }
             }
         }
         if let Some(center) = &self.center {
@@ -397,6 +436,12 @@ impl ProviderItems {
             match slot {
                 Slot::Status(item) => bar.removeStatusItem(&item),
                 Slot::Center(button) => button.removeFromSuperview(),
+            }
+        }
+        for rule in self.rules.drain(..) {
+            match rule {
+                Rule::Status(item) => bar.removeStatusItem(&item),
+                Rule::Center(view) => view.removeFromSuperview(),
             }
         }
         if let Some(center) = &self.center {
@@ -490,24 +535,28 @@ fn menu_item(mtm: MainThreadMarker, title: &str, action: Option<Sel>) -> Retaine
     }
 }
 
-/// A chip as the item's title: its mark and value, or its name and value
-/// where the mark cannot be drawn (SVG needs macOS 14).
-/// What follows an item on its right.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Edge {
-    /// Another account of the same provider.
-    Account,
-    /// A different provider.
-    Provider,
-    /// The chart glyph.
-    Chart,
+/// A rule drawn between providers.
+enum Rule {
+    Status(Retained<NSStatusItem>),
+    Center(Retained<NSView>),
 }
 
 fn vendor(id: &str) -> &str {
     id.split_once('@').map_or(id, |(vendor, _)| vendor)
 }
 
-fn chip_title(chip: &Chip, after_rule: bool, edge: Edge) -> Retained<NSMutableAttributedString> {
+/// Whether a rule follows the chip at `index`: before a different provider,
+/// and before the chart glyph unless the providers are centered.
+fn rule_after(chips: &[Chip], index: usize, centered: bool) -> bool {
+    match chips.get(index + 1) {
+        Some(next) => vendor(&next.id) != vendor(&chips[index].id),
+        None => !centered,
+    }
+}
+
+/// A chip as the item's title: its mark and value, or its name and value
+/// where the mark cannot be drawn (SVG needs macOS 14).
+fn chip_title(chip: &Chip) -> Retained<NSMutableAttributedString> {
     let font = NSFont::menuBarFontOfSize(0.0);
     let font_object: &AnyObject = font.as_ref();
     // SAFETY: NSFontAttributeName is an immutable AppKit constant.
@@ -528,27 +577,7 @@ fn chip_title(chip: &Chip, after_rule: bool, edge: Edge) -> Retained<NSMutableAt
             )
         }
     };
-    let padding = |kern: f64| {
-        // SAFETY: NSKernAttributeName is an immutable AppKit constant.
-        let kern_key = unsafe { NSKernAttributeName };
-        let kern = NSNumber::numberWithDouble(kern / ITEM_PADDING.len() as f64);
-        let kern_object: &AnyObject = kern.as_ref();
-        let attributes =
-            NSDictionary::from_slices(&[font_key, kern_key], &[font_object, kern_object]);
-        // SAFETY: the attributes map NSFontAttributeName to an NSFont and
-        // NSKernAttributeName to an NSNumber.
-        unsafe {
-            NSAttributedString::initWithString_attributes(
-                NSAttributedString::alloc(),
-                &NSString::from_str(ITEM_PADDING),
-                Some(&attributes),
-            )
-        }
-    };
     let title = NSMutableAttributedString::new();
-    if !after_rule {
-        title.appendAttributedString(&padding(PADDING_KERN));
-    }
     match chip.mark.and_then(mark_image) {
         Some(image) => {
             let attachment = NSTextAttachment::new();
@@ -578,25 +607,13 @@ fn chip_title(chip: &Chip, after_rule: bool, edge: Edge) -> Retained<NSMutableAt
     if chip.active_account {
         title.appendAttributedString(&active_mark());
     }
-    match edge {
-        Edge::Account => title.appendAttributedString(&padding(PADDING_KERN)),
-        Edge::Provider => {
-            title.appendAttributedString(&padding(PADDING_KERN + PROVIDER_GAP_KERN));
-            title.appendAttributedString(&separator(&font));
-        }
-        Edge::Chart => {
-            title.appendAttributedString(&padding(PADDING_KERN + CHART_GAP_KERN / 2.0));
-            title.appendAttributedString(&separator(&font));
-            title.appendAttributedString(&padding(PADDING_KERN));
-        }
-    }
     title
 }
 
 /// A faint vertical rule between providers, and before the chart glyph.
-fn separator(font: &NSFont) -> Retained<NSAttributedString> {
+fn separator(color: &NSColor) -> Retained<NSAttributedString> {
+    let font = NSFont::menuBarFontOfSize(0.0);
     let font_object: &AnyObject = font.as_ref();
-    let color = NSColor::secondaryLabelColor();
     let color_object: &AnyObject = color.as_ref();
     // SAFETY: immutable AppKit attribute-name constants.
     let keys = unsafe { [NSFontAttributeName, NSForegroundColorAttributeName] };

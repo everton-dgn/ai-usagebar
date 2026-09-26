@@ -49,14 +49,18 @@ Each release is also published at
   Use** keeps one account per provider, the one the `claude` or `codex` login
   holds; with several accounts shown, a small star marks the one in use. A thin
   vertical rule separates each provider from the next, and from the chart
-  icon; accounts of one provider stay together.
+  icon, drawn as its own item so a provider's click area and highlight end at
+  its content. Accounts of one provider stay together, closer than different
+  providers. Each item's accessibility label is its tooltip.
 - **Center the macOS providers in the menu bar.** **Settings → Menu → Center
   in the Menu Bar**, or any provider's right-click menu, moves the providers
   from the right of the menu bar to the middle of the free stretch between the
   active app's menus and the status icons, on the main display; the chart icon
   stays at the right. Finding where the app's menus end needs the
   Accessibility permission, which macOS asks for when centering is on; without
-  it the providers sit in the middle of the screen. macOS only places status items at the right, so the
+  it the providers sit in the middle of the screen. `make install-tray-macos`
+  installs the tray signed with your Apple development identity, so that
+  permission survives rebuilds. macOS only places status items at the right, so the
   centered providers are a window of their own: menu bar managers such as
   Bartender or Ice do not see them, they can sit over a long app menu, and they
   stay visible when the menu bar hides itself. Saved as

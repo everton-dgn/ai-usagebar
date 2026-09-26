@@ -115,6 +115,15 @@ cargo build --release --bin ai-usagebar-tray
 ./target/release/ai-usagebar-tray
 ```
 
+To install into `~/.cargo/bin` and restart the LaunchAgent, run
+`make install-tray-macos`. It signs the binary with your first "Developer ID
+Application" or "Apple Development" identity (or `CODESIGN_IDENTITY`) under the
+fixed identifier `com.akitaonrails.ai-usagebar-tray`. Centered providers need
+the Accessibility permission, and macOS ties it to the signature: an ad-hoc
+build loses it on every rebuild, a signed one keeps it. When moving from an
+ad-hoc build, remove the old `ai-usagebar-tray` entry in **Privacy & Security →
+Accessibility** and grant it once more.
+
 Start at login from the popover **Settings → Launch at Login**. That writes
 `~/Library/LaunchAgents/com.akitaonrails.ai-usagebar-tray.plist`.
 

@@ -8,7 +8,7 @@ PLASMOID_ID ?= io.github.akitaonrails.ai-usagebar
 # quietly install the tree inside kde-plasmoid/package/ instead.
 PLASMOID_DIR = $(abspath $(DESTDIR)$(PREFIX))/share/plasma/plasmoids/$(PLASMOID_ID)
 
-.PHONY: build install uninstall install-plasmoid uninstall-plasmoid \
+.PHONY: build install uninstall install-plasmoid uninstall-plasmoid install-tray-macos \
 	test desktop-test plugin-test qml-lint qml-test mjs-probe smoke clippy fmt clean
 
 build:
@@ -44,6 +44,13 @@ install-plasmoid:
 
 uninstall-plasmoid:
 	rm -rf -- "$(PLASMOID_DIR)"
+
+# macOS: install the tray signed with a stable identity, so the Accessibility
+# permission that centered providers need survives rebuilds, then restart it.
+install-tray-macos:
+	cargo install --locked --path . --bin ai-usagebar-tray --force
+	./scripts/sign-macos-tray.sh "$${CARGO_HOME:-$$HOME/.cargo}/bin/ai-usagebar-tray"
+	-launchctl kickstart -k "gui/$$(id -u)/com.akitaonrails.ai-usagebar-tray"
 
 test:
 	cargo test

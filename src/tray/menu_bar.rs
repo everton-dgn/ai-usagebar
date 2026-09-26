@@ -4,9 +4,120 @@
 //! the visible entry and quota window, so the native host can repaint without
 //! asking the WebView to be open.
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 pub const HIGHEST_PROVIDER: &str = "highest";
+
+/// Space between two providers in the menu bar.
+pub const CHIP_GAP: &str = "     ";
+
+/// The popover's bundled provider marks (`windows/popover/src/icons/providers`),
+/// drawn by the macOS status item in place of the provider's name.
+pub const PROVIDER_MARKS: &[(&str, &str)] = &[
+    (
+        "anthropic",
+        include_str!("../../windows/popover/src/icons/providers/anthropic.svg"),
+    ),
+    (
+        "anthropic_api",
+        include_str!("../../windows/popover/src/icons/providers/anthropic_api.svg"),
+    ),
+    (
+        "antigravity",
+        include_str!("../../windows/popover/src/icons/providers/antigravity.svg"),
+    ),
+    (
+        "copilot",
+        include_str!("../../windows/popover/src/icons/providers/copilot.svg"),
+    ),
+    (
+        "cursor",
+        include_str!("../../windows/popover/src/icons/providers/cursor.svg"),
+    ),
+    (
+        "deepseek",
+        include_str!("../../windows/popover/src/icons/providers/deepseek.svg"),
+    ),
+    (
+        "grok",
+        include_str!("../../windows/popover/src/icons/providers/grok.svg"),
+    ),
+    (
+        "grokbot",
+        include_str!("../../windows/popover/src/icons/providers/grokbot.svg"),
+    ),
+    (
+        "kimi",
+        include_str!("../../windows/popover/src/icons/providers/kimi.svg"),
+    ),
+    (
+        "minimax",
+        include_str!("../../windows/popover/src/icons/providers/minimax.svg"),
+    ),
+    (
+        "moonshot",
+        include_str!("../../windows/popover/src/icons/providers/moonshot.svg"),
+    ),
+    (
+        "openai",
+        include_str!("../../windows/popover/src/icons/providers/openai.svg"),
+    ),
+    (
+        "opencode_go",
+        include_str!("../../windows/popover/src/icons/providers/opencode_go.svg"),
+    ),
+    (
+        "openrouter",
+        include_str!("../../windows/popover/src/icons/providers/openrouter.svg"),
+    ),
+    (
+        "zai",
+        include_str!("../../windows/popover/src/icons/providers/zai.svg"),
+    ),
+];
+
+/// Entry slugs whose mark file has another name; mirrors `ICON_ALIAS` in
+/// `windows/popover/src/model.js` (a test keeps the two in step).
+const MARK_ALIASES: &[(&str, &str)] = &[("supergrok", "grok"), ("opencode-go", "opencode_go")];
+
+/// One provider in the menu bar: its mark when one is bundled, its name for
+/// the tooltip and for when the mark cannot be drawn, and its value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chip {
+    pub mark: Option<&'static str>,
+    pub name: String,
+    pub value: Option<String>,
+}
+
+impl Chip {
+    /// The chip as plain text, for a status item that cannot draw marks.
+    pub fn text(&self) -> String {
+        match &self.value {
+            Some(value) if !self.name.is_empty() => format!("{} {value}", self.name),
+            _ => self.name.clone(),
+        }
+    }
+}
+
+/// The bundled mark for an entry id, like the popover's `providerIconId`.
+pub fn mark_for(id: &str) -> Option<&'static str> {
+    let slug = id
+        .split('@')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let slug = MARK_ALIASES
+        .iter()
+        .find(|(from, _)| *from == slug)
+        .map_or(slug.as_str(), |(_, to)| to);
+    PROVIDER_MARKS
+        .iter()
+        .find(|(name, _)| *name == slug)
+        .map(|(_, svg)| *svg)
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum UsageWindow {
@@ -114,20 +225,32 @@ pub fn next_id(
     Some(ids[(index + 1) % ids.len()].to_owned())
 }
 
-pub fn title(
+/// The menu bar's providers, in display order. `names` are the popover's
+/// custom card titles, which win over the report's names.
+pub fn chips(
     payload: &Value,
     remembered: &str,
     show_all: bool,
     show_value: bool,
     window: UsageWindow,
     visible: Option<&[String]>,
-) -> String {
-    let chips: Vec<String> = displayed_entries(payload, remembered, show_all, window, visible)
+    names: &BTreeMap<String, String>,
+) -> Vec<Chip> {
+    displayed_entries(payload, remembered, show_all, window, visible)
         .into_iter()
-        .map(|entry| chip(entry, show_value, window))
-        .filter(|chip| !chip.is_empty())
-        .collect();
-    chips.join("   ")
+        .map(|entry| chip(entry, show_value, window, names))
+        .filter(|chip| chip.mark.is_some() || !chip.name.is_empty())
+        .collect()
+}
+
+/// The menu bar as plain text: every chip's name and value.
+pub fn text(chips: &[Chip]) -> String {
+    chips
+        .iter()
+        .map(Chip::text)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(CHIP_GAP)
 }
 
 /// Rendered by the macOS status item only; the Linux test build never calls it.
@@ -138,15 +261,12 @@ pub fn tooltip(
     show_all: bool,
     window: UsageWindow,
     visible: Option<&[String]>,
+    names: &BTreeMap<String, String>,
 ) -> String {
     let lines: Vec<String> = displayed_entries(payload, remembered, show_all, window, visible)
         .into_iter()
         .map(|entry| {
-            let name = entry
-                .get("display_name")
-                .or_else(|| entry.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or("AI Usage");
+            let name = entry_name(entry, names).unwrap_or("AI Usage");
             let stale = if entry.get("stale").and_then(Value::as_bool) == Some(true) {
                 " · cached"
             } else {
@@ -248,21 +368,36 @@ fn best_metric(entry: &Value, window: UsageWindow, fallback: bool) -> Option<&Va
     })
 }
 
-fn chip(entry: &Value, show_value: bool, window: UsageWindow) -> String {
+/// The custom title for an entry, else the report's name.
+fn entry_name<'a>(entry: &'a Value, names: &'a BTreeMap<String, String>) -> Option<&'a str> {
     let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
-    let name = entry
-        .get("display_name")
-        .or_else(|| entry.get("name"))
-        .or_else(|| entry.get("short_name"))
-        .and_then(Value::as_str)
+    names
+        .get(id)
+        .map(String::as_str)
+        .or_else(|| entry.get("display_name").and_then(Value::as_str))
+        .or_else(|| entry.get("name").and_then(Value::as_str))
+        .filter(|name| !name.trim().is_empty())
+}
+
+/// One entry's chip: its mark, its name (custom, reported, short, or the id's
+/// vendor) and, unless values are hidden, its headline.
+fn chip(
+    entry: &Value,
+    show_value: bool,
+    window: UsageWindow,
+    names: &BTreeMap<String, String>,
+) -> Chip {
+    let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
+    let name = entry_name(entry, names)
+        .or_else(|| entry.get("short_name").and_then(Value::as_str))
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| id.split('@').next().unwrap_or(""));
     let name = safe_text(name, 24);
-    if name.is_empty() || !show_value {
-        return name;
+    Chip {
+        mark: mark_for(id),
+        value: (show_value && !name.is_empty()).then(|| headline(entry, window)),
+        name,
     }
-    let summary = headline(entry, window);
-    format!("{name} {summary}")
 }
 
 fn headline(entry: &Value, window: UsageWindow) -> String {
@@ -339,20 +474,128 @@ fn matches_window(metric: &Value, window: UsageWindow) -> bool {
     }
 }
 
+/// Text fit for the status item: no control or bidi-override characters, at
+/// most `limit` characters. Custom names come from the WebView, so this is
+/// their sink too.
 fn safe_text(value: &str, limit: usize) -> String {
     value
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !is_bidi_control(*c))
         .take(limit)
         .collect::<String>()
         .trim()
         .to_owned()
 }
 
+/// Marks and overrides that can reorder the text around them.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `title` without custom names, as every report-only case reads it.
+    fn title(
+        payload: &Value,
+        remembered: &str,
+        show_all: bool,
+        show_value: bool,
+        window: UsageWindow,
+        visible: Option<&[String]>,
+    ) -> String {
+        text(&chips(
+            payload,
+            remembered,
+            show_all,
+            show_value,
+            window,
+            visible,
+            &BTreeMap::new(),
+        ))
+    }
+
+    #[test]
+    fn custom_names_win_in_the_chips_and_the_tooltip() {
+        let report = json!({"primary":"anthropic", "entries":[
+            {"id":"anthropic", "display_name":"Claude", "status":"ready", "sections":[
+                {"type":"metric", "label":"Weekly", "percent":21}
+            ]},
+            {"id":"kilo", "display_name":"Kilo", "status":"ready", "sections":[
+                {"type":"metric", "label":"Weekly", "percent":5}
+            ]}
+        ]});
+        let names = BTreeMap::from([("anthropic".to_string(), "Work \u{202e}Claude".to_string())]);
+        let shown = chips(&report, "", true, true, UsageWindow::Auto, None, &names);
+        assert_eq!(shown[0].name, "Work Claude");
+        assert_eq!(shown[0].value.as_deref(), Some("21%"));
+        assert!(shown[0].mark.is_some());
+        // No bundled mark: the name is what the status item shows.
+        assert_eq!(shown[1].mark, None);
+        assert_eq!(shown[1].text(), "Kilo 5%");
+        assert_eq!(text(&shown), "Work Claude 21%     Kilo 5%");
+        assert!(
+            tooltip(&report, "", true, UsageWindow::Auto, None, &names)
+                .starts_with("Work Claude · 21%")
+        );
+        // Hidden values leave the mark alone, or the name without a mark.
+        let bare = chips(&report, "", true, false, UsageWindow::Auto, None, &names);
+        assert_eq!(bare[0].value, None);
+        assert_eq!(bare[1].text(), "Kilo");
+    }
+
+    #[test]
+    fn marks_follow_the_vendor_slug_and_its_aliases() {
+        assert!(mark_for("openai@work").is_some());
+        assert_eq!(mark_for("supergrok"), mark_for("grok"));
+        assert_eq!(mark_for("opencode-go"), mark_for("opencode_go"));
+        assert!(mark_for("opencode-go").is_some());
+        assert_eq!(mark_for("kilo"), None);
+        assert_eq!(mark_for(""), None);
+    }
+
+    #[test]
+    fn the_mark_table_matches_the_popover_icons_and_aliases() {
+        // Repo files, not user state: the popover's icon folder and alias map.
+        let dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/windows/popover/src/icons/providers"
+        );
+        let mut files: Vec<String> = std::fs::read_dir(dir)
+            .expect("popover icons")
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                name.strip_suffix(".svg").map(str::to_owned)
+            })
+            .collect();
+        files.sort();
+        let mut marks: Vec<String> = PROVIDER_MARKS
+            .iter()
+            .map(|(n, _)| (*n).to_owned())
+            .collect();
+        marks.sort();
+        assert_eq!(marks, files);
+
+        let model = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/windows/popover/src/model.js"
+        ))
+        .expect("model.js");
+        let line = model
+            .lines()
+            .find(|line| line.starts_with("const ICON_ALIAS = "))
+            .expect("ICON_ALIAS");
+        for (from, to) in MARK_ALIASES {
+            assert!(
+                line.contains(&format!("\"{from}\": \"{to}\""))
+                    || line.contains(&format!("{from}: \"{to}\"")),
+                "{from} -> {to} missing from {line}"
+            );
+        }
+        assert_eq!(line.matches(':').count(), MARK_ALIASES.len());
+    }
 
     #[test]
     fn remembers_a_provider_and_cycles_in_report_order() {
@@ -411,7 +654,7 @@ mod tests {
         );
         assert_eq!(
             title(&report, "", true, true, UsageWindow::Auto, None),
-            "cdx 80%   opr $12.50"
+            "cdx 80%     opr $12.50"
         );
     }
 
@@ -429,11 +672,11 @@ mod tests {
         ]});
         assert_eq!(
             title(&report, "", true, true, UsageWindow::Auto, None),
-            "Claude 21%   Codex 15%"
+            "Claude 21%     Codex 15%"
         );
         assert_eq!(
             title(&report, "", true, true, UsageWindow::Session, None),
-            "Claude 17%   Codex 15%"
+            "Claude 17%     Codex 15%"
         );
         assert_eq!(
             title(&report, "zai", false, true, UsageWindow::Auto, None),

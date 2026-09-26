@@ -98,12 +98,14 @@ function Metric({ row, layout, nowMs }: { row: MetricRow; layout: Layout; nowMs:
   const reset = resetText(row, layout.resetTimes, nowMs, { locale: language, timeFormat: layout.timeFormat });
   const goal = layout.usageGoal ? usageGoal(row, nowMs) : null;
   const balance = row.headline === "value";
+  // The number takes the bar's color, so both read the same verdict.
+  const color = usageColor(percent, layout.colorThresholds);
   const label = row.label === "Session" ? `${t("Session")} (5h)` : metricLabel(row.label);
   return (
     <div className="mac-metric">
       <div className="mac-metric-heading">
         <span>{label}</span>
-        <strong>{balance ? row.value : `${percent}%`}</strong>
+        <strong data-usage={balance ? undefined : color}>{balance ? row.value : `${percent}%`}</strong>
       </div>
       <div
         className="mac-meter"
@@ -113,7 +115,7 @@ function Metric({ row, layout, nowMs }: { row: MetricRow; layout: Layout; nowMs:
         aria-valuemax={100}
         aria-valuenow={percent}
       >
-        <span className="mac-meter-fill" data-color={usageColor(percent, layout.colorThresholds)} style={{ width: `${percent}%` }} />
+        <span className="mac-meter-fill" data-color={color} style={{ width: `${percent}%` }} />
       </div>
       {reset || row.detail || (balance && percent > 0) ? (
         <div className="mac-metric-note">

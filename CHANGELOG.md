@@ -14,7 +14,8 @@ Each release is also published at
 - **Usage bar colors by how much is used.** Bars are green, turn yellow from
   70% used and red from 85%, the same defaults as the Claude Code statusline,
   in both the list and the tabs view. **Settings → Preferences → Bar colors**
-  sets both thresholds. The pace note and flame keep their own signal.
+  sets both thresholds, and each bar's percentage takes the bar's color. The
+  pace note and flame keep their own signal.
 - **Pin the macOS popover open.** The pin in the popover header keeps it
   open when focus moves or a click lands outside it; the menu bar icon and
   Escape still close it. The choice is remembered.
@@ -34,10 +35,30 @@ Each release is also published at
   (such as "Codex trabalho" for `Codex · conta2`) from its Customize screen,
   with a button to restore the original. **Settings → Preferences → Show plan**
   hides the gray plan name beside each provider. Both live in the popover's
-  own settings; the TUI and the menu bar keep the report's names.
+  own settings; the TUI keeps the report's names, and the macOS menu bar's
+  tooltip follows the custom ones.
+
+### Changed
+
+- **The macOS menu bar shows each provider's icon instead of its name.** Every
+  provider with a bundled mark reads as icon and value (`[icon] 46%`), drawn in
+  the menu bar's text color; with values hidden only the icon is left. The name
+  stays in the tooltip, and a provider without a mark keeps its name. macOS 12
+  and 13 cannot load the marks and keep the names. The chart glyph moved to
+  the item's right edge, with more room between it and the providers and
+  between providers.
 
 ### Fixed
 
+- **Clicking the macOS menu bar icon closes the popover again.** On current
+  macOS the status item is drawn out of process, so the outside-click watch saw
+  the press on the icon and closed the popover, and that same click then opened
+  it again. A quick click was also released before the popover lost focus, so
+  the blur could not tell it came from the icon. Presses on the icon are now
+  left to its click, which toggles the popover.
+- **A custom provider title reaches the macOS menu bar.** A name set in the
+  popover lived only in the popover, so the menu bar and its tooltip kept the
+  report's name. The popover now sends the custom titles to the tray.
 - **The macOS popover opens and closes on every click.** With the popover
   open, pressing the menu bar icon took focus away first, the blur closed the
   popover, and the click then opened it again, so it sometimes seemed not to

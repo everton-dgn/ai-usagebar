@@ -520,6 +520,11 @@ body:has(.mac-panel) {
 .mac-meter-fill[data-color="yellow"] { background: var(--yellow); }
 .mac-meter-fill[data-color="red"] { background: var(--red); }
 
+/* A usage number in its bar's color (green, yellow, red). */
+[data-usage="green"] { color: var(--green); }
+[data-usage="yellow"] { color: var(--yellow); }
+[data-usage="red"] { color: var(--red); }
+
 .mac-usage-goal {
   margin-top: 9px;
 }

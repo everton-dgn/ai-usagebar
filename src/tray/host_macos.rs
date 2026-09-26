@@ -860,6 +860,7 @@ fn handle_tray(state: &mut TrayState, event: TrayIconEvent) {
 fn handle_provider_item(state: &mut TrayState, action: ItemAction) {
     match action {
         ItemAction::Click { index, right } => {
+            state.status_item_pressed_at = None;
             let Some(id) = state.provider_items.id_at(index).map(str::to_owned) else {
                 return;
             };

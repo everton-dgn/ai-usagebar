@@ -928,7 +928,7 @@ fn switch_cli(config: &Config, args: &SwitchArgs, tolerant: bool) -> Result<bool
             // Same reason as the Codex switch: the unnamed account's cache is
             // keyed by the default login slot, which now holds someone else.
             if let Ok(cache) = crate::cache::Cache::for_vendor("anthropic") {
-                cache.forget();
+                cache.forget_after_fetch();
             }
             print_cli_capture(outgoing.as_deref());
             println!(
@@ -1222,7 +1222,7 @@ fn switch_codex(config: &Config, args: &SwitchArgs) -> i32 {
             // who is signed in there, so it now holds the previous login's
             // usage. Named accounts keep their own caches.
             if let Ok(cache) = crate::cache::Cache::for_vendor("openai") {
-                cache.forget();
+                cache.forget_after_fetch();
             }
             print_cli_capture(outgoing.as_deref());
             println!(

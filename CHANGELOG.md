@@ -91,6 +91,10 @@ Each release is also published at
 
 ### Fixed
 
+- **An account switch no longer brings the previous login's usage back.**
+  Switching the Claude or Codex CLI clears the default account's cache, but a
+  refresh already running with the old login could write its figures back
+  afterwards. The switch now waits for that refresh before clearing.
 - **The account star no longer reopens Claude Desktop signed out.** A Claude
   switch from the menu bar also switched the Desktop app, which quits and
   reopens it; when the saved Desktop profile's claude.ai web session had been

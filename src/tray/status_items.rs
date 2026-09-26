@@ -322,9 +322,32 @@ fn chip_title(chip: &Chip, rightmost: bool) -> Retained<NSMutableAttributedStrin
     if chip.active_account {
         title.appendAttributedString(&active_mark());
     }
-    let trailing = PADDING_KERN + if rightmost { CHART_GAP_KERN } else { 0.0 };
-    title.appendAttributedString(&padding(trailing));
+    if rightmost {
+        title.appendAttributedString(&padding(PADDING_KERN + CHART_GAP_KERN / 2.0));
+        title.appendAttributedString(&chart_separator(&font));
+        title.appendAttributedString(&padding(PADDING_KERN));
+    } else {
+        title.appendAttributedString(&padding(PADDING_KERN));
+    }
     title
+}
+
+/// A faint vertical rule between the last provider and the chart glyph.
+fn chart_separator(font: &NSFont) -> Retained<NSAttributedString> {
+    let font_object: &AnyObject = font.as_ref();
+    let color = NSColor::secondaryLabelColor();
+    let color_object: &AnyObject = color.as_ref();
+    // SAFETY: immutable AppKit attribute-name constants.
+    let keys = unsafe { [NSFontAttributeName, NSForegroundColorAttributeName] };
+    let attributes = NSDictionary::from_slices(&keys, &[font_object, color_object]);
+    // SAFETY: the attributes map each key to a value of its documented type.
+    unsafe {
+        NSAttributedString::initWithString_attributes(
+            NSAttributedString::alloc(),
+            &NSString::from_str("|"),
+            Some(&attributes),
+        )
+    }
 }
 
 /// Dracula's green, yellow and red on a dark menu bar; darker tones on a

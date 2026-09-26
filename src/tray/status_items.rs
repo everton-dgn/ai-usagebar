@@ -20,7 +20,8 @@ use objc2_app_kit::{
     NSLayoutAttribute, NSMenu, NSMenuItem, NSPanel, NSRectFillUsingOperation, NSResponder,
     NSScreen, NSStackView, NSStatusBar, NSStatusItem, NSStatusWindowLevel, NSTextAttachment,
     NSUserInterfaceLayoutOrientation, NSVariableStatusItemLength, NSView,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
+    NSWorkspaceDidActivateApplicationNotification,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSData, NSDictionary, NSMutableAttributedString,
@@ -29,6 +30,9 @@ use objc2_foundation::{
 };
 
 use super::menu_bar::{Chip, Level};
+use super::menu_space;
+use std::cell::Cell;
+use std::rc::Rc;
 
 /// Side of a provider mark in the menu bar, in points.
 const MARK_SIDE: f64 = 15.0;
@@ -127,7 +131,12 @@ define_class!(
 struct CenterBar {
     panel: Retained<NSPanel>,
     stack: Retained<NSStackView>,
-    observer: Retained<ProtocolObject<dyn NSObjectProtocol>>,
+    /// Where the last other app's menus ended; kept while this app is in
+    /// front, so opening the popover does not move the providers.
+    menu_end: Rc<Cell<Option<f64>>>,
+    /// The left edge of this app's chart item.
+    chart_left: Rc<Cell<Option<f64>>>,
+    observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
 }
 
 impl CenterBar {
@@ -159,39 +168,75 @@ impl CenterBar {
         stack.setAlignment(NSLayoutAttribute::CenterY);
         stack.setSpacing(CENTER_SPACING);
         panel.setContentView(Some(&stack));
+        menu_space::request_access();
+        let menu_end = Rc::new(Cell::new(menu_space::app_menu_end()));
+        let chart_left = Rc::new(Cell::new(None));
         let block = {
             let (panel, stack) = (panel.clone(), stack.clone());
-            RcBlock::new(move |_: NonNull<NSNotification>| place(&panel, &stack))
+            let (menu_end, chart_left) = (menu_end.clone(), chart_left.clone());
+            RcBlock::new(move |_: NonNull<NSNotification>| {
+                if let Some(end) = menu_space::app_menu_end() {
+                    menu_end.set(Some(end));
+                }
+                place(&panel, &stack, menu_end.get(), chart_left.get());
+            })
         };
+        let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
         // SAFETY: the block only touches main-thread objects and AppKit posts
-        // this notification on the main thread.
-        let observer = unsafe {
-            NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
-                Some(NSApplicationDidChangeScreenParametersNotification),
-                None,
-                None,
-                &block,
-            )
+        // both notifications on the main thread.
+        let observers = unsafe {
+            vec![
+                NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+                    Some(NSApplicationDidChangeScreenParametersNotification),
+                    None,
+                    None,
+                    &block,
+                ),
+                workspace.addObserverForName_object_queue_usingBlock(
+                    Some(NSWorkspaceDidActivateApplicationNotification),
+                    None,
+                    None,
+                    &block,
+                ),
+            ]
         };
         Self {
             panel,
             stack,
-            observer,
+            menu_end,
+            chart_left,
+            observers,
         }
+    }
+
+    fn place(&self) {
+        place(
+            &self.panel,
+            &self.stack,
+            self.menu_end.get(),
+            self.chart_left.get(),
+        );
     }
 }
 
 impl Drop for CenterBar {
     fn drop(&mut self) {
-        // SAFETY: the observer came from this notification center.
-        unsafe { NSNotificationCenter::defaultCenter().removeObserver(self.observer.as_ref()) };
+        let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
+        for observer in &self.observers {
+            // SAFETY: each observer came from one of these two centers, and
+            // removing it from the other is a no-op.
+            unsafe {
+                NSNotificationCenter::defaultCenter().removeObserver(observer.as_ref());
+                workspace.removeObserver(observer.as_ref());
+            }
+        }
         self.panel.orderOut(None);
     }
 }
 
-/// Size the panel to its buttons and center it in the primary display's menu
-/// bar, the one the status items live in.
-fn place(panel: &NSPanel, stack: &NSStackView) {
+/// Size the panel to its buttons and center it in the free stretch of the
+/// primary display's menu bar, the one the status items live in.
+fn place(panel: &NSPanel, stack: &NSStackView, menu_end: Option<f64>, chart_left: Option<f64>) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
@@ -204,7 +249,8 @@ fn place(panel: &NSPanel, stack: &NSStackView) {
     let bar = (top - (visible.origin.y + visible.size.height))
         .max(NSStatusBar::systemStatusBar().thickness());
     let width = stack.fittingSize().width;
-    let x = frame.origin.x + (frame.size.width - width) / 2.0;
+    let items = menu_space::status_items_start(chart_left, bar);
+    let x = menu_space::centered_x(width, (frame.origin.x, frame.size.width), menu_end, items);
     panel.setFrame_display(
         NSRect::new(NSPoint::new(x, top - bar), NSSize::new(width, bar)),
         true,
@@ -260,7 +306,16 @@ impl ProviderItems {
     /// of the menu bar or in its middle. The items are rebuilt only when the
     /// providers, their order or the placement change; otherwise each one's
     /// title is redrawn in place.
-    pub fn sync(&mut self, chips: &[Chip], tooltips: &[String], centered: bool) {
+    ///
+    /// `chart_left` is where the chart item starts, the right edge centered
+    /// providers keep clear of.
+    pub fn sync(
+        &mut self,
+        chips: &[Chip],
+        tooltips: &[String],
+        centered: bool,
+        chart_left: Option<f64>,
+    ) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
@@ -330,7 +385,8 @@ impl ProviderItems {
             }
         }
         if let Some(center) = &self.center {
-            place(&center.panel, &center.stack);
+            center.chart_left.set(chart_left);
+            center.place();
         }
     }
 

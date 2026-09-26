@@ -17,6 +17,8 @@ mod strip;
 mod host;
 #[cfg(target_os = "macos")]
 mod host_macos;
+#[cfg(target_os = "macos")]
+mod menu_space;
 #[cfg(windows)]
 mod startup;
 #[cfg(target_os = "macos")]

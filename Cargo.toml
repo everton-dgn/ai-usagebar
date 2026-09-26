@@ -117,6 +117,8 @@ objc2-app-kit = { version = "0.3.2", features = [
     "block2",
 ] }
 objc2-quartz-core = { version = "0.3.2", features = ["CALayer"] }
+objc2-application-services = "0.3.2"
+objc2-core-foundation = "0.3.2"
 png = "0.18"
 
 # Only the opt-in Keychain tests use it (item counting). Production writes go

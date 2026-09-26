@@ -677,9 +677,10 @@ fn apply_strip_icon(state: &mut TrayState) {
             // old title in NSStatusBarButton; an empty title clears it.
             state.tray.set_title(Some(""));
             let tips: Vec<String> = chips.iter().map(status_items::tooltip_line).collect();
+            let chart_left = status_item_frame(&state.tray).map(|frame| frame.x);
             state
                 .provider_items
-                .sync(&chips, &tips, state.menu_bar_centered);
+                .sync(&chips, &tips, state.menu_bar_centered, chart_left);
             if let Some(image) = template_bars_image(&fractions) {
                 set_status_button_image(&state.tray, &image);
             }

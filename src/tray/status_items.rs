@@ -40,12 +40,12 @@ const MARK_SIDE: f64 = 15.0;
 /// Room on each side of a provider's content. Items get a fixed width, so
 /// the gap between two accounts is the status bar's spacing plus twice this,
 /// and the highlight stays even on both sides.
-const ITEM_ROOM: f64 = 3.25;
+const ITEM_ROOM: f64 = 1.25;
 /// Room on each side of a rule, which draws no highlight: providers sit
 /// further from a rule than from another account of their own.
-const RULE_ROOM: f64 = 10.75;
+const RULE_ROOM: f64 = 12.75;
 /// The centered row's gap between two accounts, and around a rule.
-const CENTER_ACCOUNT_GAP: f64 = 24.0;
+const CENTER_ACCOUNT_GAP: f64 = 20.0;
 const CENTER_RULE_GAP: f64 = 28.0;
 
 /// What a provider item or its menu reported.

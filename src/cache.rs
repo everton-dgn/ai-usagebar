@@ -33,6 +33,10 @@ pub const MAX_STALE: Duration = Duration::from_secs(7 * 24 * 3600);
 /// roll over and short enough that the bar recovers unattended.
 pub const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
+/// How long [`Cache::forget_after_fetch`] waits for a fetch in flight: the
+/// vendors' own lock timeout.
+const FORGET_LOCK_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Per-vendor cache directory and helper API.
 ///
 /// Construct with [`Cache::for_vendor`]; the directory is created lazily.
@@ -254,6 +258,26 @@ impl Cache {
         self.stale_path().exists()
     }
 
+    /// Drop the payload and its sidecars when the credential behind this cache
+    /// changed hands: they describe the previous login, and a fresh payload
+    /// would be served as the new one's. Best-effort, like the other markers.
+    pub fn forget(&self) {
+        let _ = fs::remove_file(self.payload_path());
+        let _ = fs::remove_file(self.stale_path());
+        let _ = fs::remove_file(self.last_error_path());
+        self.clear_backoff();
+    }
+
+    /// [`Cache::forget`] once no fetch holds this vendor's lock. A fetch takes
+    /// the lock before it reads credentials, so one that started with the
+    /// previous login writes its payload first and cannot put that login's
+    /// usage back after the cache is cleared. Clears anyway if the lock does
+    /// not come free.
+    pub fn forget_after_fetch(&self) {
+        let _lock = acquire_lock(&self.lock_path(), FORGET_LOCK_TIMEOUT);
+        self.forget();
+    }
+
     /// Write the `.last_error` marker — first line `code`, everything after it
     /// `msg`. Best-effort, never errors (matches claudebar:478-486 which
     /// silently continues if the cache dir isn't writable).
@@ -468,6 +492,21 @@ mod tests {
         cache.write_payload(b"hello world").unwrap();
         let got = cache.maybe_payload().unwrap();
         assert_eq!(got.as_deref(), Some(&b"hello world"[..]));
+    }
+
+    #[test]
+    fn forget_drops_the_payload_and_its_sidecars() {
+        let (_td, cache) = fixture();
+        cache.write_payload(b"previous login").unwrap();
+        cache.mark_stale();
+        cache.write_last_error(401, "expired");
+        cache.note_rate_limit_at(SystemTime::now());
+        cache.forget();
+        assert!(cache.maybe_payload().unwrap().is_none());
+        assert!(!cache.is_stale());
+        assert!(cache.read_last_error().is_none());
+        assert!(cache.backoff_remaining().is_none());
+        assert!(cache.dir().is_dir());
     }
 
     #[test]
@@ -926,6 +965,23 @@ mod tests {
         // A non-numeric first line is still no error at all, never a fake 0.
         fs::write(cache.last_error_path(), "not-a-code\nboom").unwrap();
         assert!(cache.read_last_error().is_none());
+    }
+
+    #[test]
+    fn forgetting_waits_for_a_fetch_in_flight() {
+        let (_td, cache) = fixture();
+        let held = acquire_lock(&cache.lock_path(), Duration::from_millis(500)).unwrap();
+        let writer = {
+            let cache = cache.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                cache.write_payload(b"previous login").unwrap();
+                drop(held);
+            })
+        };
+        cache.forget_after_fetch();
+        writer.join().unwrap();
+        assert!(!cache.payload_path().exists());
     }
 
     #[test]

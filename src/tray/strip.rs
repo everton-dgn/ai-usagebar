@@ -200,6 +200,15 @@ pub fn parse_strip_names(value: &Value) -> BTreeMap<String, String> {
     names
 }
 
+/// The popover's bar-color thresholds from the `strip` IPC, as (yellow, red)
+/// percentages used; `None` when absent or out of order.
+pub fn parse_strip_thresholds(value: &Value) -> Option<(f64, f64)> {
+    let thresholds = value.get("thresholds")?;
+    let yellow = thresholds.get("yellow")?.as_f64()?;
+    let red = thresholds.get("red")?.as_f64()?;
+    ((1.0..=100.0).contains(&yellow) && yellow < red && red <= 100.0).then_some((yellow, red))
+}
+
 /// Resolve starred metrics from a host payload. `order` is the popover's
 /// visible card order; empty means payload order. Missing stars fall back to
 /// the first two bounded metrics of each ready entry so the glyph has
@@ -651,6 +660,17 @@ mod tests {
         assert_eq!(stars["openai"], vec!["metric:Codex weekly".to_string()]);
         assert!(!stars.contains_key(""));
         assert!(order.is_empty());
+    }
+
+    #[test]
+    fn parse_strip_thresholds_takes_only_ordered_percentages() {
+        let value = json!({"thresholds": {"yellow": 60, "red": 80}});
+        assert_eq!(parse_strip_thresholds(&value), Some((60.0, 80.0)));
+        assert_eq!(
+            parse_strip_thresholds(&json!({"thresholds": {"yellow": 90, "red": 80}})),
+            None
+        );
+        assert_eq!(parse_strip_thresholds(&json!({})), None);
     }
 
     #[test]

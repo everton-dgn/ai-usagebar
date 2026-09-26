@@ -17,11 +17,15 @@ mod strip;
 mod host;
 #[cfg(target_os = "macos")]
 mod host_macos;
+#[cfg(target_os = "macos")]
+mod menu_space;
 #[cfg(windows)]
 mod startup;
 #[cfg(target_os = "macos")]
 #[path = "startup_macos.rs"]
 mod startup;
+#[cfg(target_os = "macos")]
+mod status_items;
 #[cfg(windows)]
 mod tui_launch;
 #[cfg(target_os = "macos")]
@@ -37,7 +41,7 @@ pub use icon::{Severity, tray_icon_rgba};
 pub use payload::{POLL_INTERVAL, host_payload, worst_severity, wrap_report};
 pub use strip::{
     BARS_PIXEL_SIDE, StripContent, StripStyle, bars_rgba, content_from_payload, parse_strip_ipc,
-    parse_strip_names,
+    parse_strip_names, parse_strip_thresholds,
 };
 
 /// Process entry for `ai-usagebar-tray`.

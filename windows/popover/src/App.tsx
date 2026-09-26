@@ -62,6 +62,8 @@ export default function App() {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [direction, setDirection] = useState<Direction>("forward");
   const [providerId, setProviderId] = useState("");
+  // Set while a menu-bar provider item opened the popover: the tabs view on it.
+  const [focusId, setFocusId] = useState("");
   // Where the provider detail was opened from, so Back returns there: the
   // Customize list, or the dashboard header's Customize shortcut.
   const [providerFrom, setProviderFrom] = useState<Screen>("customize");
@@ -154,6 +156,10 @@ export default function App() {
         return synced;
       });
     };
+    window.__AIUB_FOCUS__ = (id) => {
+      setFocusId(typeof id === "string" ? id : "");
+      if (id) setScreen("dashboard");
+    };
     window.__AIUB_VISIBLE__ = (visible) => {
       // Visibility changes are also sizing boundaries. ResizeObserver callbacks
       // can be suspended while WebView2 is hidden, so force a fresh measurement
@@ -166,6 +172,7 @@ export default function App() {
       setRowMenuOpen(false);
       setResetArmed(false);
       setScreen("dashboard");
+      setFocusId("");
       if (scrollRef.current) scrollRef.current.scrollTop = 0;
     };
     window.__AIUB_LOCKCLICKS__ = (ms) => {
@@ -217,7 +224,7 @@ export default function App() {
       observer.disconnect();
       if (frame !== 0) window.clearTimeout(frame);
     };
-  }, [screen, payload, layout, popoverVisible]);
+  }, [screen, payload, layout, popoverVisible, focusId]);
 
   function onKeyDown(event: KeyboardEvent) {
     if (locked || event.defaultPrevented || optionsOpen || rowMenuOpen) return;
@@ -380,7 +387,7 @@ export default function App() {
           )}
         >
           {screen === "dashboard" ? (
-            payload.os === "macos" && layout.panelView === "tabs" ? (
+            payload.os === "macos" && (layout.panelView === "tabs" || focusId) ? (
               <>
                 {macHeader}
                 <MacDashboard
@@ -388,7 +395,9 @@ export default function App() {
                   layout={layout}
                   nowMs={nowMs}
                   payload={payload}
+                  focusId={focusId}
                   onOpenCustomize={() => go("customize")}
+                  onSwitchAccount={(vendor, label) => sendCommand("switch-account", { vendor, label })}
                 />
               </>
             ) : (

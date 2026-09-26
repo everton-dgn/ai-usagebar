@@ -64,6 +64,7 @@ import {
   isStarred,
   seedStars,
   stripCommand,
+  normalizeMenuBarItems,
   MAX_STARS_PER_PROVIDER,
   expirySeverity,
   providerLinks,
@@ -1293,6 +1294,8 @@ assert.equal(resolvedTheme('system'), 'light');
     stars,
     order: ['anthropic'],
     names: {},
+    language: 'en',
+    thresholds: { yellow: 70, red: 85 },
   });
 }
 
@@ -1316,6 +1319,31 @@ assert.equal(resolvedTheme('system'), 'light');
   // Only visible cards' custom titles go to the host, cleaned like the layout's.
   const named = { ...layout, names: { openai: 'Work\u202e Codex', gone: 'Hidden' } };
   assert.deepEqual(stripCommand(named, cards).names, { openai: 'Work Codex' });
+  // The host builds its native provider menus in the popover's language.
+  assert.equal(stripCommand({ ...layout, language: 'pt-BR' }, cards).language, 'pt-BR');
+}
+
+{
+  // Per-provider menu-bar settings: known windows only, `null` for an unset value.
+  assert.deepEqual(normalizeMenuBarItems({
+    'openai@work': { window: 'session', hide_value: true },
+    zai: { hidden: true, window: 'yearly' },
+    '': { hidden: true },
+    kimi: 'x',
+  }), {
+    'openai@work': { window: 'session', hideValue: true, hidden: false, colorValue: null },
+    zai: { window: 'auto', hideValue: null, hidden: true, colorValue: null },
+  });
+  assert.deepEqual(normalizeMenuBarItems(null), {});
+  const parsed = parseHostPayload({ menu_bar_items: { zai: { hidden: true } }, menu_bar_active_account_only: true });
+  assert.equal(parsed.menuBarItems.zai.hidden, true);
+  assert.equal(parsed.menuBarActiveAccountOnly, true);
+  assert.equal(parseHostPayload({}).menuBarActiveAccountOnly, false);
+  assert.equal(parseHostPayload({}).menuBarColorValue, true);
+  assert.equal(parseHostPayload({ menu_bar_color_value: false }).menuBarColorValue, false);
+  assert.equal(parseHostPayload({}).menuBarCentered, false);
+  assert.equal(parseHostPayload({ menu_bar_centered: true }).menuBarCentered, true);
+  assert.equal(normalizeMenuBarItems({ zai: { color_value: false } }).zai.colorValue, false);
 }
 
 {
@@ -1450,6 +1478,28 @@ assert.equal(providerIconId('opencode-go@work'), 'opencode_go');
   assert.equal(normalizeLayout({}).panelView, 'list');
   assert.equal(normalizeLayout({ panelView: 'tabs' }).panelView, 'tabs');
   assert.equal(normalizeLayout({ panelView: 'grid' }).panelView, 'list');
+}
+
+// Every card that renders keeps its switch control: as many accounts as there
+// are cards, and a label longer than a card id matched through the id's cut.
+{
+  const many = Array.from({ length: 63 }, (_, i) => `acct${i}`);
+  const long = 'x'.repeat(200);
+  const payload = parseHostPayload(JSON.stringify({
+    entries: [{ id: `openai@${long}` }],
+    accounts: {
+      openai: { active: long, labels: [...many, long] },
+      anthropic: { active: '', labels: [`${long}-a`, `${long}-b`] },
+    },
+  }));
+  assert.equal(accountSwitchFor('openai@acct62', payload.accounts).label, 'acct62');
+  const cardId = payload.entries[0].id;
+  assert.notEqual(cardId, `openai@${long}`);
+  const control = accountSwitchFor(cardId, payload.accounts);
+  assert.equal(control.label, long);
+  assert.equal(control.active, true);
+  // Two labels that share the cut id are ambiguous, so neither card offers one.
+  assert.equal(accountSwitchFor(cardId.replace('openai', 'anthropic'), payload.accounts), null);
 }
 
 console.log('ok');

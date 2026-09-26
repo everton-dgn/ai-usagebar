@@ -14,7 +14,8 @@ Each release is also published at
 - **Usage bar colors by how much is used.** Bars are green, turn yellow from
   70% used and red from 85%, the same defaults as the Claude Code statusline,
   in both the list and the tabs view. **Settings → Preferences → Bar colors**
-  sets both thresholds, and each bar's percentage takes the bar's color. The
+  sets both thresholds, and each bar's percentage takes the bar's color, in a
+  darker tone on the light theme so it stays legible. The
   pace note and flame keep their own signal.
 - **Pin the macOS popover open.** The pin in the popover header keeps it
   open when focus moves or a click lands outside it; the menu bar icon and
@@ -40,16 +41,66 @@ Each release is also published at
 
 ### Changed
 
+- **Each provider has its own item in the macOS menu bar.** A click opens the
+  popover under that item, on that provider's tab; a second click closes it.
+  A right click opens the provider's menu: its quota window (5 hours, weekly,
+  monthly, or the menu bar's), whether its value shows, and hiding it. The
+  same settings live in **Settings → Menu → Providers in the Menu Bar**, saved
+  per provider under `[tray.menu_bar_items."<id>"]`. **Only the Account in
+  Use** keeps one account per provider, the one the `claude` or `codex` login
+  holds; with several accounts shown, a small star marks the one in use. A thin
+  vertical rule separates each provider from the next, and from the chart
+  icon, drawn as its own item so a provider's click area and highlight end at
+  its content. Accounts of one provider stay together, closer than different
+  providers. Each item's accessibility label is its tooltip. The item whose
+  popover is open stays highlighted, the provider's or the chart's, like a
+  native menu.
+- **Center the macOS providers in the menu bar.** **Settings → Menu → Center
+  in the Menu Bar**, or any provider's right-click menu, moves the providers
+  from the right of the menu bar to the middle of the free stretch between the
+  active app's menus and the status icons, on the main display; the chart icon
+  stays at the right. Finding where the app's menus end needs the
+  Accessibility permission, which macOS asks for when you turn centering on; without
+  it the providers sit in the middle of the screen. `make install-tray-macos`
+  installs the tray signed with your Apple development identity, so that
+  permission survives rebuilds. macOS only places status items at the right, so the
+  centered providers are a window of their own: menu bar managers such as
+  Bartender or Ice do not see them, they can sit over a long app menu, and they
+  stay visible when the menu bar hides itself. Mission Control hides them along
+  with the menu bar. Saved as
+  `[tray] menu_bar_centered`.
+  Providers follow the popover's card order. The chart item stays on
+  the right and opens the popover as before.
+  A provider's click waits for its tab's height before showing, so the popover
+  no longer opens at the list's height and then shrinks, and the tab row
+  scrolls to show that provider's tab. The tabs view's card has the account star
+  too, to switch to that account.
+- **Menu bar percentages take the bar colors.** Each provider's value turns
+  yellow or red (Dracula's on a dark menu bar, darker tones on a light one)
+  and otherwise keeps the menu bar's text color, at the thresholds set in **Settings → Preferences →
+  Bar colors**. **Settings → Menu → Color the Values** turns it off, and each
+  provider or account can override it there or from its right-click menu.
 - **The macOS menu bar shows each provider's icon instead of its name.** Every
   provider with a bundled mark reads as icon and value (`[icon] 46%`), drawn in
   the menu bar's text color; with values hidden only the icon is left. The name
   stays in the tooltip, and a provider without a mark keeps its name. macOS 12
   and 13 cannot load the marks and keep the names. The chart glyph moved to
   the item's right edge, with more room between it and the providers and
-  between providers.
+  between providers. The MiniMax mark gets the same inner margin as the
+  others, so it no longer looks larger or touches its value.
 
 ### Fixed
 
+- **An account switch no longer brings the previous login's usage back.**
+  Switching the Claude or Codex CLI clears the default account's cache, but a
+  refresh already running with the old login could write its figures back
+  afterwards. The switch now waits for that refresh before clearing.
+- **The account star no longer reopens Claude Desktop signed out.** A Claude
+  switch from the menu bar also switched the Desktop app, which quits and
+  reopens it; when the saved Desktop profile's claude.ai web session had been
+  revoked, the app came back asking to sign in. The star now switches only the
+  `claude` login (the CLI and the VS Code extension). `ai-usagebar account
+  switch <label> --desktop` still switches the app.
 - **Clicking the macOS menu bar icon closes the popover again.** On current
   macOS the status item is drawn out of process, so the outside-click watch saw
   the press on the icon and closed the popover, and that same click then opened
@@ -76,6 +127,30 @@ Each release is also published at
   an inset shadow on the panel, which is painted under its children, so the
   footer (and the top bar on inner screens) drew over it. It is now drawn
   above the content.
+- **A named Codex account no longer caches another account's usage.** A
+  fetch chose its `auth.json` before taking the credentials lock, so an
+  `account switch --codex` landing in between made it read the other login
+  and store that usage under its own label. The route is now resolved again
+  once the lock is held, and followed if the switch moved the login.
+- **The unnamed Codex tab shows the new login right after a switch.** A
+  successful `account switch --codex` now drops the default account's usage
+  cache, which otherwise kept showing the previous account's quota until it
+  expired. Named accounts keep their own caches.
+- **The unnamed Claude tab shows the new login right after a switch.** The
+  Claude CLI switch had the same stale default cache as the Codex one, and now
+  drops it the same way after a successful `account switch`.
+- **Account labels, paths and errors printed by `account` are sanitized.**
+  The Codex status line, the switch output and the `add` / `--adopt-current`
+  messages for both vendors now pass through the untrusted-text sanitizers,
+  so a label carrying bidi controls cannot reorder terminal output.
+- **The macOS tray switches accounts without a separate `ai-usagebar`
+  binary.** The documented build produces only `ai-usagebar-tray`, and the
+  switch looked for `ai-usagebar` beside it or in `~/.cargo/bin`, so it
+  failed there or could run a different version. The tray now runs the
+  switch itself.
+- **Every rendered account card keeps its switch control.** The popover
+  offered switch controls to only the first 32 accounts while rendering up to
+  64 cards, and a label longer than a card id's cut matched no card.
 
 ## [1.23.0] — 2026-09-24
 

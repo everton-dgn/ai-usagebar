@@ -308,7 +308,7 @@ interface AccountControlProps {
  * there; every other account is an outline star that makes it the active one. A running switch
  * spins in place; a failed one keeps the outline star, tinted red, with the reason as its tooltip.
  */
-function AccountControl({ account, title, onSwitch }: AccountControlProps) {
+export function AccountControl({ account, title, onSwitch }: AccountControlProps) {
   if (account.active) {
     const label = `${title} is the active account`;
     return (
@@ -328,7 +328,9 @@ function AccountControl({ account, title, onSwitch }: AccountControlProps) {
   if (!onSwitch || account.busy) return null;
   const label = account.error
     ? `Switch to ${title} failed: ${account.error}`
-    : `Use ${title} (switches the CLI, desktop app and IDE extension)`;
+    : account.vendor === "openai"
+      ? `Use ${title} (switches the Codex CLI, desktop app and IDE extension)`
+      : `Use ${title} (switches Claude Code and the VS Code extension)`;
   return (
     <HeaderAction
       className={account.error ? "is-failed" : undefined}

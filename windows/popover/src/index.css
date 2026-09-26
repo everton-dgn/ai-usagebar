@@ -33,6 +33,10 @@
   --red: #ff3b30;
   --orange: #ff9500;
   --green: #34c759;
+  /* Percentages drawn in the usage colors need darker tones on a light card. */
+  --yellow-text: #7a5a00;
+  --red-text: #c62828;
+  --green-text: #137333;
   --accent: var(--blue);
 
   /* Chrome: back/reset circles, Options capsule, glass bars. */
@@ -80,6 +84,9 @@
   --red: #ff453a;
   --orange: #ff9f0a;
   --green: #30d158;
+  --yellow-text: var(--yellow);
+  --red-text: var(--red);
+  --green-text: var(--green);
   --control-fill: rgba(255, 255, 255, 0.08);
   --control-fill-hover: rgba(255, 255, 255, 0.14);
   --bar-glass: rgba(30, 30, 30, 0.82);
@@ -342,6 +349,17 @@ body:has(.mac-panel) {
   height: 16px;
 }
 
+.mac-provider-account .header-action {
+  width: 29px;
+  height: 29px;
+  border-radius: 9px;
+}
+
+.mac-provider-account .header-action svg {
+  width: 17px;
+  height: 17px;
+}
+
 .mac-icon-button:hover,
 .mac-provider-refresh:hover,
 .mac-provider-tab:hover {
@@ -521,9 +539,9 @@ body:has(.mac-panel) {
 .mac-meter-fill[data-color="red"] { background: var(--red); }
 
 /* A usage number in its bar's color (green, yellow, red). */
-[data-usage="green"] { color: var(--green); }
-[data-usage="yellow"] { color: var(--yellow); }
-[data-usage="red"] { color: var(--red); }
+[data-usage="green"] { color: var(--green-text); }
+[data-usage="yellow"] { color: var(--yellow-text); }
+[data-usage="red"] { color: var(--red-text); }
 
 .mac-usage-goal {
   margin-top: 9px;

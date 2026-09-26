@@ -6,7 +6,7 @@ import { ShortcutRecorder } from "@/components/ShortcutRecorder";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { Card, Language, Layout, Payload } from "@/lib/types";
+import type { Card, Language, Layout, MenuBarItem, Payload } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { useBusyLabel } from "@/lib/useBusyLabel";
 import { DEFAULT_COLOR_THRESHOLDS, commitColorThresholds, normalizeColorThresholds, sendCommand, updateModeLabel, updateStatusLabel } from "../model.js";
@@ -272,6 +272,50 @@ export function Settings({
               onChange={(value) => sendCommand("set-menu-bar-provider", { value })}
             />
           </SettingRow>
+          <SettingRow
+            hint={t("Percentages in the menu bar take the bar colors. Each provider can override it below.")}
+            label={t("Color the Values")}
+          >
+            <Switch
+              checked={payload.menuBarColorValue}
+              aria-label={t("Color the Values")}
+              onCheckedChange={(value) => sendCommand("set-menu-bar-color-value", { value: value === true })}
+            />
+          </SettingRow>
+          <SettingRow
+            hint={t("With several accounts of one provider, only the one in use shows in the menu bar.")}
+            label={t("Only the Account in Use")}
+          >
+            <Switch
+              checked={payload.menuBarActiveAccountOnly}
+              aria-label={t("Only the Account in Use")}
+              onCheckedChange={(value) => sendCommand("set-menu-bar-active-account-only", { value: value === true })}
+            />
+          </SettingRow>
+          <SettingRow
+            hint={t("Providers sit in the middle of the menu bar instead of at its right.")}
+            label={t("Center in the Menu Bar")}
+          >
+            <Switch
+              checked={payload.menuBarCentered}
+              aria-label={t("Center in the Menu Bar")}
+              onCheckedChange={(value) => sendCommand("set-menu-bar-centered", { value: value === true })}
+            />
+          </SettingRow>
+        </Section>
+        <Section title={t("Providers in the Menu Bar")}>
+          {payload.entries
+            .filter((entry) => !layout.hidden[entry.id])
+            .map((entry) => (
+              <MenuBarProviderRow
+                key={entry.id}
+                id={entry.id}
+                name={layout.names[entry.id] || entry.displayName || entry.shortName || entry.id}
+                item={payload.menuBarItems[entry.id]}
+                hideValue={payload.menuBarHideValue}
+                colorValue={payload.menuBarColorValue}
+              />
+            ))}
         </Section>
         </div>
       ) : null}
@@ -480,6 +524,68 @@ function ColorThresholdInputs({
           {t("Default")}
         </button>
       )}
+    </div>
+  );
+}
+
+/** One provider's menu-bar settings: shown or not, its window, its value. */
+function MenuBarProviderRow({
+  id,
+  name,
+  item,
+  hideValue,
+  colorValue,
+}: {
+  id: string;
+  name: string;
+  item: MenuBarItem | undefined;
+  hideValue: boolean;
+  colorValue: boolean;
+}) {
+  const { t } = useI18n();
+  const set = (key: "window" | "hide_value" | "hidden" | "color_value", value: string | boolean) =>
+    sendCommand("set-menu-bar-item", { id, key, value });
+  const shown = !item?.hidden;
+  return (
+    <div className="flex flex-col gap-[6px] px-[var(--pad-control)] py-[var(--pad-control)]">
+      <div className="flex items-center gap-[10px]">
+        <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{name}</span>
+        <Switch
+          checked={shown}
+          aria-label={`${t("Show in the Menu Bar")}: ${name}`}
+          onCheckedChange={(value) => set("hidden", value !== true)}
+        />
+      </div>
+      {shown ? (
+        <div className="flex items-center justify-end gap-[10px] text-label-2">
+          <Picker
+            options={[
+              ["auto", t("Same as the Menu Bar")],
+              ["session", t("5-hour")],
+              ["weekly", t("Weekly")],
+              ["monthly", t("Monthly")],
+            ]}
+            value={item?.window ?? "auto"}
+            onChange={(value) => set("window", value)}
+          />
+          <label className="flex items-center gap-[6px]">
+            <span>{t("Value")}</span>
+            <Switch
+              checked={!(item?.hideValue ?? hideValue)}
+              aria-label={`${t("Value")}: ${name}`}
+              onCheckedChange={(value) => set("hide_value", value !== true)}
+            />
+          </label>
+          <label className="flex items-center gap-[6px]">
+            <span>{t("Color")}</span>
+            <Switch
+              checked={item?.colorValue ?? colorValue}
+              aria-label={`${t("Color")}: ${name}`}
+              onCheckedChange={(value) => set("color_value", value === true)}
+            />
+          </label>
+        </div>
+      ) : null}
     </div>
   );
 }

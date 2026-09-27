@@ -11,15 +11,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use block2::RcBlock;
 use fs2::FileExt;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject, Bool};
+use objc2::runtime::{AnyClass, AnyObject, Bool, ProtocolObject};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
     NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSColor, NSEvent, NSEventMask,
     NSGlassEffectView, NSGlassEffectViewStyle, NSImage, NSImageScaling, NSScreen, NSView,
     NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
-    NSWindow, NSWindowOrderingMode,
+    NSWindow, NSWindowAnimationBehavior, NSWindowDidEndLiveResizeNotification,
+    NSWindowDidResizeNotification, NSWindowOrderingMode, NSWindowWillStartLiveResizeNotification,
 };
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+use objc2_foundation::{
+    MainThreadMarker, NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect,
+    NSSize,
+};
 use objc2_quartz_core::kCACornerCurveContinuous;
 use serde_json::{Value, json};
 use tao::dpi::LogicalSize;
@@ -39,9 +43,9 @@ use super::icon::{Severity, tray_icon_rgba};
 use super::menu_bar::{self, UsageWindow};
 use super::menu_space;
 use super::panel::{
-    CLICK_LOCK_MS, CORNER_RADIUS, CocoaRect, FALLBACK_WORK_AREA_HEIGHT, MIN_POPOVER_WIDTH,
-    MIN_USER_HEIGHT, PanelSize, PopoverPlacement, WINDOW_HEIGHT, clamp_popover_height,
-    close_on_blur, close_on_outside_click, cocoa_popover_frame, fit_popover_height,
+    CLICK_LOCK_MS, CORNER_RADIUS, CocoaRect, FALLBACK_WORK_AREA_HEIGHT, HorizontalResize,
+    MIN_POPOVER_WIDTH, MIN_USER_HEIGHT, PanelSize, PopoverPlacement, WINDOW_HEIGHT, close_on_blur,
+    close_on_outside_click, cocoa_popover_frame, fit_popover_height, fit_provider_popover_height,
     menu_bar_bottom_y,
 };
 use super::payload::{
@@ -68,15 +72,16 @@ enum UserEvent {
     FocusPopover,
     Hotkey,
     Facts,
-    /// Polled while the user drags an edge; re-centres the panel once the drag ends.
-    ResizeSettle,
+    /// Final native geometry, captured before AppKit exits its resize loop.
+    UserResized {
+        frame: CocoaRect,
+        previous_height: f64,
+    },
     /// A mouse press in another app, the menu bar or the desktop, at this
     /// Cocoa screen point.
     OutsideClick(f64, f64),
     /// A click on a provider's own menu-bar item, or a pick in its menu.
     ProviderItem(ItemAction),
-    /// Show a popover held back for the provider tab's height, if it still is.
-    ShowPending,
 }
 
 enum WorkerCmd {
@@ -116,6 +121,8 @@ impl Theme {
 }
 
 struct TrayState {
+    // Unregister before tao drops the window.
+    _resize_observer: Option<WindowResizeObserver>,
     window: Window,
     webview: Option<WebView>,
     tray: TrayIcon,
@@ -131,10 +138,10 @@ struct TrayState {
     /// Last CSS/logical height from the `resize` IPC; not derived from
     /// `inner_size / scale_factor`, which is wrong after a scale-factor change.
     popover_height: f64,
+    compact_popover: bool,
     /// Width and height cap the user dragged the panel to, saved on close.
     panel_size: PanelSize,
     panel_size_dirty: bool,
-    resize_settle_armed: bool,
     /// When the global monitor last saw a press on the status item. A quick
     /// click is released before the popover's blur arrives, so the blur reads
     /// this instead of the live button state.
@@ -143,9 +150,6 @@ struct TrayState {
     pinned: bool,
     /// Keeps the global mouse monitor alive; dropping it would end it.
     _outside_click_monitor: Option<Retained<AnyObject>>,
-    /// Logical height last given to the window by us, so a drag that leaves
-    /// it untouched (a width-only drag) is not mistaken for a chosen height.
-    applied_height: f64,
     theme: Theme,
     facts: SharedFacts,
     hotkey: Option<HotkeyBinding>,
@@ -176,6 +180,10 @@ struct TrayState {
     menu_provider: Option<String>,
     /// A provider click is waiting for its tab's height before showing.
     show_pending: bool,
+    /// Identifies the render requested by the latest open/close, including a
+    /// reopening of the same provider. Old WebKit measurements cannot reveal it.
+    presentation_revision: u64,
+    presentation_screen: &'static str,
     notifications_enabled: bool,
     notifications_threshold: u8,
 }
@@ -247,7 +255,9 @@ fn run_loop() -> Result<(), String> {
     round_corners(&window);
     install_glass_background(&window);
 
+    let resize_observer = install_resize_observer(&window, proxy.clone());
     let mut state = TrayState {
+        _resize_observer: resize_observer,
         window,
         webview,
         tray,
@@ -261,11 +271,9 @@ fn run_loop() -> Result<(), String> {
         popover_height: WINDOW_HEIGHT,
         panel_size,
         panel_size_dirty: false,
-        resize_settle_armed: false,
         pinned: false,
         status_item_pressed_at: None,
         _outside_click_monitor: install_outside_click_monitor(proxy.clone()),
-        applied_height: WINDOW_HEIGHT,
         theme,
         facts,
         hotkey: hotkey_binding,
@@ -296,9 +304,12 @@ fn run_loop() -> Result<(), String> {
             })
         },
         focused_provider: None,
+        compact_popover: false,
         language: "en".into(),
         menu_provider: None,
         show_pending: false,
+        presentation_revision: 0,
+        presentation_screen: "dashboard",
         notifications_enabled: config.notifications.enabled,
         notifications_threshold: config.notifications.threshold,
     };
@@ -308,16 +319,26 @@ fn run_loop() -> Result<(), String> {
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(UserEvent::Tray(tray_event)) => handle_tray(&mut state, tray_event),
+            Event::UserEvent(UserEvent::ProviderItem(ItemAction::Menu { tag }))
+                if chart_menu_command(tag).is_some() =>
+            {
+                let command = json!({"cmd": chart_menu_command(tag).unwrap()}).to_string();
+                handle_ipc(&mut state, &command, control_flow);
+            }
             Event::UserEvent(UserEvent::ProviderItem(action)) => {
                 handle_provider_item(&mut state, action);
             }
-            Event::UserEvent(UserEvent::ShowPending) => show_pending(&mut state),
             Event::UserEvent(UserEvent::Ipc(body)) => handle_ipc(&mut state, &body, control_flow),
             Event::UserEvent(UserEvent::Report(payload)) => apply_payload(&mut state, payload),
             Event::UserEvent(UserEvent::Entry(entry)) => apply_entry(&mut state, entry),
             Event::UserEvent(UserEvent::Facts) => apply_facts(&mut state),
             Event::UserEvent(UserEvent::Hotkey) => toggle_popover_from_keyboard(&mut state),
-            Event::UserEvent(UserEvent::ResizeSettle) => settle_user_resize(&mut state),
+            Event::UserEvent(UserEvent::UserResized {
+                frame,
+                previous_height,
+            }) => {
+                note_user_resize(&mut state, frame, previous_height);
+            }
             Event::UserEvent(UserEvent::OutsideClick(x, y)) => {
                 let on_status_item = status_item_frames(&state)
                     .iter()
@@ -325,7 +346,11 @@ fn run_loop() -> Result<(), String> {
                 if on_status_item {
                     state.status_item_pressed_at = Some(Instant::now());
                 }
-                if close_on_outside_click(state.popover_open, state.pinned, on_status_item) {
+                if close_on_outside_click(
+                    state.popover_open || state.show_pending,
+                    state.pinned,
+                    on_status_item,
+                ) {
                     hide_popover(&mut state);
                 }
             }
@@ -353,10 +378,6 @@ fn run_loop() -> Result<(), String> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => hide_popover(&mut state),
-            Event::WindowEvent {
-                event: WindowEvent::Resized(size),
-                ..
-            } => note_user_resize(&mut state, size),
             Event::LoopDestroyed => {
                 save_panel_size(&mut state);
                 let _ = state.worker.send(WorkerCmd::Shutdown);
@@ -394,7 +415,7 @@ fn spawn_worker(
                             break;
                         }
                         Ok(WorkerCmd::RefreshEntry(id)) => {
-                            rt.block_on(push_entry(&proxy, &id));
+                            rt.block_on(push_entry(&proxy, &facts, &id));
                         }
                         Ok(WorkerCmd::CheckUpdate) => {
                             rt.block_on(check_release(&proxy, &facts));
@@ -419,6 +440,7 @@ fn host_facts(config: &Config) -> HostFacts {
     let mut facts = HostFacts::new(env!("CARGO_PKG_VERSION"), startup::is_enabled());
     facts.refresh_secs = config.tray.refresh_minutes() * 60;
     facts.accounts = account_facts(config);
+    facts.account_emails = account_emails(config);
     facts
 }
 
@@ -456,11 +478,81 @@ fn account_facts(config: &Config) -> Vec<AccountSwitchFact> {
     out
 }
 
-/// Replace the account facts with a fresh read, keeping any running switch
-/// and the last error attached to their vendor.
+/// Local account identity for the dropdown, never written to the usage cache.
+fn account_emails(config: &Config) -> std::collections::BTreeMap<String, String> {
+    use crate::anthropic::cli_account;
+    let mut emails = std::collections::BTreeMap::new();
+    if config.openai.enabled {
+        let labels = std::iter::once(None).chain(
+            config
+                .openai
+                .accounts
+                .iter()
+                .map(|account| Some(account.label.as_str())),
+        );
+        for label in labels {
+            if let Some(email) = config
+                .openai
+                .fetch_auth_path(label)
+                .ok()
+                .and_then(|path| crate::openai::account::account_email_in(&path))
+            {
+                let id = label.map_or_else(|| "openai".into(), |label| format!("openai@{label}"));
+                emails.insert(id, email);
+            }
+        }
+    }
+    if config.anthropic.enabled {
+        let mut by_uuid = std::collections::BTreeMap::new();
+        let markers = std::iter::once((
+            "anthropic".to_string(),
+            cli_account::home_claude_json().ok(),
+        ))
+        .chain(
+            config
+                .anthropic
+                .all_accounts()
+                .iter()
+                .map(|account| {
+                    (
+                        format!("anthropic@{}", account.label),
+                        Some(cli_account::marker_path(&account.config_dir())),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        for (id, marker) in markers {
+            if let Some(marker) = marker
+                && let Some(email) = cli_account::account_email_in(&marker)
+            {
+                if let Some(uuid) = cli_account::account_uuid_in(&marker) {
+                    by_uuid.insert(uuid, email.clone());
+                }
+                emails.insert(id, email);
+            }
+        }
+        if let Ok(paths) = crate::claude_desktop::Paths::resolve(&config.anthropic) {
+            for profile in crate::claude_desktop::load_profiles(&paths.profiles_dir) {
+                if let Some(email) = profile
+                    .email
+                    .filter(|email| !email.trim().is_empty())
+                    .or_else(|| by_uuid.get(&profile.account_uuid).cloned())
+                {
+                    emails.insert(format!("anthropic@{}", profile.label), email);
+                }
+            }
+        }
+    }
+    emails
+}
+
+/// Replace identities and account facts, preserving pending switches/errors.
 fn refresh_account_facts(facts: &SharedFacts) {
-    let fresh = account_facts(&Config::load().unwrap_or_default());
+    let config = Config::load().unwrap_or_default();
+    let fresh = account_facts(&config);
+    let emails = account_emails(&config);
     with_facts(facts, |f| {
+        f.account_emails = emails;
         f.accounts = fresh
             .into_iter()
             .map(|mut fact| {
@@ -561,8 +653,30 @@ async fn check_release(proxy: &EventLoopProxy<UserEvent>, facts: &SharedFacts) {
     let _ = proxy.send_event(UserEvent::Facts);
 }
 
-async fn push_entry(proxy: &EventLoopProxy<UserEvent>, id: &str) {
-    let entry = match crate::report::collect_entry_json(id).await {
+async fn push_entry(proxy: &EventLoopProxy<UserEvent>, facts: &SharedFacts, id: &str) {
+    let entry = refreshed_entry_with(
+        id,
+        || {
+            refresh_account_facts(facts);
+            facts_snapshot(facts)
+        },
+        crate::report::collect_entry_json(id),
+    )
+    .await;
+    if let Some(entry) = entry {
+        let _ = proxy.send_event(UserEvent::Entry(entry));
+    }
+}
+
+/// Reload identity before fetching usage, then carry that snapshot with the
+/// entry. Applying the event must not substitute older or unrelated UI facts.
+async fn refreshed_entry_with(
+    id: &str,
+    refresh_facts: impl FnOnce() -> HostFacts,
+    report: impl std::future::Future<Output = Result<String, String>>,
+) -> Option<Value> {
+    let facts = refresh_facts();
+    let mut entry = match report.await {
         Ok(json) => serde_json::from_str::<Value>(&json)
             .ok()
             .and_then(|v| v.get("entries")?.as_array()?.first().cloned()),
@@ -572,10 +686,9 @@ async fn push_entry(proxy: &EventLoopProxy<UserEvent>, id: &str) {
             "error": crate::display::sanitize_untrusted_field(&error),
             "sections": [],
         })),
-    };
-    if let Some(entry) = entry {
-        let _ = proxy.send_event(UserEvent::Entry(entry));
-    }
+    }?;
+    super::payload::attach_account_email(&mut entry, &facts);
+    Some(entry)
 }
 
 fn apply_payload(state: &mut TrayState, payload: Value) {
@@ -682,7 +795,6 @@ fn apply_strip_icon(state: &mut TrayState) {
             state
                 .provider_items
                 .sync(&chips, &tips, state.menu_bar_centered, chart_left);
-            mark_open_item(state);
             if let Some(image) = template_bars_image(&fractions) {
                 set_status_button_image(&state.tray, &image);
             }
@@ -698,6 +810,9 @@ fn apply_strip_icon(state: &mut TrayState) {
                 .set_title((!title.is_empty()).then_some(title.as_str()));
         }
     }
+    // Icon/title updates can reset AppKit's button geometry. Fill and mark it
+    // after the update in either display mode.
+    mark_open_item(state);
 }
 
 fn bars_icon(fractions: &[f64]) -> Result<Icon, tray_icon::BadIcon> {
@@ -834,7 +949,7 @@ fn handle_tray(state: &mut TrayState, event: TrayIconEvent) {
     } = event
     {
         match button {
-            MouseButton::Left | MouseButton::Right => {
+            MouseButton::Left => {
                 // The press this click ends has been handled; a later blur
                 // is not part of it.
                 state.status_item_pressed_at = None;
@@ -842,18 +957,61 @@ fn handle_tray(state: &mut TrayState, event: TrayIconEvent) {
                     hide_popover(state);
                 } else {
                     // The chart opens the popover as it was, not on a provider.
-                    focus_provider(state, None);
                     state.last_anchor = Some(cocoa_mouse());
-                    if state.popover_open {
-                        position_popover(state);
-                    } else {
-                        show_popover(state);
-                    }
+                    prepare_popover(state, None);
                 }
             }
+            MouseButton::Right => show_chart_menu(state),
             MouseButton::Middle => next_menu_bar_provider(state),
         }
     }
+}
+
+const MENU_CHART_REFRESH: isize = 100;
+const MENU_CHART_SETTINGS: isize = 101;
+const MENU_CHART_QUIT: isize = 102;
+
+fn chart_menu_command(tag: isize) -> Option<&'static str> {
+    match tag {
+        MENU_CHART_REFRESH => Some("refresh"),
+        MENU_CHART_SETTINGS => Some("open-settings"),
+        MENU_CHART_QUIT => Some("quit"),
+        _ => None,
+    }
+}
+
+fn show_chart_menu(state: &mut TrayState) {
+    state.status_item_pressed_at = None;
+    if state.popover_open || state.show_pending {
+        hide_popover(state);
+    }
+    let Some(button) =
+        MainThreadMarker::new().and_then(|mtm| state.tray.ns_status_item()?.button(mtm))
+    else {
+        return;
+    };
+    let pt = state.language == "pt-BR";
+    let lines = [
+        MenuLine::Pick {
+            title: if pt { "Atualizar" } else { "Refresh" }.into(),
+            tag: MENU_CHART_REFRESH,
+            checked: false,
+        },
+        MenuLine::Pick {
+            title: if pt { "Configurações" } else { "Settings" }.into(),
+            tag: MENU_CHART_SETTINGS,
+            checked: false,
+        },
+        MenuLine::Separator,
+        MenuLine::Pick {
+            title: if pt { "Sair" } else { "Quit" }.into(),
+            tag: MENU_CHART_QUIT,
+            checked: false,
+        },
+    ];
+    state.last_anchor = status_item_frame(&state.tray)
+        .map(|frame| (frame.x + frame.w / 2.0, frame.y + frame.h / 2.0));
+    state.provider_items.show_menu_on_button(&button, &lines);
 }
 
 /// A provider item's click opens the popover under it on that provider's tab
@@ -870,7 +1028,9 @@ fn handle_provider_item(state: &mut TrayState, action: ItemAction) {
                 state.provider_items.show_menu(index, &lines);
                 return;
             }
-            if state.popover_open && state.focused_provider.as_deref() == Some(id.as_str()) {
+            if (state.popover_open || state.show_pending)
+                && state.focused_provider.as_deref() == Some(id.as_str())
+            {
                 hide_popover(state);
                 return;
             }
@@ -883,28 +1043,27 @@ fn handle_provider_item(state: &mut TrayState, action: ItemAction) {
             state.last_anchor = frame
                 .map(|frame| (frame.x + frame.w / 2.0, frame.y + frame.h / 2.0))
                 .or_else(|| Some(cocoa_mouse()));
-            focus_provider(state, Some(id));
-            if state.popover_open {
-                position_popover(state);
-            } else if state.js_ready {
-                // The tab is shorter than the list the popover last measured;
-                // showing now would flash that height before the resize.
-                state.show_pending = true;
-                let proxy = state.proxy.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(PENDING_SHOW_TIMEOUT);
-                    let _ = proxy.send_event(UserEvent::ShowPending);
-                });
-            } else {
-                show_popover(state);
-            }
+            prepare_popover(state, Some(id));
         }
         ItemAction::Menu { tag } => apply_provider_menu_pick(state, tag),
     }
 }
 
-/// Longest a provider click waits for its tab's height before showing anyway.
-const PENDING_SHOW_TIMEOUT: Duration = Duration::from_millis(150);
+/// Keep the old provider's surface out of the next provider's position. The
+/// matching render acknowledgement supplies the new size before ordering front.
+fn prepare_popover(state: &mut TrayState, provider: Option<String>) {
+    prepare_popover_screen(state, provider, "dashboard");
+}
+
+fn prepare_popover_screen(state: &mut TrayState, provider: Option<String>, screen: &'static str) {
+    guard_blur(state);
+    state.window.set_visible(false);
+    state.popover_open = false;
+    state.show_pending = true;
+    state.presentation_revision += 1;
+    state.presentation_screen = screen;
+    focus_provider(state, provider);
+}
 
 /// Show the popover a provider click held back, once.
 fn show_pending(state: &mut TrayState) {
@@ -919,8 +1078,10 @@ fn focus_provider(state: &mut TrayState, id: Option<String>) {
     mark_open_item(state);
     if let Some(webview) = state.webview.as_ref() {
         let arg = serde_json::to_string(&state.focused_provider).unwrap_or_else(|_| "null".into());
+        let revision = state.presentation_revision;
+        let screen = state.presentation_screen;
         let _ = webview.evaluate_script(&format!(
-            "window.__AIUB_FOCUS__ && window.__AIUB_FOCUS__({arg})"
+            "window.__AIUB_FOCUS__ && window.__AIUB_FOCUS__({arg}, {revision}, '{screen}')"
         ));
     }
 }
@@ -1188,6 +1349,12 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
         "ready" => {
             state.js_ready = true;
             push_to_webview(state);
+            // A first click can precede WebKit's handlers. Replay the native
+            // selection now rather than leaving the dashboard in overview.
+            sync_popover_visibility(state);
+            if state.show_pending {
+                focus_provider(state, state.focused_provider.clone());
+            }
         }
         "detect" => {
             let _ = state.worker.send(WorkerCmd::Detect);
@@ -1196,6 +1363,7 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
             let _ = state.worker.send(WorkerCmd::Refresh);
         }
         "open-tui" => tui_launch::open(),
+        "open-settings" => prepare_popover_screen(state, None, "settings"),
         "close" => hide_popover(state),
         "quit" => *control_flow = ControlFlow::Exit,
         "toggle-startup" => toggle_startup(state),
@@ -1375,7 +1543,32 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
     }
 }
 
+fn current_panel_measurement(
+    value: &Value,
+    revision: u64,
+    provider: Option<&str>,
+    pending: bool,
+    screen: &str,
+) -> bool {
+    value.get("revision").and_then(Value::as_u64) == Some(revision)
+        && value.get("provider").and_then(Value::as_str) == Some(provider.unwrap_or(""))
+        && (!pending || value.get("screen").and_then(Value::as_str) == Some(screen))
+        && value
+            .get("height")
+            .and_then(Value::as_f64)
+            .is_some_and(|height| height.is_finite() && height > 0.0)
+}
+
 fn handle_resize(state: &mut TrayState, value: &Value) {
+    if !current_panel_measurement(
+        value,
+        state.presentation_revision,
+        state.focused_provider.as_deref(),
+        state.show_pending,
+        state.presentation_screen,
+    ) {
+        return;
+    }
     if let Some(theme) = value
         .get("theme")
         .and_then(Value::as_str)
@@ -1390,7 +1583,8 @@ fn handle_resize(state: &mut TrayState, value: &Value) {
         return;
     }
     let visible_h = anchor_visible_height(state.last_anchor);
-    state.popover_height = clamp_popover_height(requested, visible_h);
+    state.popover_height = requested;
+    state.compact_popover = value.get("compact").and_then(Value::as_bool) == Some(true);
     if state.show_pending {
         // The provider tab has its height: show it at that size.
         show_pending(state);
@@ -1412,58 +1606,121 @@ fn fit_window_to_content(state: &mut TrayState, visible_h: f64) {
         position_popover(state);
         return;
     }
-    let target = fit_popover_height(state.popover_height, visible_h, state.panel_size.max_height);
-    state.applied_height = target;
+    let target = fitted_popover_height(state, visible_h);
     state
         .window
         .set_inner_size(LogicalSize::new(state.panel_size.width, target));
 }
 
-/// A `Resized` from AppKit's live resize is the user dragging an edge: that
-/// becomes the panel's width and height cap. Every other resize is ours.
-fn note_user_resize(state: &mut TrayState, size: tao::dpi::PhysicalSize<u32>) {
-    if !in_live_resize(&state.window) {
-        return;
-    }
-    let logical = size.to_logical::<f64>(state.window.scale_factor());
-    let mut next = PanelSize::dragged(logical.width, logical.height);
-    // A width-only drag leaves the height where we put it: keep the previous
-    // cap (none, if the height was automatic) instead of freezing that height.
-    if (logical.height.round() - state.applied_height.round()).abs() < 1.0 {
+/// Capture the final size even when tao delivers its events after live resize.
+fn note_user_resize(state: &mut TrayState, frame: CocoaRect, previous_height: f64) {
+    let mut next = PanelSize::dragged(frame.w, frame.h);
+    if (frame.h - previous_height).abs() < 1.0 {
         next.max_height = state.panel_size.max_height;
     }
     state.panel_size = next;
     state.panel_size_dirty = true;
-    arm_resize_settle(state);
-}
-
-/// AppKit reports no end of a live resize to tao, so poll for it: moving the
-/// frame mid-drag would fight the edge under the cursor.
-const RESIZE_SETTLE_POLL: Duration = Duration::from_millis(120);
-
-fn arm_resize_settle(state: &mut TrayState) {
-    if state.resize_settle_armed {
-        return;
-    }
-    state.resize_settle_armed = true;
-    let proxy = state.proxy.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(RESIZE_SETTLE_POLL);
-        let _ = proxy.send_event(UserEvent::ResizeSettle);
-    });
-}
-
-/// Once the drag is over, centre the panel under the status item again at
-/// its new size.
-fn settle_user_resize(state: &mut TrayState) {
-    state.resize_settle_armed = false;
-    if in_live_resize(&state.window) {
-        arm_resize_settle(state);
-        return;
-    }
+    save_panel_size(state);
     if state.popover_open {
         position_popover(state);
     }
+}
+
+struct WindowResizeObserver(Retained<ProtocolObject<dyn NSObjectProtocol>>);
+
+impl Drop for WindowResizeObserver {
+    fn drop(&mut self) {
+        // SAFETY: this token came from this notification centre's block API.
+        let observer: &AnyObject = (*self.0).as_ref();
+        unsafe { NSNotificationCenter::defaultCenter().removeObserver(observer) };
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NativeResizeSession {
+    initial: CocoaRect,
+    horizontal: Option<HorizontalResize>,
+}
+
+/// AppKit notifications run synchronously inside the native mouse tracking
+/// loop; tao's queued Resized event arrives too late to centre the live drag.
+fn install_resize_observer(
+    window: &Window,
+    proxy: EventLoopProxy<UserEvent>,
+) -> Option<WindowResizeObserver> {
+    let ptr = window.ns_window() as *mut NSWindow;
+    // SAFETY: tao owns the window; the observer is removed before it is dropped.
+    let window = unsafe { ptr.as_ref() }?;
+    let session = Mutex::new(None::<NativeResizeSession>);
+    let block = RcBlock::new(move |note: NonNull<NSNotification>| {
+        if MainThreadMarker::new().is_none() {
+            return;
+        }
+        // SAFETY: NotificationCenter supplies a valid notification for this call.
+        let note = unsafe { note.as_ref() };
+        let Some(object) = note.object() else {
+            return;
+        };
+        let Some(window) = object.downcast_ref::<NSWindow>() else {
+            return;
+        };
+        // setFrame posts another DidResize synchronously. Ignore our own resize
+        // rather than re-entering the same drag or deadlocking on its state.
+        let Ok(mut session) = session.try_lock() else {
+            return;
+        };
+        let name = note.name();
+        let current = ns_rect_to_cocoa(window.frame());
+        // SAFETY: AppKit owns these process-lifetime notification names.
+        if &*name == unsafe { NSWindowWillStartLiveResizeNotification } {
+            *session = Some(NativeResizeSession {
+                initial: current,
+                horizontal: None,
+            });
+        } else if &*name == unsafe { NSWindowDidEndLiveResizeNotification } {
+            if let Some(ended) = session.take() {
+                let _ = proxy.send_event(UserEvent::UserResized {
+                    frame: current,
+                    previous_height: ended.initial.h,
+                });
+            }
+        } else if &*name == unsafe { NSWindowDidResizeNotification }
+            && let Some(drag) = session.as_mut()
+        {
+            let pointer = cocoa_mouse();
+            if drag.horizontal.is_none() && (current.w - drag.initial.w).abs() >= 1.0 {
+                drag.horizontal = Some(HorizontalResize::start(current, drag.initial.w, pointer.0));
+            }
+            if let Some(horizontal) = drag.horizontal
+                && let Some(visible) = screen_visible_containing(
+                    drag.initial.x + drag.initial.w / 2.0,
+                    drag.initial.max_y(),
+                )
+            {
+                let frame = horizontal.frame(current, pointer.0, visible);
+                if (frame.x - current.x).abs() >= 0.5 || (frame.w - current.w).abs() >= 0.5 {
+                    window.setFrame_display(
+                        NSRect {
+                            origin: NSPoint::new(frame.x, frame.y),
+                            size: NSSize::new(frame.w, frame.h),
+                        },
+                        true,
+                    );
+                }
+            }
+        }
+    });
+    // SAFETY: the filter is our NSWindow; a nil queue runs on the posting
+    // thread. The block captures only a Send mutex and an event-loop proxy.
+    let token = unsafe {
+        NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+            None,
+            Some(window),
+            None,
+            &block,
+        )
+    };
+    Some(WindowResizeObserver(token))
 }
 
 fn in_live_resize(window: &Window) -> bool {
@@ -1568,8 +1825,8 @@ fn show_popover(state: &mut TrayState) {
         let _ = webview.evaluate_script(&format!(
             "window.__AIUB_LOCKCLICKS__ && window.__AIUB_LOCKCLICKS__({CLICK_LOCK_MS})"
         ));
-        let _ = webview.evaluate_script("window.__AIUB_VISIBLE__ && window.__AIUB_VISIBLE__(true)");
     }
+    sync_popover_visibility(state);
     if state.js_ready {
         push_to_webview(state);
     }
@@ -1668,20 +1925,41 @@ fn hide_popover(state: &mut TrayState) {
     state.focused_provider = None;
     // A provider click still waiting to show must not reopen what was closed.
     state.show_pending = false;
+    state.presentation_revision += 1;
     mark_open_item(state);
     save_panel_size(state);
+    sync_popover_visibility(state);
+}
+
+/// Visibility and the provider come from the same native state. Reopening
+/// must restore the selection even if an earlier close reset the renderer.
+fn sync_popover_visibility(state: &TrayState) {
     if let Some(webview) = state.webview.as_ref() {
-        let _ =
-            webview.evaluate_script("window.__AIUB_VISIBLE__ && window.__AIUB_VISIBLE__(false)");
+        let provider =
+            serde_json::to_string(&state.focused_provider).unwrap_or_else(|_| "null".into());
+        let visible = state.popover_open;
+        let screen = state.presentation_screen;
+        let _ = webview.evaluate_script(&format!(
+            "window.__AIUB_VISIBLE__ && window.__AIUB_VISIBLE__({visible}, {provider}, '{screen}')"
+        ));
     }
+}
+
+fn fitted_popover_height(state: &TrayState, visible_h: f64) -> f64 {
+    let fit = if state.compact_popover {
+        fit_provider_popover_height
+    } else {
+        fit_popover_height
+    };
+    fit(state.popover_height, visible_h, state.panel_size.max_height)
 }
 
 fn toggle_popover_from_keyboard(state: &mut TrayState) {
     state.status_item_pressed_at = None;
-    if state.popover_open {
+    if state.popover_open || state.show_pending {
         hide_popover(state);
     } else {
-        show_popover(state);
+        prepare_popover(state, None);
     }
 }
 
@@ -1702,7 +1980,7 @@ fn position_popover(state: &mut TrayState) {
         },
     ));
     let below_y = status_bar_bottom_y(screen).unwrap_or_else(|| menu_bar_bottom_y(screen, visible));
-    let height = fit_popover_height(state.popover_height, visible.h, state.panel_size.max_height);
+    let height = fitted_popover_height(state, visible.h);
     let frame = cocoa_popover_frame(PopoverPlacement {
         visible,
         below_y,
@@ -1710,7 +1988,6 @@ fn position_popover(state: &mut TrayState) {
         popover_w: state.panel_size.width,
         popover_h: height,
     });
-    state.applied_height = frame.h;
     apply_cocoa_frame(&state.window, frame);
 }
 
@@ -1845,6 +2122,9 @@ fn round_corners(window: &Window) {
         return;
     }
     let ns_window = unsafe { &*ptr };
+    // This reused popover owns its content animation. AppKit's inferred
+    // orderFront/orderOut animation can expose the previous position/surface.
+    ns_window.setAnimationBehavior(NSWindowAnimationBehavior::None);
     ns_window.setOpaque(false);
     ns_window.setBackgroundColor(Some(&NSColor::clearColor()));
     if let Some(view) = ns_window.contentView() {
@@ -2048,6 +2328,7 @@ fn mark_open_item(state: &TrayState) {
             .ns_status_item()
             .and_then(|item| item.button(mtm))
     }) {
+        status_items::fit_chart_button(&button);
         status_items::mark_open(&button, chart);
     }
     state
@@ -2084,5 +2365,146 @@ impl SingleInstance {
         file.try_lock_exclusive().ok()?;
         let _ = writeln!(&file, "{}", std::process::id());
         Some(Self { _lock: file })
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn targeted_refresh_reloads_identity_before_collecting_usage() {
+        let facts = Arc::new(Mutex::new(HostFacts::default()));
+        with_facts(&facts, |f| {
+            f.account_emails
+                .insert("openai".into(), "old@example.test".into());
+        });
+        let entry = refreshed_entry_with(
+            "openai",
+            || {
+                with_facts(&facts, |f| {
+                    f.account_emails
+                        .insert("openai".into(), "new@example.test".into());
+                });
+                facts_snapshot(&facts)
+            },
+            async {
+                assert_eq!(
+                    facts_snapshot(&facts).account_emails["openai"],
+                    "new@example.test"
+                );
+                // Later UI facts must not relabel this in-flight result.
+                with_facts(&facts, |f| {
+                    f.account_emails
+                        .insert("openai".into(), "later@example.test".into());
+                });
+                Ok(r#"{"entries":[{"id":"openai","status":"ready"}]}"#.into())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(entry["email"], "new@example.test");
+    }
+
+    #[tokio::test]
+    async fn targeted_refresh_without_a_current_identity_omits_email() {
+        let entry = refreshed_entry_with("openai", HostFacts::default, async {
+            Err("signed out".into())
+        })
+        .await
+        .unwrap();
+        assert_eq!(entry["id"], "openai");
+        assert_eq!(entry["status"], "error");
+        assert!(entry.get("email").is_none());
+    }
+
+    fn measurement(revision: u64, provider: &str, screen: &str) -> Value {
+        json!({"height": 317, "revision": revision, "provider": provider, "screen": screen})
+    }
+
+    #[test]
+    fn opening_rejects_the_previous_provider_height() {
+        assert!(!current_panel_measurement(
+            &measurement(2, "anthropic", "dashboard"),
+            2,
+            Some("openai"),
+            true,
+            "dashboard"
+        ));
+    }
+
+    #[test]
+    fn reopening_rejects_a_delayed_measurement_of_the_same_provider() {
+        assert!(!current_panel_measurement(
+            &measurement(1, "openai", "dashboard"),
+            3,
+            Some("openai"),
+            true,
+            "dashboard"
+        ));
+    }
+
+    #[test]
+    fn opening_waits_for_dashboard_but_navigation_can_resize_afterward() {
+        let settings = measurement(2, "openai", "provider");
+        assert!(!current_panel_measurement(
+            &settings,
+            2,
+            Some("openai"),
+            true,
+            "dashboard"
+        ));
+        assert!(current_panel_measurement(
+            &settings,
+            2,
+            Some("openai"),
+            false,
+            "dashboard"
+        ));
+        assert!(current_panel_measurement(
+            &measurement(2, "openai", "dashboard"),
+            2,
+            Some("openai"),
+            true,
+            "dashboard"
+        ));
+        assert!(current_panel_measurement(
+            &measurement(4, "", "dashboard"),
+            4,
+            None,
+            true,
+            "dashboard"
+        ));
+    }
+
+    #[test]
+    fn context_menu_settings_waits_for_its_own_screen() {
+        assert!(!current_panel_measurement(
+            &measurement(5, "", "dashboard"),
+            5,
+            None,
+            true,
+            "settings"
+        ));
+        assert!(current_panel_measurement(
+            &measurement(5, "", "settings"),
+            5,
+            None,
+            true,
+            "settings"
+        ));
+        assert_eq!(chart_menu_command(MENU_CHART_REFRESH), Some("refresh"));
+        assert_eq!(
+            chart_menu_command(MENU_CHART_SETTINGS),
+            Some("open-settings")
+        );
+        assert_eq!(chart_menu_command(MENU_CHART_QUIT), Some("quit"));
+        for tag in [1, 2, 3, 4, MENU_OPEN, MENU_CENTERED, MENU_HIDE] {
+            assert_eq!(
+                chart_menu_command(tag),
+                None,
+                "provider actions keep their routing"
+            );
+        }
     }
 }

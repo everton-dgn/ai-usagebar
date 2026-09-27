@@ -268,6 +268,7 @@ function normalizeEntry(raw) {
   return {
     id,
     displayName: clean(raw.display_name || raw.name, 240),
+    email: clean(raw.email, 254),
     shortName: clean(raw.short_name, 24),
     plan: clean(raw.plan, 240),
     resetCredits: normalizeResetCredits(raw.reset_credits),
@@ -837,6 +838,7 @@ export function emptyLayout() {
     hidden: {},
     collapsed: {},
     hideExtras: false,
+    individual: { rows: {}, collapsed: {}, hideExtras: false },
     hintDismissed: false,
     language: "en",
     names: {},
@@ -849,6 +851,7 @@ export function emptyLayout() {
     showAs: "left",
     showPlan: true,
     stars: {},
+    starsSeeded: false,
     stripStyle: "bars",
     theme: "system",
     timeFormat: "auto",
@@ -1046,9 +1049,11 @@ export function normalizeLayout(raw) {
   layout.usageGoal = raw.usageGoal === true;
   layout.cardOrder = cleanIdList(raw.cardOrder);
   copyFlagMap(raw.hidden, layout.hidden);
-  copyFlagMap(raw.collapsed, layout.collapsed);
   layout.timeFormat = normalizeTimeFormat(raw.timeFormat);
-  layout.hideExtras = raw.hideExtras === true;
+  Object.assign(layout, normalizeProviderViewLayout(raw));
+  // Individual dropdowns start expanded with all available rows and links.
+  // Only explicit individual choices override that default, never overview prefs.
+  layout.individual = normalizeProviderViewLayout(isPlainObject(raw.individual) ? raw.individual : {});
   layout.hintDismissed = raw.hintDismissed === true;
   layout.language = raw.language === "pt-BR" ? "pt-BR" : "en";
   layout.panelView = normalizePanelView(raw.panelView);
@@ -1060,8 +1065,16 @@ export function normalizeLayout(raw) {
   layout.resetTimes = normalizeResetTimes(raw.resetTimes);
   layout.showAs = normalizeShowAs(raw.showAs);
   layout.stars = normalizeStars(raw.stars);
+  layout.starsSeeded = raw.starsSeeded === true || Object.keys(layout.stars).length > 0;
   layout.stripStyle = "bars";
   layout.theme = normalizeTheme(raw.theme);
+  return layout;
+}
+
+/** @returns {import("./lib/types").ProviderViewLayout} */
+function normalizeProviderViewLayout(raw) {
+  const layout = { rows: {}, collapsed: {}, hideExtras: raw.hideExtras === true };
+  copyFlagMap(raw.collapsed, layout.collapsed);
   if (raw.rows && typeof raw.rows === "object" && !Array.isArray(raw.rows)) {
     for (const id of Object.keys(raw.rows)) {
       const prefs = raw.rows[id];
@@ -1078,6 +1091,45 @@ export function normalizeLayout(raw) {
     }
   }
   return layout;
+}
+
+/**
+ * Project just the chosen view over shared preferences (names, stars, theme).
+ * @param {Layout} layout
+ * @param {import("./lib/types").ProviderView} view
+ * @returns {Layout}
+ */
+export function layoutForProviderView(layout, view) {
+  return view === "individual" ? { ...layout, ...layout.individual } : layout;
+}
+
+/**
+ * Update only the selected view; keep the other view and shared settings intact.
+ * @param {Layout} layout
+ * @param {import("./lib/types").ProviderView} view
+ * @param {Partial<import("./lib/types").ProviderViewLayout>} patch
+ * @returns {Layout}
+ */
+export function updateProviderViewLayout(layout, view, patch) {
+  return view === "individual"
+    ? { ...layout, individual: { ...layout.individual, ...patch } }
+    : { ...layout, ...patch };
+}
+
+/**
+ * Reset one provider in one view, including its remembered expansion state.
+ * @param {Layout} layout
+ * @param {import("./lib/types").ProviderView} view
+ * @param {string} id
+ * @returns {Layout}
+ */
+export function resetProviderViewLayout(layout, view, id) {
+  const current = layoutForProviderView(layout, view);
+  const rows = { ...current.rows };
+  const collapsed = { ...current.collapsed };
+  delete rows[id];
+  delete collapsed[id];
+  return updateProviderViewLayout(layout, view, { rows, collapsed });
 }
 
 export function memoryStorage(seed) {
@@ -1099,75 +1151,42 @@ export function memoryStorage(seed) {
 }
 
 /** @returns {Layout} */
-export function loadLayout(storage) {
+export function loadLayout(storage, onError = () => {}) {
   try {
     const raw = storage && storage.getItem ? storage.getItem(LAYOUT_KEY) : null;
     if (!raw) return emptyLayout();
     return normalizeLayout(JSON.parse(raw));
   } catch {
+    onError();
     return emptyLayout();
   }
 }
 
 export function saveLayout(storage, layout) {
-  if (!storage || typeof storage.setItem !== "function") return;
-  storage.setItem(LAYOUT_KEY, JSON.stringify(normalizeLayout(layout)));
+  try {
+    if (!storage || typeof storage.setItem !== "function") return false;
+    storage.setItem(LAYOUT_KEY, JSON.stringify(normalizeLayout(layout)));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** @returns {Layout} */
 export function syncLayout(layout, cardIds) {
   const ids = Array.isArray(cardIds) ? cardIds.filter(Boolean) : [];
-  const known = new Set(ids);
-  const order = (layout.cardOrder || []).filter((id) => known.has(id));
+  // Reports describe what is available now, not what the user has removed.
+  // Keep preferences for absent providers/accounts so a refresh or re-login
+  // cannot silently reset them. Explicit customization resets own deletion.
+  const saved = normalizeLayout(layout);
+  const order = saved.cardOrder.slice();
   for (const id of ids) {
     if (order.indexOf(id) < 0) order.push(id);
   }
-  const hidden = {};
-  const collapsed = {};
-  const rows = {};
-  for (const id of Object.keys(layout.hidden || {})) {
-    if (known.has(id) && layout.hidden[id]) hidden[id] = true;
-  }
-  for (const id of Object.keys(layout.collapsed || {})) {
-    if (known.has(id) && layout.collapsed[id]) collapsed[id] = true;
-  }
-  for (const id of Object.keys(layout.rows || {})) {
-    if (known.has(id)) rows[id] = layout.rows[id];
-  }
   return {
-    alwaysShowPace: layout.alwaysShowPace === true,
-    usageGoal: layout.usageGoal === true,
-    cardOrder: order,
-    hidden,
-    collapsed,
-    hideExtras: layout.hideExtras === true,
-    hintDismissed: layout.hintDismissed === true,
-    language: layout.language === "pt-BR" ? "pt-BR" : "en",
-    panelView: normalizePanelView(layout.panelView),
-    colorThresholds: normalizeColorThresholds(layout.colorThresholds),
-    pinned: layout.pinned === true,
-    names: cleanNameMap(layout.names),
-    showPlan: layout.showPlan !== false,
-    resetTimes: normalizeResetTimes(layout.resetTimes),
-    seeded: layout.seeded === true,
-    rows,
-    showAs: normalizeShowAs(layout.showAs),
-    stars: pruneStars(layout.stars, known),
-    stripStyle: "bars",
-    theme: normalizeTheme(layout.theme),
-    timeFormat: normalizeTimeFormat(layout.timeFormat),
+    ...saved,
+    cardOrder: cleanIdList(order),
   };
-}
-
-function pruneStars(source, known) {
-  const stars = {};
-  if (!source || typeof source !== "object") return stars;
-  for (const id of Object.keys(source)) {
-    if (!known.has(id)) continue;
-    const keys = Array.isArray(source[id]) ? source[id].slice(0, MAX_STARS_PER_PROVIDER) : [];
-    if (keys.length) stars[id] = keys;
-  }
-  return stars;
 }
 
 export function metricCount(card) {
@@ -1283,10 +1302,15 @@ export function seedLayout(layout, entries) {
 
 /** Fill default stars once, from projected cards (metric keys). */
 export function seedStars(layout, cards) {
-  if (!layout || (layout.stars && Object.keys(layout.stars).length)) return layout;
+  if (!layout || layout.starsSeeded || (layout.stars && Object.keys(layout.stars).length)) return layout;
   const stars = defaultStars(cards);
   if (!Object.keys(stars).length) return layout;
-  return Object.assign({}, layout, { stars });
+  return Object.assign({}, layout, { stars, starsSeeded: true });
+}
+
+/** Closing can arrive after a provider click; only opening owns its selection. */
+export function focusOnVisibility(current, visible, provider) {
+  return visible && provider !== undefined ? (typeof provider === "string" ? provider : "") : current;
 }
 
 // What a fresh host payload does to the stored layout. A payload without
@@ -1472,6 +1496,10 @@ const PROVIDER_LINKS = {
     ["Dashboard", "https://z.ai/manage-apikey/coding-plan/personal/my-plan"],
     ["API Keys", "https://z.ai/manage-apikey/apikey-list"],
   ],
+  minimax: [
+    ["Dashboard", "https://platform.minimax.io/user-center/payment/token-plan"],
+    ["API Keys", "https://platform.minimax.io/user-center/basic-information/interface-key"],
+  ],
   grok: [["Usage", "https://grok.com/?_s=usage"]],
   supergrok: [["Usage", "https://grok.com/?_s=usage"]],
   anthropic_api: [["Dashboard", "https://console.anthropic.com/settings/usage"]],
@@ -1480,13 +1508,18 @@ const PROVIDER_LINKS = {
   moonshot: [["Dashboard", "https://platform.moonshot.cn/console"]],
 };
 
-/** @returns {{ label: string, url: string }[]} */
-export function providerLinks(entryId) {
+/**
+ * @param {string} entryId
+ * @param {Partial<import("./lib/types").RowPrefs>} [prefs]
+ * @returns {{ label: string, url: string }[]}
+ */
+export function providerLinks(entryId, prefs = undefined) {
   const rows = PROVIDER_LINKS[vendorSlug(entryId)] || [];
   const out = [];
   for (let i = 0; i < rows.length && out.length < 3; i++) {
     const label = String(rows[i][0] || "").trim();
     const url = String(rows[i][1] || "").trim();
+    if (prefs?.off?.[`link:${label}`]) continue;
     if (!label || !isHttpUrl(url)) continue;
     out.push({ label, url });
   }

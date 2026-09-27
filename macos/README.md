@@ -9,8 +9,9 @@ name and usage headline beside the
 compact usage-chart glyph by default (for example, `Claude 21%   Codex 15%`).
 Providers with a fetch error stay available in the dashboard and when cycling,
 but do not crowd the default summary. Middle-click focuses the next provider
-and switches to the single-provider summary; left-click or right-click opens
-the dashboard. **Settings → Menu Bar** offers Show All Providers,
+and switches to the single-provider summary; left-click opens the dashboard.
+Right-click the chart icon for Refresh, Settings and Quit.
+**Settings → Menu Bar** offers Show All Providers,
 Hide Usage Value, Chart Icon Only, and a choice of 5-hour, weekly, or monthly
 quota window. A provider without the chosen window falls back to its highest metric. The
 selection and display options survive restarts in `config.toml`.
@@ -25,7 +26,7 @@ cargo build --release --bin ai-usagebar-tray
 ```
 
 Needs Node.js 20+ on PATH for the first build (`windows/popover/` Vite bundle).
-Click either mouse button on the status item to toggle the popover. Display
+Left-click the chart status item to toggle the popover. Display
 options are in Settings; the footer's Options menu has Detect Providers,
 Open TUI, Reset Panel Size, Start at Login, and Quit. No Dock icon.
 
@@ -39,6 +40,20 @@ The header switches between two views, also under **Settings → Preferences →
 Panel View**: **List** (default) stacks every provider, with the account star,
 and uses two columns in a wide panel; **Tabs** shows one provider at a time,
 with the providers in one row that scrolls sideways.
+
+Clicking an individual provider in the menu bar opens only that account's
+panel, with its email when available. Its header has Pin, Reset Panel Size,
+Refresh and Settings. The full-list header keeps its List/Tabs selector and
+pin, with Reset Panel Size in the footer. Provider panels fit short content,
+and horizontal resizing expands both sides around the panel's center until
+the screen edge is reached.
+
+The provider's Settings screen has **Full list** and **Individual** tabs.
+Each mode remembers its metric order, visibility, links and expansion
+separately. Individual panels show all available details by default;
+**Show details when opened** controls the On Demand rows and enabled links.
+Names, metric stars and appearance remain shared. Temporarily missing
+providers retain their preferences, and a storage failure displays a warning.
 
 ![Previous chart-only mode in the macOS menu bar, next to the Cursor, Claude, Antigravity, Codex and Claude Code icons](../screenshots/macos-tray-icon.png)
 
@@ -126,6 +141,16 @@ Accessibility** and grant it once more.
 
 Start at login from the popover **Settings → Launch at Login**. That writes
 `~/Library/LaunchAgents/com.akitaonrails.ai-usagebar-tray.plist`.
+
+The native menu-bar hit-test harness needs an interactive macOS desktop and
+runs only when explicitly requested. The normal test suite skips it:
+
+```bash
+cargo test --test macos_status_items -- --run-native
+```
+
+It checks the full height of the main button and centered provider buttons,
+including the event receiver at the top and bottom edges.
 
 The legacy Swift dropdown:
 

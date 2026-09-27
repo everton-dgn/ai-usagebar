@@ -3,6 +3,15 @@ import { createContext, useContext, type ReactNode } from "react";
 export type Language = "en" | "pt-BR";
 
 const portuguese: Record<string, string> = {
+  "Customize view": "Personalizar visualização",
+  "Full list": "Lista completa",
+  "Individual": "Individual",
+  "Changes below apply only to this provider's individual dropdown.": "As opções abaixo valem apenas para o dropdown individual deste provedor.",
+  "Changes below apply only to this provider in the full list.": "As opções abaixo valem apenas para este provedor na lista completa.",
+  "Show details when opened": "Mostrar detalhes ao abrir",
+  "Links": "Links",
+  "No visible metrics. Adjust this provider in Settings.": "Nenhuma métrica visível. Ajuste este provedor nas configurações.",
+  "Preferences storage is unavailable. Your changes may not survive a restart.": "Não foi possível acessar as preferências salvas. Suas alterações podem ser perdidas ao reiniciar.",
   "About": "Sobre",
   "available": "disponíveis",
   "available singular": "disponível",

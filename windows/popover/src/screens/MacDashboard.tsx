@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState, type MouseEvent, type PointerEvent } from "react";
 import MdiCogOutline from "~icons/mdi/cog-outline";
+import MdiChevronDown from "~icons/mdi/chevron-down";
+import MdiChevronUp from "~icons/mdi/chevron-up";
+import MdiRefresh from "~icons/mdi/refresh";
+import MdiResize from "~icons/mdi/resize";
 import MdiPin from "~icons/mdi/pin";
 import MdiPinOutline from "~icons/mdi/pin-outline";
-import MdiRefresh from "~icons/mdi/refresh";
 import MdiTab from "~icons/mdi/tab";
 import MdiViewAgendaOutline from "~icons/mdi/view-agenda-outline";
 import { ProviderIcon } from "@/components/ProviderIcon";
-import { AccountControl } from "@/components/ProviderSection";
-import { useI18n } from "@/lib/i18n";
+import { AccountControl, ProviderLinks } from "@/components/ProviderSection";
+import { translateUsage, useI18n } from "@/lib/i18n";
 import type { Card, Layout, MetricRow, PanelView, Payload, Row } from "@/lib/types";
-import { accountSwitchFor, nextUpdateLabel, providerIconId, resetText, sendCommand, usageColor, usageGoal } from "../model.js";
+import { accountSwitchFor, cardHasExtras, headlineLabel, nextUpdateLabel, prefsForCard, providerIconId, providerLinks, resetText, sendCommand, usageColor, usageGoal, visibleRowsFor } from "../model.js";
 
 interface MacDashboardProps {
   cards: Card[];
@@ -19,10 +22,12 @@ interface MacDashboardProps {
   /** A provider to show first, when its menu-bar item opened the popover. */
   focusId?: string;
   onSwitchAccount?: (vendor: string, label: string) => void;
+  onToggleCollapse?: (id: string) => void;
   onOpenCustomize: () => void;
 }
 
 interface MacPanelHeaderProps {
+  focusId?: string;
   view: PanelView;
   pinned: boolean;
   onView: (view: PanelView) => void;
@@ -30,48 +35,41 @@ interface MacPanelHeaderProps {
   onOpenSettings: () => void;
 }
 
-/** The macOS dashboard header, shared by both views: title, view switch, refresh, settings. */
-export function MacPanelHeader({ view, pinned, onView, onPin, onOpenSettings }: MacPanelHeaderProps) {
+/** Provider clicks refresh just that account; the overview refreshes all. */
+export function MacPanelHeader({ focusId, view, pinned, onView, onPin, onOpenSettings }: MacPanelHeaderProps) {
   const { t } = useI18n();
   const views: [PanelView, string, typeof MdiTab][] = [
     ["list", t("List"), MdiViewAgendaOutline],
     ["tabs", t("Tabs"), MdiTab],
   ];
   return (
-    <header className="mac-dashboard-header">
-      <div>
+    <header className="mac-dashboard-header" data-focused={!!focusId}>
+      {!focusId ? <div>
         <h1>AI Usage</h1>
         <p>{t("Usage and balance")}</p>
-      </div>
+      </div> : null}
       <div className="mac-dashboard-actions">
-        <div className="mac-view-switch" role="group" aria-label={t("Panel View")}>
-          {views.map(([id, label, Icon]) => (
-            <button
-              key={id}
-              type="button"
-              className="mac-icon-button"
-              aria-label={label}
-              aria-pressed={view === id}
-              data-active={view === id}
-              title={label}
-              onClick={() => onView(id)}
-            >
-              <Icon aria-hidden />
-            </button>
-          ))}
-        </div>
-        <button
-          type="button"
-          className="mac-icon-button mac-pin-button"
-          aria-label={t(pinned ? "Unpin panel" : "Pin panel")}
-          aria-pressed={pinned}
-          data-active={pinned}
-          title={t(pinned ? "Unpin panel" : "Pin panel")}
-          onClick={() => onPin(!pinned)}
-        >
+        {!focusId ? (
+          <div className="mac-view-switch" role="group" aria-label={t("Panel View")}>
+            {views.map(([id, label, Icon]) => (
+              <button key={id} type="button" className="mac-icon-button"
+                aria-label={label} aria-pressed={view === id} data-active={view === id}
+                title={label} onClick={() => onView(id)}>
+                <Icon aria-hidden />
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <button type="button" className="mac-icon-button mac-pin-button"
+          aria-label={t(pinned ? "Unpin panel" : "Pin panel")} aria-pressed={pinned}
+          data-active={pinned} title={t(pinned ? "Unpin panel" : "Pin panel")}
+          onClick={() => onPin(!pinned)}>
           {pinned ? <MdiPin aria-hidden /> : <MdiPinOutline aria-hidden />}
         </button>
-        <button type="button" className="mac-icon-button" aria-label={t("Refresh")} title={t("Refresh")} onClick={() => sendCommand("refresh")}>
+        {focusId ? <button type="button" className="mac-icon-button" aria-label={t("Reset Panel Size")} title={t("Reset Panel Size")} onClick={() => sendCommand("reset-panel-size")}>
+          <MdiResize aria-hidden />
+        </button> : null}
+        <button type="button" className="mac-icon-button" aria-label={t("Refresh")} title={t("Refresh")} onClick={() => focusId ? sendCommand("refresh-entry", { id: focusId }) : sendCommand("refresh")}>
           <MdiRefresh aria-hidden />
         </button>
         <button type="button" className="mac-icon-button" aria-label={t("Settings")} title={t("Settings")} onClick={onOpenSettings}>
@@ -109,7 +107,7 @@ function Metric({ row, layout, nowMs }: { row: MetricRow; layout: Layout; nowMs:
     <div className="mac-metric">
       <div className="mac-metric-heading">
         <span>{label}</span>
-        <strong data-usage={balance ? undefined : color}>{balance ? row.value : `${percent}%`}</strong>
+        <strong data-usage={balance ? undefined : color}>{translateUsage(language, headlineLabel(row, layout.showAs))}</strong>
       </div>
       <div
         className="mac-meter"
@@ -260,19 +258,29 @@ function useDragScroll() {
 }
 
 /** A compact provider switcher for the macOS menu bar popover. */
-export function MacDashboard({ cards, layout, nowMs, payload, focusId, onOpenCustomize, onSwitchAccount }: MacDashboardProps) {
+export function MacDashboard({ cards, layout, nowMs, payload, focusId, onOpenCustomize, onSwitchAccount, onToggleCollapse }: MacDashboardProps) {
   const { language, t } = useI18n();
   const [selectedId, setSelectedId] = useState(focusId || "");
   useEffect(() => {
     if (focusId) setSelectedId(focusId);
   }, [focusId]);
   const tabRow = useDragScroll();
-  const selected = cards.find((card) => card.id === selectedId)
+  const selected = focusId ? cards.find((card) => card.id === focusId) : cards.find((card) => card.id === selectedId)
     ?? cards.find((card) => card.id === payload.primary)
     ?? cards.find((card) => primaryMetric(card))
     ?? cards[0];
   const selectedEntry = payload.entries.find((entry) => entry.id === selected?.id);
+  const subtitle = [
+    layout.showPlan !== false ? selected?.plan : "",
+    selectedEntry?.status === "error" ? t("Usage unavailable") : "",
+    selected?.stale ? t("Cached") : "",
+  ].filter(Boolean).join(" · ");
   const selectedAccount = selected ? accountSwitchFor(selected.id, payload.accounts) : null;
+  const prefs = selected ? prefsForCard(selected, layout) : undefined;
+  const expanded = selected ? layout.collapsed?.[selected.id] !== true : false;
+  const rows = selected ? visibleRowsFor(selected, { prefs, hideExtras: layout.hideExtras, collapsed: !expanded }) : [];
+  const links = selected ? providerLinks(selected.id, prefs) : [];
+  const hasExtras = selected ? cardHasExtras(selected, layout.hideExtras, prefs) : false;
   useEffect(() => {
     const row = tabRow.ref.current;
     const tab = row?.querySelector<HTMLElement>('[data-active="true"]');
@@ -292,7 +300,7 @@ export function MacDashboard({ cards, layout, nowMs, payload, focusId, onOpenCus
     <div className="mac-dashboard">
       {cards.length ? (
         <>
-          <div className="mac-provider-tabs" role="group" aria-label={t("Providers")} {...tabRow}>
+          {!focusId ? <div className="mac-provider-tabs" role="group" aria-label={t("Providers")} {...tabRow}>
             {cards.map((card) => {
               const active = selected?.id === card.id;
               return (
@@ -310,7 +318,7 @@ export function MacDashboard({ cards, layout, nowMs, payload, focusId, onOpenCus
                 </button>
               );
             })}
-          </div>
+          </div> : null}
 
           {selected ? (
             <section className="mac-provider-card" aria-label={selected.title}>
@@ -318,7 +326,8 @@ export function MacDashboard({ cards, layout, nowMs, payload, focusId, onOpenCus
                 <span className="mac-provider-mark"><ProviderIcon slug={providerIconId(selected.id)} title={selected.title} size={25} /></span>
                 <span className="mac-provider-title">
                   <strong>{selected.title}</strong>
-                  <small>{(layout.showPlan !== false && selected.plan) || (selectedEntry?.status === "ready" ? t("Current usage") : t("Usage unavailable"))}{selected.stale ? ` · ${t("Cached")}` : ""}</small>
+                  {selectedEntry?.email ? <small className="mac-account-email">{selectedEntry.email}</small> : null}
+                  {subtitle ? <small>{subtitle}</small> : null}
                 </span>
                 {selectedAccount ? (
                   <span className="mac-provider-account">
@@ -329,15 +338,15 @@ export function MacDashboard({ cards, layout, nowMs, payload, focusId, onOpenCus
                     />
                   </span>
                 ) : null}
-                <button type="button" className="mac-provider-refresh" title={`${t("Refresh")} ${selected.title}`} aria-label={`${t("Refresh")} ${selected.title}`} onClick={() => sendCommand("refresh-entry", { id: selected.id })}>
+                {!focusId ? <button type="button" className="mac-provider-refresh" title={`${t("Refresh")} ${selected.title}`} aria-label={`${t("Refresh")} ${selected.title}`} onClick={() => sendCommand("refresh-entry", { id: selected.id })}>
                   <MdiRefresh aria-hidden />
-                </button>
+                </button> : null}
               </div>
 
-              {selected.rows.length ? (
+              {rows.length ? (
                 <div className="mac-usage-section">
                   <div className="mac-section-label">{t("USAGE & BALANCE")}</div>
-                  {selected.rows.map((row, index) => <DetailRow key={row.key || `${row.kind}:${index}`} row={row} layout={layout} nowMs={nowMs} />)}
+                  {rows.map((row, index) => <DetailRow key={row.key || `${row.kind}:${index}`} row={row} layout={layout} nowMs={nowMs} />)}
                 </div>
               ) : selected.error ? (
                 <div className="mac-empty-state">
@@ -345,9 +354,15 @@ export function MacDashboard({ cards, layout, nowMs, payload, focusId, onOpenCus
                   <p>{t(selected.errorHint || selected.error)}</p>
                 </div>
               ) : (
-                <div className="mac-empty-state">{t("No usage or balance data yet.")}</div>
+                <div className="mac-empty-state">{t(selected.rows.length ? "No visible metrics. Adjust this provider in Settings." : "No usage or balance data yet.")}</div>
               )}
-              {selected.error && selected.rows.length ? <p className="mac-cached-note">{t(selected.errorTitle)}: {t(selected.errorHint)}</p> : null}
+              {selected.error && rows.length ? <p className="mac-cached-note">{t(selected.errorTitle)}: {t(selected.errorHint)}</p> : null}
+              {(hasExtras || links.length > 0) && onToggleCollapse ? (
+                <button type="button" className="plain-btn flex w-full justify-center py-[5px] text-label-2" aria-expanded={expanded} aria-label={t(expanded ? "Show less" : "Show more")} onClick={() => onToggleCollapse(selected.id)}>
+                  {expanded ? <MdiChevronUp /> : <MdiChevronDown />}
+                </button>
+              ) : null}
+              {expanded && links.length ? <ProviderLinks links={links} /> : null}
             </section>
           ) : null}
         </>

@@ -258,9 +258,18 @@ body:has(.mac-panel) {
 
 /* Shared by the list and the tabs view, so it sits outside .mac-dashboard. */
 .mac-panel .mac-dashboard-header {
+  flex-wrap: wrap;
   gap: 8px;
   padding: 8px 4px 0;
   margin-bottom: 12px;
+}
+
+.mac-panel .mac-dashboard-header[data-focused="true"] {
+  justify-content: flex-end;
+}
+
+.mac-dashboard-header .mac-dashboard-actions {
+  margin-left: auto;
 }
 
 .mac-pin-button[data-active="true"] {
@@ -897,33 +906,18 @@ body:has(.mac-panel) {
   cursor: default;
 }
 
-/* Screen switch: 180ms ease-in-out slide (Motion.modeSwitch). */
+/* Screen entry rises from below in either navigation direction. */
 .screen-enter {
   animation: screen-slide 180ms ease-in-out;
 }
 
-.screen-enter[data-direction="back"] {
-  animation-name: screen-slide-back;
-}
-
 @keyframes screen-slide {
   from {
-    transform: translateX(24px);
+    transform: translateY(24px);
     opacity: 0;
   }
   to {
-    transform: translateX(0);
-    opacity: 1;
-  }
-}
-
-@keyframes screen-slide-back {
-  from {
-    transform: translateX(-24px);
-    opacity: 0;
-  }
-  to {
-    transform: translateX(0);
+    transform: translateY(0);
     opacity: 1;
   }
 }

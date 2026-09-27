@@ -105,7 +105,7 @@ export function ProviderSection({
   const allRows: Row[] = visibleRowsFor(card, { ...opts, collapsed: false });
   const demandRows = allRows.slice(alwaysRows.length);
   const hasExtras = cardHasExtras(card, layout.hideExtras, prefs);
-  const links = lifted ? [] : providerLinks(card.id);
+  const links = lifted ? [] : providerLinks(card.id, prefs);
   const showExpander = hasExtras || links.length > 0;
   const condensedAlways = new Set<number>(condensedTextRowIndexes(alwaysRows));
   const condensedDemand = new Set<number>(condensedTextRowIndexes(demandRows));
@@ -508,7 +508,7 @@ export function ErrorRow({ explained }: ErrorRowProps) {
   );
 }
 
-function ProviderLinks({ links }: { links: Array<{ label: string; url: string }> }) {
+export function ProviderLinks({ links }: { links: Array<{ label: string; url: string }> }) {
   const { t } = useI18n();
   return (
     <div className="flex gap-2 px-[var(--card-pad)] py-[var(--pad-text-row)]">

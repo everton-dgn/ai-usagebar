@@ -832,7 +832,9 @@ fn openai_sections(
                 .collect(),
         });
     }
-    if let Some(c) = &s.credits {
+    if let Some(c) = &s.credits
+        && (c.has_credits || c.unlimited)
+    {
         v.push(Section::Spacer);
         let balance = if c.unlimited {
             "unlimited".into()
@@ -840,10 +842,18 @@ fn openai_sections(
             c.balance.clone()
         };
         let mut body = vec![format!("balance: {}", balance)];
-        if let Some((lo, hi)) = c.approx_local_messages {
+        if let Some((lo, hi)) = c.approx_local_messages
+            && hi > 0
+            && lo >= 0
+            && lo <= hi
+        {
             body.push(format!("≈ {lo}-{hi} local messages"));
         }
-        if let Some((lo, hi)) = c.approx_cloud_messages {
+        if let Some((lo, hi)) = c.approx_cloud_messages
+            && hi > 0
+            && lo >= 0
+            && lo <= hi
+        {
             body.push(format!("≈ {lo}-{hi} cloud messages"));
         }
         v.push(Section::Block {
@@ -2547,6 +2557,45 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, Section::Block { label, .. } if label == "Credits"))
         );
+    }
+
+    #[test]
+    fn openai_credits_omit_empty_balances_and_zero_message_estimates() {
+        for (has_credits, unlimited, visible) in [
+            (false, false, false),
+            (true, false, true),
+            (false, true, true),
+        ] {
+            let snap = OpenAiSnapshot {
+                plan: "ChatGPT Pro".into(),
+                session: None,
+                weekly: None,
+                code_review: None,
+                additional_limits: Vec::new(),
+                unavailable_models: Vec::new(),
+                credits: Some(OpenAiCredits {
+                    balance: "0".into(),
+                    has_credits,
+                    unlimited,
+                    approx_local_messages: Some((0, 0)),
+                    approx_cloud_messages: Some((0, 0)),
+                }),
+                reset_credits: ResetCredits::default(),
+                source: OpenAiSource::CodexOauth,
+            };
+            let sections = sections_for(&ready(VendorSnapshot::Openai(snap)), now(), 5);
+            let body = sections.iter().find_map(|section| match section {
+                Section::Block { label, body } if label == "Credits" => Some(body),
+                _ => None,
+            });
+            assert_eq!(body.is_some(), visible);
+            if let Some(body) = body {
+                assert_eq!(body.len(), 1, "zero message estimates are not useful");
+                if unlimited {
+                    assert_eq!(body[0], "balance: unlimited");
+                }
+            }
+        }
     }
 
     #[test]

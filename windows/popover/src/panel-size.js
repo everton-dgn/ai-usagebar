@@ -13,3 +13,8 @@ export function measurePanelHeight(shell) {
   }
   return Math.ceil(height);
 }
+
+/** Provider dropdowns have no footer Options menu to reserve space for. */
+export function panelHeight(measured, compact) {
+  return measured > 0 ? Math.max(measured, compact ? 200 : 360) : measured;
+}

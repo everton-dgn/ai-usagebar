@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   accountSwitchFor,
+  focusOnVisibility,
   applyCardNames,
   renameCard,
   formatDuration,
@@ -15,6 +16,10 @@ import {
   emptyLayout,
   memoryStorage,
   loadLayout,
+  layoutForProviderView,
+  updateProviderViewLayout,
+  resetProviderViewLayout,
+  prefsForCard,
   saveLayout,
   syncLayout,
   applyCardLayout,
@@ -74,7 +79,19 @@ import {
   updateBannerPending,
   updateModeLabel,
 } from './src/model.js';
-import { measurePanelHeight } from './src/panel-size.js';
+import { measurePanelHeight, panelHeight } from './src/panel-size.js';
+
+assert.equal(panelHeight(274, true), 274);
+assert.equal(panelHeight(274, false), 360);
+assert.equal(panelHeight(420, true), 420);
+assert.equal(panelHeight(0, true), 0);
+// A delayed close cannot clear a newer provider click; opening restores the
+// native selection even when the click occurred before the JS handlers existed.
+assert.equal(focusOnVisibility('openai@work', false, null), 'openai@work');
+assert.equal(focusOnVisibility('', true, 'openai@work'), 'openai@work');
+assert.equal(focusOnVisibility('openai@work', true, 'anthropic@home'), 'anthropic@home');
+assert.equal(focusOnVisibility('openai@work', true, null), '');
+assert.equal(focusOnVisibility('openai@work', false, undefined), 'openai@work');
 
 // The native window can retain a tall viewport while WebView2 is hidden. Its
 // stretched scroll region must not become the next requested panel height.
@@ -411,6 +428,123 @@ const synced = syncLayout(loaded, ['anthropic', 'openai', 'cursor']);
 assert.deepEqual(synced.cardOrder, ['cursor', 'openai', 'anthropic']);
 assert.ok(store.getItem(LAYOUT_KEY).includes('cursor'));
 assert.deepEqual(emptyLayout().cardOrder, []);
+
+// A failed disk write is reported, while malformed saved data is left intact.
+{
+  const broken = { getItem() { return '{invalid'; }, setItem() { throw new Error('storage unavailable'); } };
+  let readFailed = false;
+  assert.deepEqual(loadLayout(broken, () => { readFailed = true; }), emptyLayout());
+  assert.equal(readFailed, true);
+  assert.equal(saveLayout(broken, emptyLayout()), false);
+  assert.equal(saveLayout(memoryStorage(), emptyLayout()), true);
+}
+
+// A provider missing from one report must retain its customization on return.
+{
+  const remembered = {
+    ...emptyLayout(), seeded: true,
+    cardOrder: ['openai@work', 'zai'],
+    hidden: { 'openai@work': true }, collapsed: { 'openai@work': true },
+    names: { 'openai@work': 'Work' },
+    rows: { 'openai@work': { always: ['metric:Weekly'], demand: [], off: { 'block:Credits': true, 'link:Status': true } } },
+    stars: { 'openai@work': ['metric:Weekly'] },
+  };
+  const store = memoryStorage();
+  saveLayout(store, absorbPayload(remembered, [{ id: 'zai' }]));
+  const restored = absorbPayload(loadLayout(store), [{ id: 'zai' }, { id: 'openai@work' }]);
+  for (const key of ['cardOrder', 'hidden', 'collapsed', 'names', 'rows', 'stars']) {
+    assert.deepEqual(restored[key], remembered[key], `${key} survives a partial report and reload`);
+  }
+  const prefs = remembered.rows['openai@work'];
+  assert.deepEqual(providerLinks('openai@work', prefs).map((link) => link.label), ['Dashboard']);
+  assert.deepEqual(providerLinks('openai@work', { off: { 'link:Status': true, 'link:Dashboard': true } }), []);
+  assert.equal(providerLinks('openai@personal').length, 2, 'links are configured per account');
+}
+
+// Individual dropdowns start fully expanded with every row and link enabled,
+// regardless of overview restrictions. Later edits/resets remain independent.
+{
+  const id = 'openai@work';
+  const otherId = 'openai@personal';
+  const card = { id, rows: [
+    { kind: 'metric', key: 'metric:weekly', label: 'Weekly' },
+    { kind: 'metric', key: 'metric:session', label: 'Session' },
+    { kind: 'block', label: 'Credits', body: ['balance: 20'] },
+  ] };
+  const legacy = {
+    rows: {
+      [id]: { always: ['metric:weekly'], demand: ['metric:session', 'block:Credits'],
+        off: { 'block:Credits': true, 'link:Status': true, 'link:Dashboard': true } },
+      [otherId]: { always: ['metric:weekly'], demand: [], off: {} },
+    },
+    collapsed: { [id]: true }, hideExtras: true, seeded: true,
+    names: { [id]: 'Work' }, stars: { [id]: ['metric:weekly'] },
+  };
+  const store = memoryStorage({ [LAYOUT_KEY]: JSON.stringify(legacy) });
+  const migrated = loadLayout(store);
+  assert.deepEqual(migrated.individual, { rows: {}, collapsed: {}, hideExtras: false });
+  assert.deepEqual(migrated.rows, legacy.rows, 'keep overview customization');
+  const defaults = layoutForProviderView(migrated, 'individual');
+  assert.deepEqual(visibleRowsFor(card, { prefs: prefsForCard(card, defaults), collapsed: defaults.collapsed[id], hideExtras: defaults.hideExtras }).map(rowKey), card.rows.map(rowKey));
+  assert.deepEqual(providerLinks(id, prefsForCard(card, defaults)).map((link) => link.label), ['Status', 'Dashboard']);
+
+  let prefs = prefsForCard(card, layoutForProviderView(migrated, 'individual'));
+  prefs = setRowEnabled(prefs, 'block:Credits', true);
+  prefs = setRowEnabled(prefs, 'link:Dashboard', true);
+  prefs = setRowEnabled(prefs, 'link:Status', false);
+  prefs = moveRowToList(prefs, 'metric:session', 'always', 'metric:weekly');
+  const detailed = updateProviderViewLayout(migrated, 'individual', {
+    rows: { ...migrated.individual.rows, [id]: prefs }, collapsed: {},
+  });
+  assert.deepEqual(detailed.rows, legacy.rows, 'individual editing leaves the overview untouched');
+  assert.deepEqual(detailed.collapsed, legacy.collapsed);
+  assert.deepEqual(detailed.individual.rows[otherId], migrated.individual.rows[otherId]);
+  assert.deepEqual(providerLinks(id, detailed.individual.rows[id]).map((link) => link.label), ['Dashboard']);
+  assert.deepEqual(providerLinks(id, detailed.rows[id]), []);
+
+  const simpler = updateProviderViewLayout(detailed, 'overview', {
+    rows: { ...detailed.rows, [id]: setRowEnabled(prefsForCard(card, detailed), 'metric:session', false) },
+  });
+  assert.deepEqual(simpler.individual, detailed.individual, 'overview editing leaves the dropdown untouched');
+  saveLayout(store, absorbPayload(simpler, [{ id: otherId }]));
+  const reloaded = absorbPayload(loadLayout(store), [{ id }, { id: otherId }]);
+  assert.deepEqual(reloaded.rows, simpler.rows);
+  assert.deepEqual(reloaded.individual, detailed.individual);
+  const fullList = layoutForProviderView(reloaded, 'overview');
+  const individual = layoutForProviderView(reloaded, 'individual');
+  assert.deepEqual(visibleRowsFor(card, { prefs: prefsForCard(card, fullList), collapsed: fullList.collapsed[id] }).map(rowKey), ['metric:weekly']);
+  assert.deepEqual(visibleRowsFor(card, { prefs: prefsForCard(card, individual), collapsed: individual.collapsed[id] }).map(rowKey), ['metric:session', 'metric:weekly', 'block:Credits']);
+  assert.deepEqual(individual.names, legacy.names, 'names stay shared');
+  assert.deepEqual(individual.stars, legacy.stars, 'menu-bar stars stay shared');
+
+  for (const view of ['overview', 'individual']) {
+    const reset = resetProviderViewLayout(reloaded, view, id);
+    const own = layoutForProviderView(reset, view);
+    const otherView = view === 'overview' ? 'individual' : 'overview';
+    assert.equal(own.rows[id], undefined);
+    assert.equal(own.collapsed[id], undefined);
+    assert.deepEqual(own.rows[otherId], layoutForProviderView(reloaded, view).rows[otherId]);
+    assert.deepEqual(layoutForProviderView(reset, otherView).rows, layoutForProviderView(reloaded, otherView).rows);
+    assert.deepEqual(layoutForProviderView(reset, otherView).collapsed, layoutForProviderView(reloaded, otherView).collapsed);
+    saveLayout(store, reset);
+    assert.equal(layoutForProviderView(loadLayout(store), view).rows[id], undefined, 'reset survives reload without inheriting the other mode');
+    if (view === 'individual') {
+      const restored = layoutForProviderView(loadLayout(store), view);
+      assert.deepEqual(visibleRowsFor(card, { prefs: prefsForCard(card, restored), collapsed: restored.collapsed[id] }).map(rowKey), card.rows.map(rowKey));
+      assert.equal(providerLinks(id, prefsForCard(card, restored)).length, 2);
+    }
+  }
+  assert.deepEqual(normalizeLayout({ ...legacy, individual: {} }).individual, { rows: {}, collapsed: {}, hideExtras: false });
+}
+
+// Clearing the last star is a saved choice, not a request to seed defaults again.
+{
+  const cards = [{ id: 'openai', rows: [{ kind: 'metric', label: 'Weekly' }] }];
+  const initial = seedStars(emptyLayout(), cards);
+  const store = memoryStorage();
+  saveLayout(store, { ...initial, stars: {} });
+  assert.deepEqual(seedStars(loadLayout(store), cards).stars, {});
+}
 
 // Language must survive storage normalization and every host payload refresh.
 const languageStore = memoryStorage();

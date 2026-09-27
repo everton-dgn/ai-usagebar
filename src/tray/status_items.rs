@@ -15,12 +15,12 @@ use objc2_app_kit::{
     NSAccessibility, NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua,
     NSAppearanceNameDarkAqua, NSApplication, NSApplicationDidChangeScreenParametersNotification,
     NSAttributedStringAttachmentConveniences, NSAttributedStringNSStringDrawing,
-    NSBackingStoreType, NSBaselineOffsetAttributeName, NSButton, NSColor, NSCompositingOperation,
-    NSControl, NSControlStateValueOn, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
-    NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSLayoutAttribute,
-    NSMenu, NSMenuItem, NSPanel, NSRectFillUsingOperation, NSResponder, NSScreen, NSStackView,
-    NSStatusBar, NSStatusItem, NSStatusWindowLevel, NSTextAttachment, NSTextField,
-    NSUserInterfaceLayoutOrientation, NSVariableStatusItemLength, NSView,
+    NSAutoresizingMaskOptions, NSBackingStoreType, NSBaselineOffsetAttributeName, NSButton,
+    NSColor, NSCompositingOperation, NSControl, NSControlStateValueOn, NSEvent, NSEventMask,
+    NSEventModifierFlags, NSEventType, NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
+    NSImage, NSLayoutAttribute, NSMenu, NSMenuItem, NSPanel, NSRectFillUsingOperation, NSResponder,
+    NSScreen, NSStackView, NSStatusBar, NSStatusItem, NSStatusWindowLevel, NSTextAttachment,
+    NSTextField, NSUserInterfaceLayoutOrientation, NSVariableStatusItemLength, NSView,
     NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
     NSWorkspaceDidActivateApplicationNotification,
 };
@@ -370,6 +370,16 @@ impl ProviderItems {
                     button.setAction(Some(sel!(itemClicked:)));
                 }
                 center.stack.addArrangedSubview(&button);
+                // Keep the content centered but make the button's hit region
+                // cover the full menu bar, including above and below its title.
+                button
+                    .topAnchor()
+                    .constraintEqualToAnchor(&center.stack.topAnchor())
+                    .setActive(true);
+                button
+                    .bottomAnchor()
+                    .constraintEqualToAnchor(&center.stack.bottomAnchor())
+                    .setActive(true);
                 self.items.push((chip.id.clone(), Slot::Center(button)));
                 if rule_after(chips, index, centered) {
                     let rule = NSTextField::labelWithAttributedString(
@@ -522,6 +532,14 @@ impl ProviderItems {
         let Some(button) = self.items.get(index).and_then(|(_, slot)| slot.button(mtm)) else {
             return;
         };
+        self.show_menu_on_button(&button, lines);
+    }
+
+    /// Use the same native menu actions for the chart's own status button.
+    pub fn show_menu_on_button(&self, button: &NSButton, lines: &[MenuLine]) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
         for line in lines {
@@ -551,7 +569,7 @@ impl ProviderItems {
             menu.addItem(&entry);
         }
         let below = NSPoint::new(0.0, button.bounds().size.height + 4.0);
-        menu.popUpMenuPositioningItem_atLocation_inView(None, below, Some(&button));
+        menu.popUpMenuPositioningItem_atLocation_inView(None, below, Some(button));
     }
 }
 
@@ -582,6 +600,55 @@ enum Rule {
 
 const PILL_RADIUS: f64 = 6.0;
 
+/// Expand the chart's native button and tray-icon's full-button event surface
+/// to the actual menu bar height. AppKit initially gives the button 22 points
+/// even when the status window is taller (30 points on current macOS).
+pub fn fit_chart_button(button: &NSButton) {
+    let Some(content) = button.window().and_then(|window| window.contentView()) else {
+        return;
+    };
+    // SAFETY: the status item owns this live view and its parent on the main thread.
+    let Some(parent) = (unsafe { button.superview() }) else {
+        return;
+    };
+    let height = content.bounds().size.height;
+    if height <= 0.0 {
+        return;
+    }
+    let old_bounds = button.bounds();
+    let sizing =
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable;
+    // Current AppKit wraps the button in an NSView inset by four points at
+    // both vertical edges. Expand that wrapper as well, or it clips the fill
+    // and intercepts hit-testing before the button can receive an edge click.
+    if parent != content {
+        // SAFETY: same live view hierarchy as above.
+        if unsafe { parent.superview() }.as_deref() != Some(content.as_ref()) {
+            return;
+        }
+        let frame = parent.frame();
+        parent.setAutoresizingMask(sizing);
+        parent.setFrame(NSRect::new(
+            NSPoint::new(frame.origin.x, content.bounds().origin.y),
+            NSSize::new(frame.size.width, height),
+        ));
+    }
+    // tray-icon installs its event receiver over the entire original button.
+    // Give that overlay the same autoresizing as the button, without resizing
+    // any smaller image/content views AppKit may add.
+    for child in button.subviews() {
+        if child.frame() == old_bounds {
+            child.setAutoresizingMask(sizing);
+        }
+    }
+    let frame = button.frame();
+    button.setAutoresizingMask(sizing);
+    button.setFrame(NSRect::new(
+        NSPoint::new(frame.origin.x, parent.bounds().origin.y),
+        NSSize::new(frame.size.width, height),
+    ));
+}
+
 /// Draw or clear the open-item highlight behind `button`. A status item's
 /// button does not keep AppKit's highlight once its click ends, so the pill is
 /// drawn on the button's own layer, the same size as the hover highlight.
@@ -589,7 +656,17 @@ pub fn mark_open(button: &NSButton, on: bool) {
     let view: &NSView = button;
     view.setWantsLayer(true);
     if let Some(layer) = view.layer() {
-        let color = on.then(|| pill_color(view)).map(|c| c.CGColor());
+        // WindowServer passes physical clicks through fully transparent pixels
+        // in the centered panel, even when NSView::hitTest finds the button.
+        // Keep a nearly invisible fill on inactive centered buttons as well.
+        let color = if on {
+            Some(pill_color(view))
+        } else if button.downcast_ref::<CenterButton>().is_some() {
+            Some(NSColor::colorWithWhite_alpha(0.0, 0.01))
+        } else {
+            None
+        }
+        .map(|c| c.CGColor());
         layer.setBackgroundColor(color.as_deref());
         layer.setCornerRadius(PILL_RADIUS);
     }

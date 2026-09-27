@@ -7,12 +7,13 @@ process.env.TZ = 'UTC';
 const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, appType: 'custom' });
 
 try {
-  const { MacDashboard } = await server.ssrLoadModule('/src/screens/MacDashboard.tsx');
+  const { MacDashboard, MacPanelHeader } = await server.ssrLoadModule('/src/screens/MacDashboard.tsx');
   const { ProviderSection } = await server.ssrLoadModule('/src/components/ProviderSection.tsx');
+  const { ProviderDetail } = await server.ssrLoadModule('/src/screens/ProviderDetail.tsx');
   const { Settings } = await server.ssrLoadModule('/src/screens/Settings.tsx');
   const { TooltipProvider } = await server.ssrLoadModule('/src/components/ui/tooltip.tsx');
   const { LanguageProvider } = await server.ssrLoadModule('/src/lib/i18n.tsx');
-  const { emptyLayout, emptyPayload } = await server.ssrLoadModule('/src/model.js');
+  const { emptyLayout, emptyPayload, layoutForProviderView, providerLinks } = await server.ssrLoadModule('/src/model.js');
   const nowMs = Date.parse('2026-09-24T11:00:00Z');
   const card = {
     id: 'anthropic', title: 'Claude', plan: '', stale: false, error: '', rows: [{
@@ -26,6 +27,139 @@ try {
     primary: 'anthropic', generatedAt: nowMs, nextRefreshAt: nowMs + 60_000,
     hostError: '', version: 'test',
   };
+
+  const focused = renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
+    React.createElement(MacDashboard, {
+      cards: [{ ...card, rows: [...card.rows, { kind: 'block', label: 'Credits', body: ['balance: 0'] }] }, { ...card, id: 'zai', title: 'Z.AI' }],
+      layout: { ...emptyLayout(), rows: { anthropic: { always: ['metric:session'], demand: ['block:Credits'], off: { 'block:Credits': true, 'link:Status': true, 'link:Dashboard': true } } } },
+      nowMs, payload, focusId: 'anthropic', onOpenCustomize() {},
+    })));
+  assert.doesNotMatch(focused, /mac-provider-tabs|balance: 0|Z\.AI|mac-provider-refresh/);
+  assert.match(focused, /Claude/);
+  // A missing focused account must never fall back to the overview's primary.
+  const missingFocused = renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
+    React.createElement(MacDashboard, {
+      cards: [card], layout: emptyLayout(), nowMs, payload,
+      focusId: 'openai@removed', onOpenCustomize() {},
+    })));
+  assert.doesNotMatch(missingFocused, /mac-provider-tabs|mac-provider-card|Claude|46%/);
+  const identity = renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
+    React.createElement(MacDashboard, {
+      cards: [{ ...card, id: 'openai@work', title: 'Codex' }],
+      layout: { ...emptyLayout(), showPlan: false }, nowMs,
+      payload: { ...payload, entries: [{ id: 'openai@work', email: 'work@example.test', status: 'ready' }] },
+      focusId: 'openai@work', onOpenCustomize() {},
+    })));
+  assert.match(identity, /work@example\.test/);
+  assert.doesNotMatch(identity, /Uso atual/);
+  for (const pinned of [false, true]) {
+    const header = renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
+      React.createElement(MacPanelHeader, { focusId: 'anthropic', pinned, onPin() {}, onOpenSettings() {} })));
+    assert.equal((header.match(/<button/g) || []).length, 4);
+    assert.doesNotMatch(header, /AI Usage|mac-view-switch/);
+    assert.match(header, /mac-pin-button/);
+    assert.match(header, new RegExp(`aria-label="${pinned ? 'Fechar o painel ao clicar fora' : 'Manter o painel aberto'}" aria-pressed="${pinned}"`));
+    assert.match(header, /aria-label="Redefinir tamanho do painel"/);
+  }
+  const overviewHeader = renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
+    React.createElement(MacPanelHeader, { view: 'list', pinned: true, onView() {}, onPin() {}, onOpenSettings() {} })));
+  assert.match(overviewHeader, /AI Usage/);
+  assert.match(overviewHeader, /aria-label="Lista" aria-pressed="true"/);
+  assert.match(overviewHeader, /aria-label="Abas" aria-pressed="false"/);
+  assert.match(overviewHeader, /aria-label="Fechar o painel ao clicar fora" aria-pressed="true"/);
+  assert.doesNotMatch(overviewHeader, /aria-label="Redefinir tamanho do painel"/);
+  assert.equal((overviewHeader.match(/<button/g) || []).length, 5);
+
+  const hiddenLinks = { always: ['metric:session'], demand: [], off: { 'link:Status': true, 'link:Dashboard': true } };
+  for (const View of [MacDashboard, ProviderSection]) {
+    const html = renderToStaticMarkup(React.createElement(TooltipProvider, {},
+      React.createElement(LanguageProvider, { language: 'pt-BR' },
+        React.createElement(View, {
+          card, cards: [card], layout: { ...emptyLayout(), rows: { anthropic: hiddenLinks }, showAs: 'used' },
+          payload, nowMs, onOpenCustomize() {},
+        }))));
+    assert.ok(!/status\.anthropic|>Status<|>Dashboard</.test(html), 'both views respect hidden links');
+    assert.match(html, /46% usados/, 'both views respect usage display preference');
+  }
+  const collapsed = renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
+    React.createElement(MacDashboard, {
+      cards: [{ ...card, rows: [...card.rows, { kind: 'block', label: 'Credits', body: ['extra details'] }] }],
+      layout: { ...emptyLayout(), collapsed: { anthropic: true } }, nowMs, payload, focusId: 'anthropic',
+      onOpenCustomize() {}, onToggleCollapse() {},
+    })));
+  assert.ok(!collapsed.includes('extra details'), 'on-demand rows stay collapsed');
+  assert.match(collapsed, /aria-expanded="false"/);
+
+  // The same provider can be compact in the overview and detailed in its own
+  // dropdown. Its editor must show which mode owns each switch.
+  const modeCard = { ...card, rows: [...card.rows, { kind: 'text', label: 'Details', value: 'individual detail' }] };
+  const separate = {
+    ...emptyLayout(),
+    collapsed: { anthropic: true },
+    rows: { anthropic: { always: ['session'], demand: ['text:Details'], off: { 'text:Details': true, 'link:Status': true, 'link:Dashboard': true } } },
+    individual: {
+      collapsed: {}, hideExtras: false,
+      rows: { anthropic: { always: ['text:Details', 'session'], demand: [], off: { 'link:Status': true } } },
+    },
+  };
+  function renderView(View, props) {
+    return renderToStaticMarkup(React.createElement(TooltipProvider, {},
+      React.createElement(LanguageProvider, { language: 'pt-BR' }, React.createElement(View, props))));
+  }
+  const compactList = renderView(ProviderSection, { card: modeCard, payload, nowMs, layout: layoutForProviderView(separate, 'overview') });
+  assert.doesNotMatch(compactList, /individual detail|>Painel</);
+  const detailedDropdown = renderView(MacDashboard, {
+    cards: [modeCard], payload, nowMs, focusId: card.id,
+    layout: layoutForProviderView(separate, 'individual'), onOpenCustomize() {}, onToggleCollapse() {},
+  });
+  assert.match(detailedDropdown, /individual detail/);
+  assert.match(detailedDropdown, />Painel</);
+  assert.ok(detailedDropdown.indexOf('individual detail') < detailedDropdown.indexOf('mac-metric-heading'), 'independent row order reaches the dropdown');
+  for (const view of ['overview', 'individual']) {
+    const settings = renderView(ProviderDetail, {
+      card: modeCard, layout: layoutForProviderView(separate, view), view,
+      onView() {}, onToggleCollapse() {}, onReorderRows() {}, onToggleRow() {}, onToggleStar() {},
+    });
+    assert.match(settings, new RegExp(`id="provider-view-${view}"[^>]*aria-selected="true"`));
+    assert.match(settings, /Lista completa/);
+    assert.match(settings, /Individual/);
+    assert.match(settings, /role="tabpanel"/);
+    function checked(label) {
+      const button = (settings.match(/<button[^>]*>/g) || []).find((tag) => tag.includes(`aria-label="${label}"`));
+      assert.ok(button, label);
+      return button.match(/aria-checked="([^"]+)"/)?.[1];
+    }
+    assert.equal(checked('Mostrar detalhes ao abrir'), String(view === 'individual'));
+    assert.equal(checked('Mostrar Painel'), String(view === 'individual'));
+  }
+
+  // MiniMax exposes the same configurable links in both modes. Their visibility
+  // follows each mode's saved choice, including account-qualified provider ids.
+  const minimaxCard = { ...card, id: 'minimax@work', title: 'MiniMax' };
+  assert.deepEqual(providerLinks(minimaxCard.id), [
+    { label: 'Dashboard', url: 'https://platform.minimax.io/user-center/payment/token-plan' },
+    { label: 'API Keys', url: 'https://platform.minimax.io/user-center/basic-information/interface-key' },
+  ]);
+  const minimaxLayout = {
+    ...emptyLayout(),
+    rows: { [minimaxCard.id]: { always: ['session'], demand: [], off: { 'link:Dashboard': true, 'link:API Keys': true } } },
+    individual: { rows: { [minimaxCard.id]: { always: ['session'], demand: [], off: { 'link:API Keys': true } } }, collapsed: {}, hideExtras: false },
+  };
+  for (const view of ['overview', 'individual']) {
+    const layout = layoutForProviderView(minimaxLayout, view);
+    const editor = renderView(ProviderDetail, {
+      card: minimaxCard, layout, view,
+      onView() {}, onReorderRows() {}, onToggleRow() {}, onToggleStar() {},
+    });
+    assert.match(editor, /aria-label="Mostrar Painel"/, 'MiniMax offers the dashboard preference');
+    assert.match(editor, /aria-label="Mostrar Chaves de API"/, 'MiniMax offers the API keys preference');
+    const dashboard = renderView(MacDashboard, {
+      cards: [minimaxCard], layout, payload, nowMs, focusId: view === 'individual' ? minimaxCard.id : '',
+      onOpenCustomize() {},
+    });
+    assert.equal(dashboard.includes('>Painel<'), view === 'individual');
+    assert.doesNotMatch(dashboard, />Chaves de API</);
+  }
 
   function note(resetTimes) {
     const html = renderToStaticMarkup(
@@ -113,7 +247,7 @@ try {
     React.createElement(MacDashboard, {
       cards: [at(used)], layout: emptyLayout(), nowMs, payload,
       onOpenCustomize() {}, onOpenSettings() {},
-    }))).match(/<strong data-usage="(\w+)">\d+%<\/strong>/)?.[1];
+    }))).match(/<strong data-usage="(\w+)">\d+%[^<]*<\/strong>/)?.[1];
   const listNumber = (used) => renderToStaticMarkup(React.createElement(TooltipProvider, {},
     React.createElement(LanguageProvider, { language: 'pt-BR' },
       React.createElement(ProviderSection, { card: at(used), layout: emptyLayout(), nowMs })))).match(/class="plain-btn[^"]*" data-usage="(\w+)"/)?.[1];

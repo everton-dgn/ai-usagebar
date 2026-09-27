@@ -35,6 +35,8 @@ pub struct HostFacts {
     /// Vendors whose active login the popover can switch. Only the macOS host
     /// fills this; an empty list hides the control everywhere else.
     pub accounts: Vec<AccountSwitchFact>,
+    /// Local display identity, kept out of the public report and usage cache.
+    pub account_emails: std::collections::BTreeMap<String, String>,
 }
 
 /// One vendor's switchable logins, as the popover renders them beside each
@@ -93,6 +95,7 @@ impl Default for HostFacts {
             updates: String::new(),
             version: String::new(),
             accounts: Vec::new(),
+            account_emails: Default::default(),
         }
     }
 }
@@ -213,7 +216,13 @@ pub fn wrap_report(
                     obj.insert("primary".into(), primary.clone());
                 }
                 if let Some(entries) = map.get("entries") {
-                    obj.insert("entries".into(), with_sign_in_hints(entries));
+                    let mut entries = with_sign_in_hints(entries);
+                    if let Some(list) = entries.as_array_mut() {
+                        for entry in list {
+                            attach_account_email(entry, facts);
+                        }
+                    }
+                    obj.insert("entries".into(), entries);
                 }
             }
             payload
@@ -224,6 +233,17 @@ pub fn wrap_report(
             ));
             payload
         }
+    }
+}
+
+/// Enrich full and targeted reports with the identity of the matching account.
+pub(crate) fn attach_account_email(entry: &mut Value, facts: &HostFacts) {
+    let email = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|id| facts.account_emails.get(id));
+    if let Some(email) = email {
+        entry["email"] = json!(sanitize_untrusted_field(email));
     }
 }
 
@@ -587,5 +607,31 @@ mod tests {
     fn no_switchable_accounts_is_an_empty_object() {
         let payload = wrap_report(&sample_report(), &facts("1.10.0", false), 0, None);
         assert_eq!(payload["accounts"], json!({}));
+    }
+
+    #[test]
+    fn local_email_is_attached_only_to_its_matching_tray_entry() {
+        let report = r#"{"entries":[{"id":"openai@work"},{"id":"openai@home"}]}"#;
+        let mut host = facts("1.10.0", false);
+        host.account_emails
+            .insert("openai@work".into(), "work@example.test\u{7}".into());
+        let payload = wrap_report(report, &host, 0, None);
+        assert_eq!(payload["entries"][0]["email"], "work@example.test");
+        assert!(payload["entries"][1].get("email").is_none());
+        assert!(!report.contains("email"));
+    }
+
+    #[test]
+    fn targeted_refresh_keeps_the_same_sanitized_identity_as_a_full_report() {
+        let mut host = facts("1.10.0", false);
+        host.account_emails
+            .insert("openai@work".into(), "work@example.test\u{7}".into());
+        let mut entry = json!({"id": "openai@work", "status": "ready", "sections": []});
+        attach_account_email(&mut entry, &host);
+        assert_eq!(entry["email"], "work@example.test");
+
+        let mut other = json!({"id": "openai@home", "status": "ready"});
+        attach_account_email(&mut other, &host);
+        assert!(other.get("email").is_none());
     }
 }

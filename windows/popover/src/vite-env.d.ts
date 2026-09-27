@@ -8,8 +8,8 @@ declare global {
     ipc?: { postMessage: (msg: string) => void };
     __AIUB_APPLY__?: (raw: unknown) => void;
     __AIUB_LOCKCLICKS__?: (ms: number) => void;
-    __AIUB_VISIBLE__?: (visible: boolean) => void;
+    __AIUB_VISIBLE__?: (visible: boolean, provider?: string | null, screen?: "dashboard" | "settings") => void;
     /** Open on one provider's tab (a menu-bar provider item), or `null` to open as before. */
-    __AIUB_FOCUS__?: (id: string | null) => void;
+    __AIUB_FOCUS__?: (id: string | null, revision?: number, screen?: "dashboard" | "settings") => void;
   }
 }

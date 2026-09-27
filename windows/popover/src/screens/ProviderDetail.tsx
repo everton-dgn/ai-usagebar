@@ -7,7 +7,7 @@ import {
   type DragStartEvent,
 } from "@dnd-kit/core";
 import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { DragHandle } from "@/components/DragHandle";
 import {
   handleRowDragEnd,
@@ -22,13 +22,16 @@ import {
 import MdiStar from "~icons/mdi/star";
 import MdiStarOutline from "~icons/mdi/star-outline";
 import { Switch } from "@/components/ui/switch";
-import type { Card, Layout, Row } from "@/lib/types";
+import type { Card, Layout, ProviderView, Row } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
-import { isStarred, prefsForCard, rowKey } from "../model.js";
+import { isStarred, prefsForCard, providerLinks, rowKey } from "../model.js";
 
 interface ProviderDetailProps {
   card?: Card;
   layout: Layout;
+  view?: ProviderView;
+  onView?: (view: ProviderView) => void;
+  onToggleCollapse?: (expanded: boolean) => void;
   starError?: string;
   onReorderRows: (lists: RowLists) => void;
   onToggleRow: (key: string, on: boolean) => void;
@@ -40,7 +43,7 @@ interface ProviderDetailProps {
  * CustomizeProviderDetailView (L2): Always Visible and On Demand grouped cards. Rows drag within
  * a card or across the divider; an empty card shows the dashed "Drag metrics here" target.
  */
-export function ProviderDetail({ card, layout, starError, onReorderRows, onToggleRow, onToggleStar, onRename }: ProviderDetailProps) {
+export function ProviderDetail({ card, layout, view = "overview", onView, onToggleCollapse, starError, onReorderRows, onToggleRow, onToggleStar, onRename }: ProviderDetailProps) {
   const { t } = useI18n();
   const sensors = useTraySensors();
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -74,6 +77,24 @@ export function ProviderDetail({ card, layout, starError, onReorderRows, onToggl
   }
 
   const overlayRow = activeId ? byKey.get(activeId) : undefined;
+  const views: Array<[ProviderView, string]> = [["overview", "Full list"], ["individual", "Individual"]];
+
+  function changeView(next: ProviderView) {
+    setActiveId(null);
+    setDraft(null);
+    onView?.(next);
+  }
+
+  function onViewKeyDown(event: KeyboardEvent<HTMLButtonElement>, current: ProviderView) {
+    let next: ProviderView;
+    if (event.key === "ArrowRight" || event.key === "ArrowLeft") next = current === "overview" ? "individual" : "overview";
+    else if (event.key === "Home") next = "overview";
+    else if (event.key === "End") next = "individual";
+    else return;
+    event.preventDefault();
+    changeView(next);
+    document.getElementById(`provider-view-${next}`)?.focus();
+  }
 
   return (
     <DndContext
@@ -90,6 +111,33 @@ export function ProviderDetail({ card, layout, starError, onReorderRows, onToggl
     >
       <div className="flex flex-col gap-[var(--section-gap)]">
         {onRename ? <NameField card={card} onRename={onRename} /> : null}
+        {onView ? (
+          <div className="flex flex-col gap-2">
+            <div className="settings-tabs" role="tablist" aria-label={t("Customize view")}>
+              {views.map(([id, label]) => (
+                <button key={id} type="button" id={`provider-view-${id}`} className="settings-tab"
+                  role="tab" aria-selected={view === id} aria-controls="provider-view-panel"
+                  tabIndex={view === id ? 0 : -1} onClick={() => changeView(id)}
+                  onKeyDown={(event) => onViewKeyDown(event, id)}>
+                  {t(label)}
+                </button>
+              ))}
+            </div>
+            <p className="px-1 text-[length:var(--sz-badge)] text-label-2">
+              {t(view === "individual" ? "Changes below apply only to this provider's individual dropdown." : "Changes below apply only to this provider in the full list.")}
+            </p>
+          </div>
+        ) : null}
+        <div id={onView ? "provider-view-panel" : undefined} role={onView ? "tabpanel" : undefined}
+          aria-labelledby={onView ? `provider-view-${view}` : undefined}
+          className="flex flex-col gap-[var(--section-gap)]">
+        {onToggleCollapse ? (
+          <div className="card-surface flex items-center gap-[10px] p-[var(--pad-control)]">
+            <span className="min-w-0 flex-1">{t("Show details when opened")}</span>
+            <Switch checked={!layout.collapsed[card.id]} aria-label={t("Show details when opened")}
+              onCheckedChange={(on) => onToggleCollapse(on === true)} />
+          </div>
+        ) : null}
         <MetricSection
           byKey={byKey}
           cardId={card.id}
@@ -101,6 +149,23 @@ export function ProviderDetail({ card, layout, starError, onReorderRows, onToggl
           onToggleRow={onToggleRow}
           onToggleStar={onToggleStar}
         />
+        {providerLinks(card.id).length ? (
+          <div className="flex flex-col gap-[var(--header-card-gap)]">
+            <div className="section-title">{t("Links")}</div>
+            <div className="card-surface">
+              {providerLinks(card.id).map((link) => (
+                <div key={link.label} className="flex items-center gap-[10px] px-[var(--pad-control)] py-[var(--pad-control)]">
+                  <span className="min-w-0 flex-1">{t(link.label)}</span>
+                  <Switch
+                    checked={!prefs.off[`link:${link.label}`]}
+                    aria-label={`${t("Show")} ${t(link.label)}`}
+                    onCheckedChange={(on) => onToggleRow(`link:${link.label}`, on === true)}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
         <MetricSection
           byKey={byKey}
           cardId={card.id}
@@ -115,6 +180,7 @@ export function ProviderDetail({ card, layout, starError, onReorderRows, onToggl
         {starError ? (
           <div className="px-1 text-[length:var(--sz-badge)] text-meter-red">{t(starError)}</div>
         ) : null}
+        </div>
       </div>
       <DragOverlay dropAnimation={null}>
         {overlayRow ? (

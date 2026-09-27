@@ -47,6 +47,10 @@ path = "src/bin/ai-usagebar-tui.rs"
 name = "ai-usagebar-tray"
 path = "src/bin/ai-usagebar-tray.rs"
 
+[[test]]
+name = "macos_status_items"
+harness = false
+
 [dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "fs", "process", "signal", "io-util"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

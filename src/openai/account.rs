@@ -65,6 +65,20 @@ pub fn account_id_in(auth_path: &Path) -> Option<String> {
     account_id_of(&raw)
 }
 
+/// Display identity for the tray, decoded locally without refreshing a login.
+/// This never enters the usage snapshot or its on-disk cache.
+pub fn account_email_in(auth_path: &Path) -> Option<String> {
+    let raw = std::fs::read(auth_path).ok()?;
+    let value: Value = serde_json::from_slice(&raw).ok()?;
+    let claims = crate::jwt::claims(value.get("tokens")?.get("id_token")?.as_str()?)?;
+    claims
+        .get("email")?
+        .as_str()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(str::to_owned)
+}
+
 fn account_id_of(raw: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(raw).ok()?;
     let tokens = value.get("tokens")?;
@@ -533,6 +547,25 @@ fn restrict_dir(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_email_is_read_without_changing_the_login() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"email":" person@example.test "}"#);
+        let raw = json!({"tokens": {"id_token": format!("x.{claims}.x")}}).to_string();
+        std::fs::write(&path, &raw).unwrap();
+        assert_eq!(
+            account_email_in(&path).as_deref(),
+            Some("person@example.test")
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        std::fs::write(&path, r#"{"tokens":{"id_token":"invalid"}}"#).unwrap();
+        assert_eq!(account_email_in(&path), None);
+        assert_eq!(account_email_in(&dir.path().join("missing")), None);
+    }
 
     fn auth(account_id: &str, refresh: &str) -> String {
         format!(

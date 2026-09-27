@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Footer, TopBar } from "@/components/Chrome";
 import type { RowAction } from "@/components/RowMenu";
 import type { RowLists } from "@/components/dnd";
-import type { Layout, Screen } from "@/lib/types";
+import type { Layout, ProviderView, Screen } from "@/lib/types";
 import { LanguageProvider, translate } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { About } from "@/screens/About";
@@ -16,9 +16,11 @@ import {
   applyCardLayout,
   applyTheme,
   emptyLayout,
+  focusOnVisibility,
   hintPending,
   emptyPayload,
   loadLayout,
+  layoutForProviderView,
   memoryStorage,
   mergeVisibleOrder,
   moveRowToList,
@@ -27,6 +29,7 @@ import {
   prefsForCard,
   projectCards,
   renameCard,
+  resetProviderViewLayout,
   resolvedTheme,
   saveLayout,
   seedStars,
@@ -34,36 +37,48 @@ import {
   setRowEnabled,
   stripCommand,
   toggleStar,
+  updateProviderViewLayout,
 } from "./model.js";
-import { measurePanelHeight } from "./panel-size.js";
+import { measurePanelHeight, panelHeight } from "./panel-size.js";
 
 type Direction = "back" | "forward";
 
 /** Screens ordered as the OpenUsage pager lays them out: dashboard ← customize/provider → settings. */
 const SCREEN_DEPTH: Record<Screen, number> = { dashboard: 0, customize: 1, provider: 2, settings: 3, about: 4 };
 
-function resolveStorage() {
+function resolveStorage(onError: () => void) {
   try {
     const ls = window.localStorage;
     ls.setItem("__aiub_t", "1");
     ls.removeItem("__aiub_t");
     return ls;
   } catch {
+    onError();
     return memoryStorage();
   }
 }
 
 export default function App() {
-  const storageRef = useRef(resolveStorage());
+  const [initial] = useState(() => {
+    let error = false;
+    let durable = true;
+    const storage = resolveStorage(() => { error = true; durable = false; });
+    const layout = loadLayout(storage, () => { error = true; });
+    return { storage, layout, error, durable };
+  });
+  const storageRef = useRef(initial.storage);
+  const [storageError, setStorageError] = useState(initial.error);
   const shellRef = useRef<HTMLDivElement>(null);
   const [payload, setPayload] = useState(() => emptyPayload(""));
-  const [layout, setLayout] = useState<Layout>(() => loadLayout(storageRef.current));
+  const [layout, setLayout] = useState<Layout>(initial.layout);
   const [screen, setScreen] = useState<Screen>("dashboard");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [direction, setDirection] = useState<Direction>("forward");
   const [providerId, setProviderId] = useState("");
-  // Set while a menu-bar provider item opened the popover: the tabs view on it.
+  const [providerView, setProviderView] = useState<ProviderView>("overview");
+  // A menu-bar click opens only that provider/account, without the overview tabs.
   const [focusId, setFocusId] = useState("");
+  const [presentationRevision, setPresentationRevision] = useState(0);
   // Where the provider detail was opened from, so Back returns there: the
   // Customize list, or the dashboard header's Customize shortcut.
   const [providerFrom, setProviderFrom] = useState<Screen>("customize");
@@ -83,6 +98,9 @@ export default function App() {
   );
   const visible = useMemo(() => applyCardLayout(cards, layout), [cards, layout]);
   const currentCard = cards.find((card) => card.id === providerId);
+  const providerLayout = layoutForProviderView(layout, providerView);
+  const dashboardView: ProviderView = focusId ? "individual" : "overview";
+  const dashboardLayout = layoutForProviderView(layout, dashboardView);
 
   // The host decides whether a blur or an outside click closes the popover.
   useEffect(() => {
@@ -91,8 +109,13 @@ export default function App() {
 
   function commit(next: Layout) {
     setLayout(next);
-    saveLayout(storageRef.current, next);
+    persistLayout(next);
     sendCommand("strip", stripCommand(next, cards));
+  }
+
+  function persistLayout(next: Layout) {
+    const saved = saveLayout(storageRef.current, next);
+    setStorageError(!saved || !initial.durable);
   }
 
   function go(next: Screen) {
@@ -151,20 +174,25 @@ export default function App() {
       setLayout((current) => {
         const cards = projectCards(next, Date.now());
         const synced = seedStars(absorbPayload(current, next.entries), cards);
-        if (synced !== current) saveLayout(storageRef.current, synced);
+        // Do not overwrite unreadable preferences with defaults on refresh.
+        if (synced !== current && !initial.error) persistLayout(synced);
         sendCommand("strip", stripCommand(synced, cards));
         return synced;
       });
     };
-    window.__AIUB_FOCUS__ = (id) => {
+    window.__AIUB_FOCUS__ = (id, revision, targetScreen = "dashboard") => {
       setFocusId(typeof id === "string" ? id : "");
-      if (id) setScreen("dashboard");
+      // Even reopening the same provider must acknowledge this native request.
+      if (revision !== undefined) setPresentationRevision(revision);
+      if (id || revision !== undefined) setScreen(targetScreen);
     };
-    window.__AIUB_VISIBLE__ = (visible) => {
+    window.__AIUB_VISIBLE__ = (visible, provider, targetScreen = "dashboard") => {
       // Visibility changes are also sizing boundaries. ResizeObserver callbacks
       // can be suspended while WebView2 is hidden, so force a fresh measurement
       // as soon as the native host opens the popover again.
       setPopoverVisible(visible);
+      setFocusId((current) => focusOnVisibility(current, visible, provider));
+      if (visible && provider !== undefined) setScreen(targetScreen);
       if (visible) return;
       // Closing the popover resets navigation: back to the dashboard, scrolled to the top,
       // menus closed (OpenUsage "Closing").
@@ -172,7 +200,6 @@ export default function App() {
       setRowMenuOpen(false);
       setResetArmed(false);
       setScreen("dashboard");
-      setFocusId("");
       if (scrollRef.current) scrollRef.current.scrollTop = 0;
     };
     window.__AIUB_LOCKCLICKS__ = (ms) => {
@@ -187,6 +214,7 @@ export default function App() {
     sendCommand("ready");
     return () => {
       delete window.__AIUB_APPLY__;
+      delete window.__AIUB_FOCUS__;
       delete window.__AIUB_LOCKCLICKS__;
       delete window.__AIUB_VISIBLE__;
     };
@@ -204,12 +232,14 @@ export default function App() {
     const report = () => {
       frame = 0;
       const measured = measurePanelHeight(shell);
-      // Same floor as tray MIN_POPOVER_HEIGHT: keep room for the Options menu
-      // (side=top from the footer, nine rows) so Radix does not scroll the list.
-      const height = measured > 0 ? Math.max(measured, 360) : measured;
+      const compact = payload.os === "macos" && !!focusId && screen === "dashboard";
+      const height = panelHeight(measured, compact);
       if (height <= 0 || height === last) return;
       last = height;
-      sendCommand("resize", { height, theme: resolvedTheme(layout.theme) });
+      sendCommand("resize", {
+        height, compact, theme: resolvedTheme(layout.theme),
+        provider: focusId, screen, revision: presentationRevision,
+      });
     };
     const schedule = () => {
       if (frame === 0) frame = window.setTimeout(report, 0);
@@ -224,7 +254,7 @@ export default function App() {
       observer.disconnect();
       if (frame !== 0) window.clearTimeout(frame);
     };
-  }, [screen, payload, layout, popoverVisible, focusId]);
+  }, [screen, payload, layout, popoverVisible, focusId, presentationRevision]);
 
   function onKeyDown(event: KeyboardEvent) {
     if (locked || event.defaultPrevented || optionsOpen || rowMenuOpen) return;
@@ -287,28 +317,24 @@ export default function App() {
     sendCommand("detect");
   }
 
-  function resetProviderRows(id: string) {
+  function resetProviderRows(id: string, view: ProviderView = "overview") {
     if (!id) return;
-    const rows = { ...layout.rows };
-    delete rows[id];
-    const collapsed = { ...layout.collapsed };
-    delete collapsed[id];
-    commit({ ...layout, collapsed, rows });
+    commit(resetProviderViewLayout(layout, view, id));
   }
 
-  function openProvider(id: string, from: Screen) {
+  function openProvider(id: string, from: Screen, view: ProviderView = dashboardView) {
     setProviderId(id);
+    setProviderView(view);
     setProviderFrom(from);
     go("provider");
   }
 
   function reorderRows(lists: RowLists) {
     if (!currentCard) return;
-    const prevOff = prefsForCard(currentCard, layout).off || {};
-    commit({
-      ...layout,
-      rows: { ...layout.rows, [providerId]: { always: lists.always, demand: lists.demand, off: prevOff } },
-    });
+    const prevOff = prefsForCard(currentCard, providerLayout).off || {};
+    commit(updateProviderViewLayout(layout, providerView, {
+      rows: { ...providerLayout.rows, [providerId]: { always: lists.always, demand: lists.demand, off: prevOff } },
+    }));
   }
 
   // Row context menu. Hide / Always show / Show on demand rewrite that provider's row prefs the
@@ -350,11 +376,12 @@ export default function App() {
 
   const macHeader = (
     <MacPanelHeader
+      focusId={focusId}
       view={layout.panelView}
       pinned={layout.pinned}
       onView={(panelView) => commit({ ...layout, panelView })}
       onPin={(pinned) => commit({ ...layout, pinned })}
-      onOpenSettings={() => go("settings")}
+      onOpenSettings={() => focusId ? openProvider(focusId, "dashboard", "individual") : go("settings")}
     />
   );
 
@@ -367,13 +394,18 @@ export default function App() {
         payload.os === "macos" && "mac-panel",
       )}
     >
+      {storageError ? (
+        <div role="alert" className="px-[var(--panel-pad)] py-2 text-[length:var(--sz-badge)] text-meter-red">
+          {translate(layout.language, "Preferences storage is unavailable. Your changes may not survive a restart.")}
+        </div>
+      ) : null}
       {screen !== "dashboard" ? (
         <TopBar
           resetArmed={resetArmed}
           title={title}
-          resetLabel={screen === "customize" ? translate(layout.language, "Reset All Customization") : screen === "provider" ? `${translate(layout.language, "Reset")} ${title}` : undefined}
+          resetLabel={screen === "customize" ? translate(layout.language, "Reset All Customization") : screen === "provider" ? `${translate(layout.language, "Reset")} ${title} · ${translate(layout.language, providerView === "individual" ? "Individual" : "Full list")}` : undefined}
           onBack={goBack}
-          onReset={screen === "customize" ? resetAll : screen === "provider" ? () => resetProviderRows(providerId) : undefined}
+          onReset={screen === "customize" ? resetAll : screen === "provider" ? () => resetProviderRows(providerId, providerView) : undefined}
         />
       ) : null}
       <div ref={scrollRef} data-scroll className="min-h-0 flex-1 overflow-y-auto">
@@ -391,13 +423,16 @@ export default function App() {
               <>
                 {macHeader}
                 <MacDashboard
-                  cards={visible}
-                  layout={layout}
+                  cards={focusId ? cards : visible}
+                  layout={dashboardLayout}
                   nowMs={nowMs}
                   payload={payload}
                   focusId={focusId}
                   onOpenCustomize={() => go("customize")}
                   onSwitchAccount={(vendor, label) => sendCommand("switch-account", { vendor, label })}
+                  onToggleCollapse={(id) => commit(updateProviderViewLayout(layout, dashboardView, {
+                    collapsed: { ...dashboardLayout.collapsed, [id]: !dashboardLayout.collapsed[id] },
+                  }))}
                 />
               </>
             ) : (
@@ -446,8 +481,14 @@ export default function App() {
           ) : null}
           {screen === "provider" ? (
             <ProviderDetail
+              key={providerId}
               card={currentCard}
-              layout={layout}
+              layout={providerLayout}
+              view={providerView}
+              onView={payload.os === "macos" ? setProviderView : undefined}
+              onToggleCollapse={(expanded) => commit(updateProviderViewLayout(layout, providerView, {
+                collapsed: { ...providerLayout.collapsed, [providerId]: !expanded },
+              }))}
               starError={starError}
               onReorderRows={reorderRows}
               onToggleStar={(key) => {
@@ -462,10 +503,9 @@ export default function App() {
               }}
               onToggleRow={(key, on) => {
                 if (!currentCard) return;
-                commit({
-                  ...layout,
-                  rows: { ...layout.rows, [providerId]: setRowEnabled(prefsForCard(currentCard, layout), key, on) },
-                });
+                commit(updateProviderViewLayout(layout, providerView, {
+                  rows: { ...providerLayout.rows, [providerId]: setRowEnabled(prefsForCard(currentCard, providerLayout), key, on) },
+                }));
               }}
               onRename={(name) => {
                 if (!currentCard) return;
@@ -507,7 +547,7 @@ export default function App() {
           ) : null}
         </div>
       </div>
-      <Footer
+      {!(payload.os === "macos" && focusId && screen === "dashboard") ? <Footer
         locked={locked}
         nowMs={nowMs}
         optionsOpen={optionsOpen}
@@ -524,7 +564,7 @@ export default function App() {
           go("settings");
         }}
         onOptionsOpenChange={setOptionsOpen}
-      />
+      /> : null}
     </div>
     </LanguageProvider>
   );

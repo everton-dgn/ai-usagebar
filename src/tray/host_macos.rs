@@ -415,7 +415,7 @@ fn spawn_worker(
                             break;
                         }
                         Ok(WorkerCmd::RefreshEntry(id)) => {
-                            rt.block_on(push_entry(&proxy, &id));
+                            rt.block_on(push_entry(&proxy, &facts, &id));
                         }
                         Ok(WorkerCmd::CheckUpdate) => {
                             rt.block_on(check_release(&proxy, &facts));
@@ -653,8 +653,30 @@ async fn check_release(proxy: &EventLoopProxy<UserEvent>, facts: &SharedFacts) {
     let _ = proxy.send_event(UserEvent::Facts);
 }
 
-async fn push_entry(proxy: &EventLoopProxy<UserEvent>, id: &str) {
-    let entry = match crate::report::collect_entry_json(id).await {
+async fn push_entry(proxy: &EventLoopProxy<UserEvent>, facts: &SharedFacts, id: &str) {
+    let entry = refreshed_entry_with(
+        id,
+        || {
+            refresh_account_facts(facts);
+            facts_snapshot(facts)
+        },
+        crate::report::collect_entry_json(id),
+    )
+    .await;
+    if let Some(entry) = entry {
+        let _ = proxy.send_event(UserEvent::Entry(entry));
+    }
+}
+
+/// Reload identity before fetching usage, then carry that snapshot with the
+/// entry. Applying the event must not substitute older or unrelated UI facts.
+async fn refreshed_entry_with(
+    id: &str,
+    refresh_facts: impl FnOnce() -> HostFacts,
+    report: impl std::future::Future<Output = Result<String, String>>,
+) -> Option<Value> {
+    let facts = refresh_facts();
+    let mut entry = match report.await {
         Ok(json) => serde_json::from_str::<Value>(&json)
             .ok()
             .and_then(|v| v.get("entries")?.as_array()?.first().cloned()),
@@ -664,10 +686,9 @@ async fn push_entry(proxy: &EventLoopProxy<UserEvent>, id: &str) {
             "error": crate::display::sanitize_untrusted_field(&error),
             "sections": [],
         })),
-    };
-    if let Some(entry) = entry {
-        let _ = proxy.send_event(UserEvent::Entry(entry));
-    }
+    }?;
+    super::payload::attach_account_email(&mut entry, &facts);
+    Some(entry)
 }
 
 fn apply_payload(state: &mut TrayState, payload: Value) {
@@ -707,8 +728,7 @@ fn apply_facts(state: &mut TrayState) {
     }
 }
 
-fn apply_entry(state: &mut TrayState, mut entry: Value) {
-    super::payload::attach_account_email(&mut entry, &facts_snapshot(&state.facts));
+fn apply_entry(state: &mut TrayState, entry: Value) {
     let Some(id) = entry.get("id").and_then(Value::as_str).map(str::to_owned) else {
         return;
     };
@@ -2351,6 +2371,52 @@ impl SingleInstance {
 #[cfg(test)]
 mod presentation_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn targeted_refresh_reloads_identity_before_collecting_usage() {
+        let facts = Arc::new(Mutex::new(HostFacts::default()));
+        with_facts(&facts, |f| {
+            f.account_emails
+                .insert("openai".into(), "old@example.test".into());
+        });
+        let entry = refreshed_entry_with(
+            "openai",
+            || {
+                with_facts(&facts, |f| {
+                    f.account_emails
+                        .insert("openai".into(), "new@example.test".into());
+                });
+                facts_snapshot(&facts)
+            },
+            async {
+                assert_eq!(
+                    facts_snapshot(&facts).account_emails["openai"],
+                    "new@example.test"
+                );
+                // Later UI facts must not relabel this in-flight result.
+                with_facts(&facts, |f| {
+                    f.account_emails
+                        .insert("openai".into(), "later@example.test".into());
+                });
+                Ok(r#"{"entries":[{"id":"openai","status":"ready"}]}"#.into())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(entry["email"], "new@example.test");
+    }
+
+    #[tokio::test]
+    async fn targeted_refresh_without_a_current_identity_omits_email() {
+        let entry = refreshed_entry_with("openai", HostFacts::default, async {
+            Err("signed out".into())
+        })
+        .await
+        .unwrap();
+        assert_eq!(entry["id"], "openai");
+        assert_eq!(entry["status"], "error");
+        assert!(entry.get("email").is_none());
+    }
 
     fn measurement(revision: u64, provider: &str, screen: &str) -> Value {
         json!({"height": 317, "revision": revision, "provider": provider, "screen": screen})

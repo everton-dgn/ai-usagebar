@@ -71,13 +71,22 @@ pub fn statuses(cfg: &Config) -> Vec<VendorStatus> {
         exists: &|path| path.exists(),
         keychain_has_claude: &keychain_has_claude,
     };
-    statuses_with(cfg, &probes)
+    statuses_with_login_probe(cfg, &probes, &local_login_present)
 }
 
 /// One row per [`VendorId::all`], in that canonical order — so a provider
 /// added to the enum appears in every frontend with no frontend change, which
 /// is the whole point.
 pub fn statuses_with(cfg: &Config, probes: &Probes) -> Vec<VendorStatus> {
+    statuses_with_login_probe(cfg, probes, &|_, path| (probes.exists)(path))
+}
+
+/// Keep content validation injectable without changing the public probe API.
+fn statuses_with_login_probe(
+    cfg: &Config,
+    probes: &Probes,
+    login_present: &dyn Fn(VendorId, &Path) -> bool,
+) -> Vec<VendorStatus> {
     VendorId::all()
         .iter()
         .copied()
@@ -90,7 +99,7 @@ pub fn statuses_with(cfg: &Config, probes: &Probes) -> Vec<VendorStatus> {
                 short_name: id.short_name(),
                 kind: id.auth_kind(),
                 enabled: cfg.is_enabled(id),
-                configured: !needs_credential || credential_present(cfg, id, probes),
+                configured: !needs_credential || credential_present(cfg, id, probes, login_present),
                 needs_credential,
                 env: cfg.api_key_env_for(id).to_string(),
                 login: id.login_command(),
@@ -103,7 +112,12 @@ pub fn statuses_with(cfg: &Config, probes: &Probes) -> Vec<VendorStatus> {
 /// documents an environment variable is satisfied by it — the OAuth ones
 /// included, where it is the headless override — and then by an inline
 /// `api_key`, and only then by its own login artifact.
-fn credential_present(cfg: &Config, id: VendorId, probes: &Probes) -> bool {
+fn credential_present(
+    cfg: &Config,
+    id: VendorId,
+    probes: &Probes,
+    login_present: &dyn Fn(VendorId, &Path) -> bool,
+) -> bool {
     let env = cfg.api_key_env_for(id);
     if !env.is_empty() && (probes.env_set)(env) {
         return true;
@@ -161,11 +175,12 @@ fn credential_present(cfg: &Config, id: VendorId, probes: &Probes) -> bool {
         // only local artifact, and config pins the trusted path.
         VendorId::Supergrok => (probes.exists)(&cfg.supergrok.grok_binary),
         // The Grok Bot desktop app's own credential file is the login.
-        VendorId::Grokbot => any_exists(probes, [crate::grokbot::secrets_path(&cfg.grokbot)]),
-        // The `bl` CLI's own console-login file is the login.
-        VendorId::ModelStudio => {
-            any_exists(probes, [crate::modelstudio::config_path(&cfg.modelstudio)])
+        VendorId::Grokbot => {
+            crate::grokbot::secrets_path(&cfg.grokbot).is_ok_and(|path| login_present(id, &path))
         }
+        // The `bl` CLI's own console-login file is the login.
+        VendorId::ModelStudio => crate::modelstudio::config_path(&cfg.modelstudio)
+            .is_ok_and(|path| login_present(id, &path)),
         // Nothing to check: handled by `needs_credential`, never reached.
         VendorId::Antigravity => true,
         // Key-only providers: the environment and inline checks above are the
@@ -182,6 +197,15 @@ fn credential_present(cfg: &Config, id: VendorId, probes: &Probes) -> bool {
         | VendorId::OpenCodeGo
         | VendorId::Ollama
         | VendorId::OrcaRouter => false,
+    }
+}
+
+/// Validate the same login fields used by automatic provider detection.
+fn local_login_present(id: VendorId, path: &Path) -> bool {
+    match id {
+        VendorId::Grokbot => crate::grokbot::creds::secrets_present_at(path),
+        VendorId::ModelStudio => crate::modelstudio::creds::config_present_at(path),
+        _ => false,
     }
 }
 
@@ -343,6 +367,52 @@ mod tests {
         cfg.copilot.enabled = false;
         let explicit = probes(&|name| name == "GITHUB_COPILOT_TOKEN", &|_| false);
         assert!(row(&statuses_with(&cfg, &explicit), "copilot").configured);
+    }
+
+    #[test]
+    fn app_login_validation_overrides_file_existence_in_the_catalog() {
+        let cfg = Config::default();
+        let existing_files = probes(&|_| false, &|_| true);
+        let missing = statuses_with_login_probe(&cfg, &existing_files, &|_, _| false);
+        assert!(!row(&missing, "grokbot").configured);
+        assert!(!row(&missing, "modelstudio").configured);
+
+        for vendor in [VendorId::Grokbot, VendorId::ModelStudio] {
+            let rows = statuses_with_login_probe(&cfg, &existing_files, &|id, _| id == vendor);
+            assert_eq!(
+                row(&rows, "grokbot").configured,
+                vendor == VendorId::Grokbot
+            );
+            assert_eq!(
+                row(&rows, "modelstudio").configured,
+                vendor == VendorId::ModelStudio
+            );
+        }
+    }
+
+    #[test]
+    fn local_login_probes_require_provider_specific_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, content, expected) in [
+            ("empty", "{}", None),
+            ("malformed", "not-json", None),
+            (
+                "studio",
+                r#"{"access_token":"fixture"}"#,
+                Some(VendorId::ModelStudio),
+            ),
+            (
+                "grok",
+                r#"{"cursor-accounts":{"active":"one","accounts":{"one":{"cursor-access-token":"fixture","cursor-refresh-token":"fixture"}}}}"#,
+                Some(VendorId::Grokbot),
+            ),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, content).unwrap();
+            for vendor in [VendorId::Grokbot, VendorId::ModelStudio] {
+                assert_eq!(local_login_present(vendor, &path), expected == Some(vendor));
+            }
+        }
     }
 
     /// Antigravity has no credential of any kind — the binary probes whichever

@@ -219,13 +219,7 @@ pub fn wrap_report(
                     let mut entries = with_sign_in_hints(entries);
                     if let Some(list) = entries.as_array_mut() {
                         for entry in list {
-                            let email = entry
-                                .get("id")
-                                .and_then(Value::as_str)
-                                .and_then(|id| facts.account_emails.get(id));
-                            if let Some(email) = email {
-                                entry["email"] = json!(sanitize_untrusted_field(email));
-                            }
+                            attach_account_email(entry, facts);
                         }
                     }
                     obj.insert("entries".into(), entries);
@@ -239,6 +233,17 @@ pub fn wrap_report(
             ));
             payload
         }
+    }
+}
+
+/// Enrich full and targeted reports with the identity of the matching account.
+pub(crate) fn attach_account_email(entry: &mut Value, facts: &HostFacts) {
+    let email = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|id| facts.account_emails.get(id));
+    if let Some(email) = email {
+        entry["email"] = json!(sanitize_untrusted_field(email));
     }
 }
 
@@ -614,5 +619,19 @@ mod tests {
         assert_eq!(payload["entries"][0]["email"], "work@example.test");
         assert!(payload["entries"][1].get("email").is_none());
         assert!(!report.contains("email"));
+    }
+
+    #[test]
+    fn targeted_refresh_keeps_the_same_sanitized_identity_as_a_full_report() {
+        let mut host = facts("1.10.0", false);
+        host.account_emails
+            .insert("openai@work".into(), "work@example.test\u{7}".into());
+        let mut entry = json!({"id": "openai@work", "status": "ready", "sections": []});
+        attach_account_email(&mut entry, &host);
+        assert_eq!(entry["email"], "work@example.test");
+
+        let mut other = json!({"id": "openai@home", "status": "ready"});
+        attach_account_email(&mut other, &host);
+        assert!(other.get("email").is_none());
     }
 }

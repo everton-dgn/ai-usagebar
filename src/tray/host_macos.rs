@@ -707,7 +707,8 @@ fn apply_facts(state: &mut TrayState) {
     }
 }
 
-fn apply_entry(state: &mut TrayState, entry: Value) {
+fn apply_entry(state: &mut TrayState, mut entry: Value) {
+    super::payload::attach_account_email(&mut entry, &facts_snapshot(&state.facts));
     let Some(id) = entry.get("id").and_then(Value::as_str).map(str::to_owned) else {
         return;
     };

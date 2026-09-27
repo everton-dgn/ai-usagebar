@@ -36,6 +36,13 @@ try {
     })));
   assert.doesNotMatch(focused, /mac-provider-tabs|balance: 0|Z\.AI|mac-provider-refresh/);
   assert.match(focused, /Claude/);
+  // A missing focused account must never fall back to the overview's primary.
+  const missingFocused = renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
+    React.createElement(MacDashboard, {
+      cards: [card], layout: emptyLayout(), nowMs, payload,
+      focusId: 'openai@removed', onOpenCustomize() {},
+    })));
+  assert.doesNotMatch(missingFocused, /mac-provider-tabs|mac-provider-card|Claude|46%/);
   const identity = renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
     React.createElement(MacDashboard, {
       cards: [{ ...card, id: 'openai@work', title: 'Codex' }],

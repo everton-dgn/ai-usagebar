@@ -239,10 +239,39 @@ fn decrypt_field(key: &[u8; 16], field: Option<&serde_json::Value>) -> Result<St
     })
 }
 
-/// The detection probe: a present, non-empty credential file. Cheap enough to
-/// run at every frontend start — no decrypt, no subprocess.
+/// Require an active account with both stored token fields. An empty app
+/// settings file is not a login. No decrypt, Keychain lookup or subprocess.
 pub fn secrets_present_at(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+    let Some(root) = std::fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+    else {
+        return false;
+    };
+    let Some(accounts) = cursor_accounts_object(&root) else {
+        return false;
+    };
+    let Some(active) = accounts
+        .get("active")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+    else {
+        return false;
+    };
+    let Some(entry) = accounts
+        .get("accounts")
+        .and_then(|entries| entries.get(active))
+    else {
+        return false;
+    };
+    ["cursor-access-token", "cursor-refresh-token"]
+        .iter()
+        .all(|field| {
+            entry
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
 }
 
 #[cfg(test)]
@@ -377,15 +406,31 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_wants_a_non_empty_file() {
+    fn the_probe_requires_an_active_account_with_both_token_fields() {
         let td = TempDir::new().unwrap();
         let path = td.path().join("sand-secrets.json");
         assert!(!secrets_present_at(&path));
         std::fs::write(&path, "").unwrap();
         assert!(!secrets_present_at(&path));
-        std::fs::write(&path, "{}").unwrap();
-        assert!(secrets_present_at(&path));
+        for contents in [
+            "{}",
+            "not-json",
+            r#"{"cursor-accounts":{"active":"missing","accounts":{}}}"#,
+            r#"{"cursor-accounts":{"active":"one","accounts":{"one":{"cursor-access-token":"test"}}}}"#,
+            r#"{"cursor-accounts":{"active":"one","accounts":{"one":{"cursor-access-token":"  ","cursor-refresh-token":"test"}}}}"#,
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            assert!(!secrets_present_at(&path), "{contents}");
+        }
         assert!(!secrets_present_at(td.path()));
+
+        let path = seed_secrets(&td, "test-access", "test-refresh");
+        assert!(secrets_present_at(&path));
+        let mut doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        doc["cursor-accounts"] = doc["cursor-accounts"].to_string().into();
+        std::fs::write(&path, doc.to_string()).unwrap();
+        assert!(secrets_present_at(&path), "macOS string-wrapped account");
     }
 
     #[test]

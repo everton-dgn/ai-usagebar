@@ -405,6 +405,11 @@ stores, editor state, or browser state, and never writes the token to config or
 cache. `GITHUB_COPILOT_TOKEN` is an optional explicit environment override and
 takes precedence over GitHub CLI OAuth.
 
+Automatic provider detection requires the explicit `GITHUB_COPILOT_TOKEN`
+for Copilot; a generic GitHub CLI login alone does not enable it. Grok Bot and
+Model Studio detection also validate their stored login fields rather than
+only checking whether a configuration file exists.
+
 ### Custom providers (static token)
 
 A service ai-usagebar does not know can still get a TUI tab and a

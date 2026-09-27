@@ -94,10 +94,10 @@ fn malformed() -> AppError {
     )
 }
 
-/// The detection probe: a present, non-empty config file. Cheap enough to run
-/// at every frontend start — no parse, no network.
+/// A CLI config can exist without a login. Require the same console session
+/// the fetch reads, without a refresh or any network request.
 pub fn config_present_at(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+    read_from(path).is_ok()
 }
 
 #[cfg(test)]
@@ -188,14 +188,23 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_wants_a_non_empty_file() {
+    fn the_probe_requires_a_console_session() {
         let td = TempDir::new().unwrap();
         let path = td.path().join("config.json");
         assert!(!config_present_at(&path));
         std::fs::write(&path, "").unwrap();
         assert!(!config_present_at(&path));
-        std::fs::write(&path, "{}").unwrap();
-        assert!(config_present_at(&path));
+        for contents in ["{}", "not-json", r#"{"access_token":"  "}"#] {
+            std::fs::write(&path, contents).unwrap();
+            assert!(!config_present_at(&path), "{contents}");
+        }
+        for contents in [
+            r#"{"access_token":"test-token"}"#,
+            r#"{"accessToken":"test-token"}"#,
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            assert!(config_present_at(&path));
+        }
         assert!(!config_present_at(td.path()));
     }
 }

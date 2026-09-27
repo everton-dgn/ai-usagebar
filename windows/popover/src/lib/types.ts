@@ -10,6 +10,13 @@ export type TimeFormat = "12" | "24" | "auto";
 export type Language = "en" | "pt-BR";
 
 export type PanelView = "list" | "tabs";
+export type ProviderView = "overview" | "individual";
+
+export interface ProviderViewLayout {
+  rows: Record<string, RowPrefs>;
+  collapsed: Record<string, boolean>;
+  hideExtras: boolean;
+}
 
 /** Percentages used where a usage bar turns yellow and red. */
 export interface ColorThresholds {
@@ -17,13 +24,13 @@ export interface ColorThresholds {
   red: number;
 }
 
-export interface Layout {
+export interface Layout extends ProviderViewLayout {
   alwaysShowPace: boolean;
   usageGoal: boolean;
   cardOrder: string[];
-  collapsed: Record<string, boolean>;
   hidden: Record<string, boolean>;
-  hideExtras: boolean;
+  /** Independent row/link visibility and expansion for menu-bar provider dropdowns. */
+  individual: ProviderViewLayout;
   hintDismissed: boolean;
   language: Language;
   /** macOS dashboard: all providers stacked, or one at a time behind tabs. */
@@ -36,11 +43,11 @@ export interface Layout {
   /** Show the subscription plan beside each provider's name. */
   showPlan: boolean;
   resetTimes: string;
-  rows: Record<string, RowPrefs>;
   seeded: boolean;
   showAs: string;
   /** Provider id → starred metric keys (max 2). */
   stars: Record<string, string[]>;
+  starsSeeded: boolean;
   /** Menu-bar strip: compact bars glyph, or provider+values text. */
   stripStyle: "bars" | "text";
   theme: string;
@@ -180,6 +187,7 @@ export interface BlockSection {
 export type Section = BlockSection | MetricSection | TextSection;
 
 export interface Entry {
+  email: string;
   displayName: string;
   error: string;
   id: string;

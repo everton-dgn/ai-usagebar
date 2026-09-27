@@ -11,6 +11,10 @@ Each release is also published at
 
 ### Added
 
+- Individual macOS provider dropdowns with account email, pin, reset-size,
+  refresh and customization controls. Metrics, links, row order and expansion
+  are configured independently from the full list; individual panels start
+  with all available details shown. MiniMax includes Dashboard and API Keys links.
 - **Usage bar colors by how much is used.** Bars are green, turn yellow from
   70% used and red from 85%, the same defaults as the Claude Code statusline,
   in both the list and the tabs view. **Settings → Preferences → Bar colors**
@@ -91,6 +95,20 @@ Each release is also published at
 
 ### Fixed
 
+- Menu-bar buttons fill the full bar height, including the main chart button
+  and inactive centered providers. Opening a panel waits for the selected
+  provider's current layout measurement instead of revealing an older panel.
+- Right-clicking the macOS chart icon opens a native Refresh, Settings and Quit
+  menu; left-clicking continues to open the full dashboard.
+- Provider dropdowns fit their content without the full list's minimum height;
+  horizontal resizing keeps the panel centered until it reaches the screen edge.
+- Popover preferences survive temporary missing providers, refreshes and
+  restarts. Clearing every metric star stays cleared, hidden links are
+  respected, and storage failures are reported instead of silently ignored.
+- A generic GitHub CLI login no longer auto-enables Copilot. Grok Bot and
+  Model Studio detection now require usable credential fields instead of
+  accepting any non-empty configuration file.
+- Codex omits unavailable credits and zero-message estimates from its panels.
 - **An account switch no longer brings the previous login's usage back.**
   Switching the Claude or Codex CLI clears the default account's cache, but a
   refresh already running with the old login could write its figures back

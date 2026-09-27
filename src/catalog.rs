@@ -121,7 +121,10 @@ fn credential_present(cfg: &Config, id: VendorId, probes: &Probes) -> bool {
         }
         VendorId::Openai => any_exists(probes, [crate::openai::creds::default_path()]),
         VendorId::Copilot => {
-            any_exists(probes, [crate::copilot::credentials::default_hosts_path()])
+            // A generic GitHub login is relevant only after the user opts in
+            // to Copilot. The explicit token is handled above.
+            cfg.copilot.enabled
+                && any_exists(probes, [crate::copilot::credentials::default_hosts_path()])
         }
         VendorId::CommandCode => match crate::commandcode::creds::default_paths() {
             Ok(paths) => paths.iter().any(|path| (probes.exists)(path)),
@@ -324,6 +327,22 @@ mod tests {
         cfg.zai.api_key = Some(String::new());
         let rows = statuses_with(&cfg, &bare());
         assert!(!row(&rows, "zai").configured);
+    }
+
+    #[test]
+    fn github_artifacts_do_not_configure_copilot_without_an_opt_in() {
+        let mut cfg = Config::default();
+        let github = probes(&|name| matches!(name, "GH_TOKEN" | "GITHUB_TOKEN"), &|_| {
+            true
+        });
+        assert!(!row(&statuses_with(&cfg, &github), "copilot").configured);
+
+        cfg.copilot.enabled = true;
+        assert!(row(&statuses_with(&cfg, &github), "copilot").configured);
+
+        cfg.copilot.enabled = false;
+        let explicit = probes(&|name| name == "GITHUB_COPILOT_TOKEN", &|_| false);
+        assert!(row(&statuses_with(&cfg, &explicit), "copilot").configured);
     }
 
     /// Antigravity has no credential of any kind — the binary probes whichever

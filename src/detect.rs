@@ -1,8 +1,8 @@
 //! Local credential detection — the seed for auto-enabling vendors.
 //!
 //! A fresh install shows the four default vendors and nothing else, even when
-//! the machine already carries a Cursor login, a Kiro database, a `gh` OAuth
-//! session, or a `KILO_API_KEY`. This module answers "which vendors could
+//! the machine already carries a Cursor login, a Kiro database, an explicit
+//! Copilot token, or a `KILO_API_KEY`. This module answers "which vendors could
 //! fetch right now with what is already on disk?" cheaply enough to run at
 //! every frontend start, and turns the answer into a minimal edit of
 //! `config.toml`: `enabled = true` for the vendors that have credentials and
@@ -60,9 +60,8 @@ pub fn has_local_credentials(vendor: VendorId, config: &Config) -> bool {
             config.supergrok.config_path.as_deref(),
         )
         .is_ok_and(|paths| crate::supergrok::direct::read_billing_key(&paths.auth).is_ok()),
-        // File-exists only: decrypting would mean a `secret-tool` / Keychain
-        // subprocess, and a probe that runs at every frontend start must not
-        // spawn one.
+        // Check the active account and encrypted token fields without a
+        // `secret-tool` / Keychain subprocess or decrypting the session.
         VendorId::Grokbot => crate::grokbot::secrets_path(&config.grokbot)
             .map(|path| crate::grokbot::creds::secrets_present_at(&path))
             .unwrap_or(false),
@@ -94,8 +93,7 @@ pub fn has_local_credentials(vendor: VendorId, config: &Config) -> bool {
         }
         VendorId::Ollama => key_present(config, vendor),
         VendorId::OrcaRouter => key_present(config, vendor),
-        // File-exists only, like Grok Bot: parsing the JSON here would be
-        // wasted work — the fetch reads the same file and reports honestly.
+        // The CLI config can exist before login. Require its console token.
         VendorId::ModelStudio => crate::modelstudio::config_path(&config.modelstudio)
             .map(|path| crate::modelstudio::creds::config_present_at(&path))
             .unwrap_or(false),
@@ -129,27 +127,17 @@ fn anthropic_present(config: &Config) -> bool {
     resolve(&target).is_ok()
 }
 
-/// GitHub Copilot detection is a **new** heuristic, deliberately different
-/// from the fetch: the fetch spawns `gh auth token` and lets the GitHub CLI
-/// decide, but a probe that runs at every frontend start must not fork a
-/// subprocess per vendor. So this asks the two questions `gh auth token`
-/// would answer from: an explicit `GITHUB_COPILOT_TOKEN`, or the `hosts.yml`
-/// that `gh auth login` has written, at the path `gh` itself would read
-/// (`copilot::credentials::default_hosts_path`). A present `hosts.yml` is
-/// treated as a login; if the session inside it has been revoked, the fetch
-/// reports that, as it would for any stale credential.
+/// A GitHub CLI login says nothing about Copilot use. Only the explicit
+/// Copilot token opts in to automatic detection. Users who want to reuse
+/// `gh auth token` can still enable Copilot in Settings; fetching is unchanged.
 fn copilot_present() -> bool {
-    if std::env::var_os("GITHUB_COPILOT_TOKEN").is_some_and(|value| !value.is_empty()) {
-        return true;
-    }
-    crate::copilot::credentials::default_hosts_path()
-        .is_ok_and(|path| copilot_hosts_present_at(&path))
+    copilot_present_with(|name| std::env::var_os(name))
 }
 
-/// A `hosts.yml` counts when it is a regular, non-empty file: `gh auth logout`
-/// of the last host leaves an empty document behind, which is not a login.
-pub(crate) fn copilot_hosts_present_at(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+fn copilot_present_with(environment: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    environment("GITHUB_COPILOT_TOKEN")
+        .and_then(|value| value.into_string().ok())
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 /// Antigravity has no API key: it is "present" when a product is running and
@@ -543,18 +531,50 @@ mod tests {
     }
 
     #[test]
-    fn copilot_hosts_file_must_be_a_non_empty_regular_file() {
+    fn github_cli_login_is_not_evidence_of_copilot() {
         let dir = TempDir::new().unwrap();
         let hosts = dir.path().join("hosts.yml");
-        assert!(!copilot_hosts_present_at(&hosts));
-
-        std::fs::write(&hosts, "").unwrap();
-        assert!(!copilot_hosts_present_at(&hosts));
-
         std::fs::write(&hosts, "github.com:\n    user: octocat\n").unwrap();
-        assert!(copilot_hosts_present_at(&hosts));
+        let environment = |name: &str| match name {
+            "GH_CONFIG_DIR" => Some(dir.path().as_os_str().to_owned()),
+            "GH_TOKEN" | "GITHUB_TOKEN" => Some("test-github-token".into()),
+            _ => None,
+        };
+        assert!(!copilot_present_with(environment));
 
-        assert!(!copilot_hosts_present_at(dir.path()));
+        let config_path = dir.path().join("config.toml");
+        let state_path = dir.path().join("detect.json");
+        for force in [false, true] {
+            let report = run_once_with(Some(&config_path), &state_path, force, |vendor, _| {
+                vendor == VendorId::Copilot && copilot_present_with(environment)
+            })
+            .unwrap();
+            assert!(report.enabled.is_empty());
+            assert!(!config_path.exists(), "no spurious enable is persisted");
+        }
+    }
+
+    #[test]
+    fn copilot_detection_requires_a_non_blank_specific_token() {
+        for (token, expected) in [("", false), (" \t\n", false), ("test-copilot-token", true)] {
+            assert_eq!(
+                copilot_present_with(|name| {
+                    (name == "GITHUB_COPILOT_TOKEN").then(|| token.into())
+                }),
+                expected
+            );
+        }
+
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let state_path = dir.path().join("detect.json");
+        let report = run_once_with(Some(&config_path), &state_path, false, |vendor, _| {
+            vendor == VendorId::Copilot
+                && copilot_present_with(|_| Some("test-copilot-token".into()))
+        })
+        .unwrap();
+        assert_eq!(report.enabled, vec![VendorId::Copilot]);
+        assert!(Config::load_from(&config_path).unwrap().copilot.enabled);
     }
 
     /// The whole cycle against a temp config and state, with the probe faked:

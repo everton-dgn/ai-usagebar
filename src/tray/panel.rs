@@ -66,7 +66,18 @@ pub fn close_on_outside_click(open: bool, pinned: bool, on_status_item: bool) ->
 /// before, but never taller than the height the user dragged the panel to.
 /// Below the content's height the list scrolls.
 pub fn fit_popover_height(requested: f64, work_area_height: f64, cap: Option<f64>) -> f64 {
-    let auto = clamp_popover_height(requested, work_area_height);
+    fit_content_height(requested, work_area_height, cap, MIN_POPOVER_HEIGHT)
+}
+
+/// Provider dropdowns have no footer menu, so fit their shorter content too.
+pub fn fit_provider_popover_height(requested: f64, work_area_height: f64, cap: Option<f64>) -> f64 {
+    fit_content_height(requested, work_area_height, cap, MIN_USER_HEIGHT)
+}
+
+fn fit_content_height(requested: f64, work_area_height: f64, cap: Option<f64>, min: f64) -> f64 {
+    let auto = requested
+        .round()
+        .clamp(min, (work_area_height - WORK_AREA_MARGIN).max(min));
     match cap {
         Some(cap) => auto.min(cap.round().max(MIN_USER_HEIGHT)),
         None => auto,
@@ -161,6 +172,46 @@ pub struct PopoverPlacement {
     pub popover_h: f64,
 }
 
+/// One horizontal edge drag. Remember the original centre and the small
+/// distance from the cursor to the grabbed edge so the edge follows the mouse.
+#[derive(Debug, Clone, Copy)]
+pub struct HorizontalResize {
+    center_x: f64,
+    direction: f64,
+    pointer_offset: f64,
+}
+
+impl HorizontalResize {
+    /// AppKit has already resized one side when its first resize event arrives.
+    pub fn start(frame: CocoaRect, previous_width: f64, pointer_x: f64) -> Self {
+        let right = pointer_x >= frame.x + frame.w / 2.0;
+        let edge = if right { frame.max_x() } else { frame.x };
+        Self {
+            center_x: if right {
+                frame.x + previous_width / 2.0
+            } else {
+                frame.max_x() - previous_width / 2.0
+            },
+            direction: if right { 1.0 } else { -1.0 },
+            pointer_offset: pointer_x - edge,
+        }
+    }
+
+    /// Expand both sides equally, changing only horizontal geometry. At a
+    /// screen edge, keep the whole panel visible as normal placement does.
+    pub fn frame(self, current: CocoaRect, pointer_x: f64, visible: CocoaRect) -> CocoaRect {
+        let max_w = (visible.w - 2.0 * POPOVER_SIDE_MARGIN).max(1.0);
+        let w = (2.0 * self.direction * (pointer_x - self.pointer_offset - self.center_x))
+            .round()
+            .max(MIN_POPOVER_WIDTH)
+            .min(max_w);
+        let min_x = visible.x + POPOVER_SIDE_MARGIN;
+        let max_x = visible.max_x() - POPOVER_SIDE_MARGIN - w;
+        let x = (self.center_x - w / 2.0).clamp(min_x, max_x.max(min_x));
+        CocoaRect { x, w, ..current }
+    }
+}
+
 /// Infer the Cocoa Y of the menu-bar's bottom edge when we cannot see the
 /// status-item window. `visibleFrame` *should* already exclude the bar; some
 /// accessory apps get `visibleFrame == frame`, so we never trust a zero inset.
@@ -187,6 +238,85 @@ pub fn cocoa_popover_frame(p: PopoverPlacement) -> CocoaRect {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn horizontal_resize_keeps_the_centre_and_the_grabbed_edge_under_the_cursor() {
+        let visible = CocoaRect {
+            x: 0.0,
+            y: 0.0,
+            w: 1440.0,
+            h: 900.0,
+        };
+        for (x, pointer, next_pointer) in [(400.0, 818.0, 838.0), (380.0, 382.0, 362.0)] {
+            let native = CocoaRect {
+                x,
+                y: 250.0,
+                w: 420.0,
+                h: 300.0,
+            };
+            let drag = super::HorizontalResize::start(native, 400.0, pointer);
+            let first = drag.frame(native, pointer, visible);
+            assert_eq!(first.x + first.w / 2.0, 600.0);
+            assert_eq!(first.w, 440.0);
+            let second = drag.frame(first, next_pointer, visible);
+            assert_eq!(second.x + second.w / 2.0, 600.0);
+            assert_eq!(second.w, 480.0);
+            assert_eq!((second.y, second.h), (native.y, native.h));
+            let reversed = drag.frame(second, pointer, visible);
+            assert_eq!(reversed, first);
+        }
+    }
+
+    #[test]
+    fn horizontal_resize_preserves_vertical_changes_and_clamps_to_the_screen() {
+        let visible = CocoaRect {
+            x: -1440.0,
+            y: 100.0,
+            w: 1440.0,
+            h: 900.0,
+        };
+        let initial = CocoaRect {
+            x: -1200.0,
+            y: 250.0,
+            w: 420.0,
+            h: 300.0,
+        };
+        let drag = super::HorizontalResize::start(initial, 400.0, -782.0);
+        let current = CocoaRect {
+            y: 200.0,
+            h: 350.0,
+            ..initial
+        };
+        let small = drag.frame(current, -950.0, visible);
+        assert_eq!(small.w, MIN_POPOVER_WIDTH);
+        assert_eq!((small.y, small.h), (200.0, 350.0));
+        let wide = drag.frame(current, 2000.0, visible);
+        assert_eq!(wide.x, visible.x + POPOVER_SIDE_MARGIN);
+        assert_eq!(wide.max_x(), visible.max_x() - POPOVER_SIDE_MARGIN);
+    }
+
+    #[test]
+    fn provider_dropdown_fits_short_content_without_the_overview_floor() {
+        assert_eq!(
+            super::fit_provider_popover_height(274.0, 1080.0, None),
+            274.0
+        );
+        assert_eq!(
+            super::fit_provider_popover_height(100.0, 1080.0, None),
+            200.0
+        );
+        assert_eq!(
+            super::fit_provider_popover_height(450.0, 1080.0, Some(900.0)),
+            450.0
+        );
+        assert_eq!(
+            super::fit_provider_popover_height(900.0, 800.0, None),
+            784.0
+        );
+        assert_eq!(
+            super::fit_provider_popover_height(450.0, 1080.0, Some(300.0)),
+            300.0
+        );
+    }
     use super::{
         CocoaRect, MENU_BAR_MIN_HEIGHT, MIN_POPOVER_HEIGHT, MIN_POPOVER_WIDTH, MIN_USER_HEIGHT,
         POPOVER_BOTTOM_GAP, POPOVER_SIDE_MARGIN, POPOVER_TOP_GAP, PanelSize, PopoverPlacement,

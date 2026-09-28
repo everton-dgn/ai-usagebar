@@ -9,6 +9,7 @@
 # e o identificador de assinatura dependem dela. Trocar o valor exige nova
 # autorização no macOS.
 # CODESIGN_IDENTITY segue as regras de scripts/sign-macos-tray.sh.
+# BACKUP_ROOT recebe a cópia do bundle anterior (padrão /tmp/claude-backups).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -17,6 +18,26 @@ app_name="AI Usage"
 executable=ai-usagebar-tray
 release_dir=target/release
 app="$release_dir/$app_name.app"
+backup_root=${BACKUP_ROOT:-/tmp/claude-backups}
+
+# Usa o comando trash quando existe; senão, o NSFileManager do Foundation,
+# presente em todo macOS. Nunca apaga de forma definitiva.
+move_to_trash() {
+  if command -v trash >/dev/null; then
+    trash "$1"
+    return
+  fi
+  # shellcheck disable=SC2016 # $ é a ponte ObjC do JavaScript, não do shell.
+  osascript -l JavaScript -e '
+function run(argv) {
+  ObjC.import("Foundation");
+  const error = $();
+  const url = $.NSURL.fileURLWithPath(argv[0]);
+  if (!$.NSFileManager.defaultManager.trashItemAtURLResultingItemURLError(url, null, error)) {
+    throw new Error(ObjC.unwrap(error.localizedDescription));
+  }
+}' "$1" >/dev/null
+}
 
 if [[ $(uname -s) != Darwin || $(uname -m) != arm64 ]]; then
   echo "error: the app bundle is built only on macOS with Apple Silicon (arm64)." >&2
@@ -62,16 +83,16 @@ plutil -lint "$plist" >/dev/null
 ./scripts/sign-macos-tray.sh "$staged"
 
 if [[ -e $app ]]; then
-  if ! command -v trash >/dev/null; then
-    echo "error: $app exists and trash is unavailable; the new signed bundle is at $staged" >&2
-    exit 1
-  fi
   # O bundle anterior é artefato ignorado pelo git: copiar antes da lixeira.
-  backup="/tmp/claude-backups/$(date +%Y%m%d_%H%M%S)-app-bundle"
-  mkdir -p "$backup"
+  # mktemp -d cria uma pasta nova a cada build, mesmo no mesmo segundo.
+  mkdir -p "$backup_root"
+  backup=$(mktemp -d "$backup_root/$(date +%Y%m%d_%H%M%S)-app-bundle.XXXXXX")
   cp -Rp "$app" "$backup/"
   echo "backed up the previous bundle to $backup" >&2
-  trash "$app"
+  if ! move_to_trash "$PWD/$app"; then
+    echo "error: could not move $app to the Trash; the new signed bundle is at $staged" >&2
+    exit 1
+  fi
 fi
 mv "$staged" "$app"
 codesign --verify --strict "$app"

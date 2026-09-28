@@ -160,12 +160,17 @@ async fn fetch_snapshot_at(
 
     // The identity a fallback may replay: the bearer actually used, or — when
     // none could be resolved, e.g. a refresh that failed offline — the stored
-    // credential. A refresh that rotated the token binds to the new token, so
-    // the old payload is refused rather than attributed by assumption.
+    // credential. A refresh this fetch performed proves the new token is the
+    // same login as the one it replaced, so the payload that login wrote
+    // stays attributable (see `RotationMemory`); a token that changed any
+    // other way is a different credential as far as this process can tell.
     let (identity, live) = match bearer_token(client, endpoints, auth, now).await {
-        Ok(token) => {
-            let identity = identity_digest(&endpoints.me, &token);
-            let live = fetch_live(client, endpoints, &token).await;
+        Ok(bearer) => {
+            let identity = identity_digest(&endpoints.me, &bearer.token);
+            if let Some(previous) = bearer.rotated_from {
+                rotation_memory().rotated(cache, &previous, identity);
+            }
+            let live = fetch_live(client, endpoints, &bearer.token).await;
             (Some(identity), live.map(|live| (identity, live)))
         }
         Err(e) => (stored, Err(e)),
@@ -176,6 +181,7 @@ async fn fetch_snapshot_at(
             let mut payload = snap_to_json(&live.snap);
             payload["identity"] = serde_json::Value::String(identity_hex(&identity));
             cache.write_payload(&serde_json::to_vec(&payload)?)?;
+            rotation_memory().forget(cache);
             let email = identity_memory().record(cache, identity, live.profile_email);
             Ok(crate::outcome::Outcome::fresh(live.snap).with_email(email))
         }
@@ -196,7 +202,7 @@ fn fallback_silent(
     original: AppError,
 ) -> Result<FetchOutcome> {
     crate::outcome::fallback(cache, None, original, |bytes| {
-        parse_bound_cache(bytes, identity)
+        parse_fallback_cache(cache, bytes, identity)
     })
 }
 
@@ -207,8 +213,43 @@ fn fallback_with_error(
 ) -> Result<FetchOutcome> {
     let last_error = error_to_pair(&original);
     crate::outcome::fallback(cache, last_error, original, |bytes| {
-        parse_bound_cache(bytes, identity)
+        parse_fallback_cache(cache, bytes, identity)
     })
+}
+
+/// [`parse_bound_cache`] for a failed poll, which may also replay the payload
+/// of the login `identity` was rotated from by this process.
+fn parse_fallback_cache(
+    cache: &Cache,
+    bytes: &[u8],
+    identity: Option<&IdentityDigest>,
+) -> Result<KimiSnapshot> {
+    parse_bound_cache(bytes, identity).or_else(|original| {
+        let bound = payload_identity(bytes).ok_or(original)?;
+        let current = identity.ok_or_else(|| {
+            AppError::Schema("kimi cache belongs to a different credential".into())
+        })?;
+        if !rotation_memory().continues(cache, &bound, current) {
+            return Err(AppError::Schema(
+                "kimi cache belongs to a different credential".into(),
+            ));
+        }
+        parse_bound_cache(bytes, Some(&bound))
+    })
+}
+
+/// The identity digest a payload was written under, if it carries one.
+fn payload_identity(bytes: &[u8]) -> Option<IdentityDigest> {
+    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let hex = v.get("identity")?.as_str()?;
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut digest = [0; 32];
+    for (byte, pair) in digest.iter_mut().zip(hex.as_bytes().chunks(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(digest)
 }
 
 /// The cached snapshot, only when the payload was written under `identity`.
@@ -347,6 +388,22 @@ fn snap_to_json(snap: &KimiSnapshot) -> serde_json::Value {
     })
 }
 
+/// The bearer for this fetch and, when this fetch rotated it, the identity of
+/// the token whose refresh token it consumed.
+struct Bearer {
+    token: String,
+    rotated_from: Option<IdentityDigest>,
+}
+
+impl Bearer {
+    fn as_stored(token: String) -> Self {
+        Self {
+            token,
+            rotated_from: None,
+        }
+    }
+}
+
 /// Resolve the bearer for this fetch. The API key is already one; a Kimi Code
 /// login may first need a refresh, which rotates the CLI's stored token pair
 /// and is therefore serialized against the CLI itself.
@@ -355,15 +412,15 @@ async fn bearer_token(
     endpoints: &Endpoints,
     auth: &Auth,
     now: DateTime<Utc>,
-) -> Result<String> {
+) -> Result<Bearer> {
     let kimi_code = match auth {
-        Auth::ApiKey(key) => return Ok(key.clone()),
+        Auth::ApiKey(key) => return Ok(Bearer::as_stored(key.clone())),
         Auth::KimiCode(kimi_code) => kimi_code,
     };
 
     let creds = oauth::read_from(&kimi_code.credentials_path)?;
     if !oauth::needs_refresh(creds.expires_at, now.timestamp()) {
-        return Ok(creds.access_token);
+        return Ok(Bearer::as_stored(creds.access_token));
     }
 
     let _lock = super::lock::acquire(&kimi_code.lock_target).await?;
@@ -372,7 +429,8 @@ async fn bearer_token(
     // an already-rotated refresh token.
     let creds = oauth::read_from(&kimi_code.credentials_path)?;
     if !oauth::needs_refresh(creds.expires_at, now.timestamp()) {
-        return Ok(creds.access_token);
+        // A peer's refresh: a new token this process did not derive.
+        return Ok(Bearer::as_stored(creds.access_token));
     }
 
     let refreshed = tokio::time::timeout(
@@ -402,7 +460,10 @@ async fn bearer_token(
             "the refreshed Kimi Code credentials could not be saved ({e}); a new Kimi Code sign-in is needed, which this app cannot do"
         ))
     })?;
-    Ok(next.access_token)
+    Ok(Bearer {
+        rotated_from: Some(identity_digest(&endpoints.me, &creds.access_token)),
+        token: next.access_token,
+    })
 }
 
 /// Ask `/coding/v1/me` for the subscription's own tier name ("Allegretto"),
@@ -592,6 +653,70 @@ impl IdentityMemory {
             .get(&cache.payload_path())
             .filter(|(known, _)| known == identity)
             .and_then(|(_, email)| email.clone())
+    }
+}
+
+/// Token rotations this process performed while a payload's writer was still
+/// its owner: `payload identity -> the token that login holds now`. Memory
+/// only, so the proof never outlives the process that made it, and nothing
+/// here reaches the disk. A successful poll rebinds the payload itself and
+/// drops the entry.
+///
+/// Known limit: after a restart the proof is gone, so a payload written under
+/// the pre-rotation token is refused as a fallback until the next successful
+/// poll. Rebinding the payload on disk would keep it, but only through a cache
+/// write that preserves the payload's age and its stale/error markers, which
+/// [`Cache::write_payload`] resets.
+#[derive(Default)]
+struct RotationMemory(Mutex<HashMap<PathBuf, (IdentityDigest, IdentityDigest)>>);
+
+fn rotation_memory() -> &'static RotationMemory {
+    static MEMORY: OnceLock<RotationMemory> = OnceLock::new();
+    MEMORY.get_or_init(RotationMemory::default)
+}
+
+impl RotationMemory {
+    fn entries(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<PathBuf, (IdentityDigest, IdentityDigest)>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Record that this process refreshed `previous` into `next`. The chain
+    /// only extends from the payload's own writer or from the token it was
+    /// already rotated to; any other `previous` is unrelated to the payload.
+    fn rotated(&self, cache: &Cache, previous: &IdentityDigest, next: IdentityDigest) {
+        let key = cache.payload_path();
+        let mut entries = self.entries();
+        let payload = match entries.get(&key) {
+            Some((payload, current)) if current == previous => Some(*payload),
+            _ => cache
+                .maybe_payload()
+                .ok()
+                .flatten()
+                .and_then(|bytes| payload_identity(&bytes))
+                .filter(|payload| payload == previous),
+        };
+        match payload {
+            Some(payload) => {
+                entries.insert(key, (payload, next));
+            }
+            None => {
+                entries.remove(&key);
+            }
+        }
+    }
+
+    fn continues(&self, cache: &Cache, payload: &IdentityDigest, current: &IdentityDigest) -> bool {
+        self.entries()
+            .get(&cache.payload_path())
+            .is_some_and(|(known, now)| known == payload && now == current)
+    }
+
+    fn forget(&self, cache: &Cache) {
+        self.entries().remove(&cache.payload_path());
     }
 }
 
@@ -1921,11 +2046,13 @@ mod tests {
         assert!(matches!(err, AppError::Transport(_)), "{err:?}");
     }
 
-    #[tokio::test]
-    async fn a_rotated_token_whose_poll_fails_does_not_replay_the_old_tokens_payload() {
-        let mut server = mockito::Server::new_async().await;
-        let refresh = server
+    async fn mock_rotation(server: &mut mockito::Server) -> mockito::Mock {
+        server
             .mock("POST", "/api/oauth/token")
+            .match_body(mockito::Matcher::UrlEncoded(
+                "refresh_token".into(),
+                "cli-rt".into(),
+            ))
             .with_status(200)
             .with_body(
                 r#"{"access_token":"fresh-at","refresh_token":"fresh-rt","expires_in":900,
@@ -1933,10 +2060,93 @@ mod tests {
             )
             .expect(1)
             .create_async()
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_rotation_this_fetch_performed_keeps_the_logins_payload_through_an_outage() {
+        let mut server = mockito::Server::new_async().await;
+        let refresh = mock_rotation(&mut server).await;
+        let usages = server
+            .mock("GET", "/coding/v1/usages")
+            .match_header("authorization", "Bearer fresh-at")
+            .with_status(500)
+            .expect(2)
+            .create_async()
+            .await;
+
+        let (td, cache) = cache_fixture();
+        let seeded = bound_seed(&server.url(), "cli-at");
+        cache.write_payload(seeded.as_bytes()).unwrap();
+        // Expiring: the refresh consumes `cli-rt`, so `fresh-at` is proven to
+        // be the same login that wrote the payload.
+        let (_home, auth) = kimi_code_home(&td, -60);
+        let auth = Auth::KimiCode(auth);
+        let endpoints = test_endpoints(&server.url());
+        let client = reqwest::Client::new();
+        let out = fetch_snapshot_at(&client, &auth, &cache, &endpoints, Duration::ZERO, now())
+            .await
+            .unwrap();
+        assert!(out.stale);
+        assert_eq!(out.snapshot.weekly_used, 30);
+        assert_eq!(out.last_error.as_ref().map(|(code, _)| *code), Some(500));
+        assert!(out.email.is_none());
+
+        // The next tick uses the rotated token as-is and fails again: the
+        // continuity proven by the refresh still holds.
+        let again = fetch_snapshot_at(&client, &auth, &cache, &endpoints, Duration::ZERO, now())
+            .await
+            .unwrap();
+        refresh.assert_async().await;
+        usages.assert_async().await;
+        assert!(again.stale);
+        assert_eq!(again.snapshot.weekly_used, 30);
+        // Served from memory, never rebound on disk: the payload keeps its
+        // age and its original binding.
+        assert_eq!(
+            std::fs::read_to_string(cache.payload_path()).unwrap(),
+            seeded
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rotation_whose_poll_is_unreachable_keeps_the_logins_payload() {
+        let mut server = mockito::Server::new_async().await;
+        let refresh = mock_rotation(&mut server).await;
+
+        let (td, cache) = cache_fixture();
+        let mut endpoints = test_endpoints("http://localhost:1");
+        endpoints.token = format!("{}/api/oauth/token", server.url());
+        cache
+            .write_payload(bound_seed("http://localhost:1", "cli-at").as_bytes())
+            .unwrap();
+        let (_home, auth) = kimi_code_home(&td, -60);
+        let out = fetch_snapshot_at(
+            &reqwest::Client::new(),
+            &Auth::KimiCode(auth),
+            &cache,
+            &endpoints,
+            Duration::ZERO,
+            now(),
+        )
+        .await
+        .unwrap();
+        refresh.assert_async().await;
+        assert!(out.stale);
+        assert_eq!(out.snapshot.weekly_used, 30);
+    }
+
+    #[tokio::test]
+    async fn an_external_credential_swap_never_replays_the_previous_payload() {
+        let mut server = mockito::Server::new_async().await;
+        let refresh = server
+            .mock("POST", "/api/oauth/token")
+            .expect(0)
+            .create_async()
             .await;
         server
             .mock("GET", "/coding/v1/usages")
-            .match_header("authorization", "Bearer fresh-at")
+            .match_header("authorization", "Bearer peer-at")
             .with_status(500)
             .create_async()
             .await;
@@ -1945,9 +2155,19 @@ mod tests {
         cache
             .write_payload(bound_seed(&server.url(), "cli-at").as_bytes())
             .unwrap();
-        // Expired: the fresh cache still belongs to `cli-at`, but the poll
-        // goes live because the TTL is zero, and the refresh rotates it.
-        let (_home, auth) = kimi_code_home(&td, -60);
+        let (_home, auth) = kimi_code_home(&td, 600);
+        // The file now names another token this process never derived: a CLI
+        // refresh and a different login are indistinguishable from here.
+        std::fs::write(
+            &auth.credentials_path,
+            serde_json::json!({
+                "access_token": "peer-at",
+                "refresh_token": "peer-rt",
+                "expires_at": NOW_SECS + 900,
+            })
+            .to_string(),
+        )
+        .unwrap();
         let err = fetch_snapshot_at(
             &reqwest::Client::new(),
             &Auth::KimiCode(auth),
@@ -1960,6 +2180,143 @@ mod tests {
         .unwrap_err();
         refresh.assert_async().await;
         assert!(matches!(err, AppError::Http { status: 500, .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn an_external_swap_after_a_proven_rotation_breaks_the_continuity() {
+        let mut server = mockito::Server::new_async().await;
+        mock_rotation(&mut server).await;
+        server
+            .mock("GET", "/coding/v1/usages")
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let (td, cache) = cache_fixture();
+        cache
+            .write_payload(bound_seed(&server.url(), "cli-at").as_bytes())
+            .unwrap();
+        let (_home, kimi_code) = kimi_code_home(&td, -60);
+        let auth = Auth::KimiCode(kimi_code.clone());
+        let endpoints = test_endpoints(&server.url());
+        let client = reqwest::Client::new();
+        // cli-at -> fresh-at, proven by this process: the payload is served.
+        let rotated = fetch_snapshot_at(&client, &auth, &cache, &endpoints, Duration::ZERO, now())
+            .await
+            .unwrap();
+        assert_eq!(rotated.snapshot.weekly_used, 30);
+
+        // Something else then puts another valid token in the store.
+        std::fs::write(
+            &kimi_code.credentials_path,
+            serde_json::json!({
+                "access_token": "other-at",
+                "refresh_token": "other-rt",
+                "expires_at": NOW_SECS + 900,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let err = fetch_snapshot_at(&client, &auth, &cache, &endpoints, Duration::ZERO, now())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Http { status: 500, .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn refreshing_an_unrelated_token_never_adopts_the_payload() {
+        let mut server = mockito::Server::new_async().await;
+        let refresh = server
+            .mock("POST", "/api/oauth/token")
+            .match_body(mockito::Matcher::UrlEncoded(
+                "refresh_token".into(),
+                "other-rt".into(),
+            ))
+            .with_status(200)
+            .with_body(
+                r#"{"access_token":"other-next-at","refresh_token":"other-next-rt",
+                    "expires_in":900,"scope":"kimi-code","token_type":"Bearer"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/coding/v1/usages")
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let (td, cache) = cache_fixture();
+        // The payload belongs to `cli-at`; the store now holds another
+        // login's expiring token. Our refresh proves other-at -> other-next-at
+        // and says nothing about `cli-at`.
+        cache
+            .write_payload(bound_seed(&server.url(), "cli-at").as_bytes())
+            .unwrap();
+        let (_home, kimi_code) = kimi_code_home(&td, -60);
+        std::fs::write(
+            &kimi_code.credentials_path,
+            serde_json::json!({
+                "access_token": "other-at",
+                "refresh_token": "other-rt",
+                "expires_at": NOW_SECS - 60,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let err = fetch_snapshot_at(
+            &reqwest::Client::new(),
+            &Auth::KimiCode(kimi_code),
+            &cache,
+            &test_endpoints(&server.url()),
+            Duration::ZERO,
+            now(),
+        )
+        .await
+        .unwrap_err();
+        refresh.assert_async().await;
+        assert!(matches!(err, AppError::Http { status: 500, .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_successful_poll_after_a_rotation_ends_the_continuity() {
+        let mut server = mockito::Server::new_async().await;
+        mock_rotation(&mut server).await;
+        let failing = server
+            .mock("GET", "/coding/v1/usages")
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let (td, cache) = cache_fixture();
+        cache
+            .write_payload(bound_seed(&server.url(), "cli-at").as_bytes())
+            .unwrap();
+        let (_home, auth) = kimi_code_home(&td, -60);
+        let auth = Auth::KimiCode(auth);
+        let endpoints = test_endpoints(&server.url());
+        let client = reqwest::Client::new();
+        fetch_snapshot_at(&client, &auth, &cache, &endpoints, Duration::ZERO, now())
+            .await
+            .unwrap();
+
+        failing.remove_async().await;
+        server
+            .mock("GET", "/coding/v1/usages")
+            .with_status(200)
+            .with_body(sample_json())
+            .create_async()
+            .await;
+        let live = fetch_snapshot_at(&client, &auth, &cache, &endpoints, Duration::ZERO, now())
+            .await
+            .unwrap();
+        assert!(live.off_the_wire());
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(cache.payload_path()).unwrap()).unwrap();
+        assert_eq!(
+            stored["identity"],
+            identity_hex(&identity_digest(&endpoints.me, "fresh-at")).as_str()
+        );
     }
 
     #[tokio::test]

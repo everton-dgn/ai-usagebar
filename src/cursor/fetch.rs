@@ -3,16 +3,22 @@
 //! (see `db.rs`). Cache/stale/error-fallback shape mirrors `kimi::fetch`.
 //!
 //! The account email comes from `GET /api/auth/me` with the same session
-//! cookie, on every call, best effort and never written to disk. A profile
-//! for a different user id or with an unverified email is dropped.
+//! cookie, on every live call, best effort and never written to disk. A
+//! profile for a different user id or with an unverified email is dropped. A
+//! cache hit repeats, from memory, the address its payload's live call found.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 
 use crate::cache::{Cache, acquire_lock_async};
 use crate::error::{AppError, Result};
+use crate::identity::AccountEmail;
 use crate::usage::CursorSnapshot;
 use crate::vendor::{MAX_BODY_BYTES, read_body_capped};
 
@@ -97,7 +103,7 @@ async fn fetch_snapshot_at(
     if let Some(bytes) = cache.fresh_payload(cache_ttl)?
         && let Ok(outcome) = reuse_cache(&bytes, cache, false, &auth.account_key, now)
     {
-        let email = fetch_email(client, endpoints, &auth).await;
+        let email = email_memory().recall(cache, &email_binding(endpoints, &auth));
         return Ok(outcome.with_email(email));
     }
 
@@ -105,7 +111,63 @@ async fn fetch_snapshot_at(
         fetch_live(client, endpoints, &auth),
         fetch_email(client, endpoints, &auth)
     );
-    settle(cache, &auth, live, now).map(|outcome| outcome.with_email(email))
+    let wrote = live.is_ok();
+    let outcome = settle(cache, &auth, live, now)?;
+    if wrote {
+        email_memory().record(cache, &email_binding(endpoints, &auth), email.clone());
+    }
+    Ok(outcome.with_email(email))
+}
+
+/// What a remembered address is bound to: the account, the session cookie
+/// that read the profile and the profile endpoint. The cache payload is
+/// shared by every session of one user id; the address is not, so a new
+/// session or another profile endpoint looks it up live again. Only a digest
+/// of the cookie is kept.
+fn email_binding(endpoints: &Endpoints, auth: &db::SessionAuth) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ai-usagebar/cursor/email-binding/v1\0");
+    hasher.update(endpoints.me.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(auth.cookie_value.as_bytes());
+    let digest = hasher.finalize();
+    let mut binding = String::with_capacity(auth.account_key.len() + 1 + digest.len() * 2);
+    binding.push_str(&auth.account_key);
+    binding.push('|');
+    for byte in digest {
+        let _ = write!(binding, "{byte:02x}");
+    }
+    binding
+}
+
+/// The address each cache payload's live fetch reported, in this process.
+/// Memory only: a cache hit repeats it without waiting on the optional
+/// profile lookup, and only for the [`email_binding`] of that live fetch. A
+/// payload inherited from an earlier run shows no address.
+#[derive(Default)]
+struct EmailMemory(Mutex<HashMap<PathBuf, (String, Option<AccountEmail>)>>);
+
+fn email_memory() -> &'static EmailMemory {
+    static MEMORY: OnceLock<EmailMemory> = OnceLock::new();
+    MEMORY.get_or_init(EmailMemory::default)
+}
+
+impl EmailMemory {
+    fn entries(&self) -> MutexGuard<'_, HashMap<PathBuf, (String, Option<AccountEmail>)>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn record(&self, cache: &Cache, binding: &str, email: Option<AccountEmail>) {
+        self.entries()
+            .insert(cache.payload_path(), (binding.to_string(), email));
+    }
+
+    fn recall(&self, cache: &Cache, binding: &str) -> Option<AccountEmail> {
+        self.entries()
+            .get(&cache.payload_path())
+            .filter(|(known, _)| known == binding)
+            .and_then(|(_, email)| email.clone())
+    }
 }
 
 fn settle(
@@ -588,7 +650,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cached_quota_reports_the_email_of_the_account_now_signed_in() {
+    async fn a_cached_quota_repeats_the_email_of_the_live_fetch_that_wrote_it() {
+        let token = fake_token("user_123");
+        let db_dir = TempDir::new().unwrap();
+        let db_path = seed_state_db(&db_dir, &token);
+        let (_cache_dir, cache) = cache_fixture();
+        let mut server = mockito::Server::new_async().await;
+        let summary = server
+            .mock("GET", "/api/usage-summary")
+            .with_status(200)
+            .with_body(sample_json())
+            .expect(1)
+            .create_async()
+            .await;
+        let me = server
+            .mock("GET", "/api/auth/me")
+            .match_header(
+                "cookie",
+                format!("WorkosCursorSessionToken=user_123%3A%3A{token}").as_str(),
+            )
+            .with_status(200)
+            .with_body(r#"{"email":"dev@example.test","sub":"auth0|user_123"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let live = run(&server, &db_path, &cache, Duration::ZERO).await;
+        let cached = run(&server, &db_path, &cache, Duration::from_secs(3600)).await;
+
+        summary.assert_async().await;
+        me.assert_async().await;
+        assert!(live.off_the_wire());
+        assert_eq!(email_of(&live), Some("dev@example.test"));
+        assert!(!cached.off_the_wire());
+        assert_eq!(email_of(&cached), Some("dev@example.test"));
+    }
+
+    #[tokio::test]
+    async fn an_inherited_cache_hit_carries_no_email_and_asks_for_none() {
         let token = fake_token("user_123");
         let db_dir = TempDir::new().unwrap();
         let db_path = seed_state_db(&db_dir, &token);
@@ -605,22 +704,161 @@ mod tests {
             .expect(0)
             .create_async()
             .await;
-        server
+        let me = server
             .mock("GET", "/api/auth/me")
-            .match_header(
-                "cookie",
-                format!("WorkosCursorSessionToken=user_123%3A%3A{token}").as_str(),
-            )
-            .with_status(200)
-            .with_body(r#"{"email":"dev@example.test","sub":"auth0|user_123"}"#)
+            .expect(0)
             .create_async()
             .await;
 
         let out = run(&server, &db_path, &cache, Duration::from_secs(3600)).await;
 
         summary.assert_async().await;
+        me.assert_async().await;
         assert!(!out.off_the_wire());
-        assert_eq!(email_of(&out), Some("dev@example.test"));
+        assert_eq!(email_of(&out), None);
+    }
+
+    #[tokio::test]
+    async fn a_cache_hit_never_waits_on_the_profile_lookup() {
+        let token = fake_token("user_123");
+        let db_dir = TempDir::new().unwrap();
+        let db_path = seed_state_db(&db_dir, &token);
+        let (_cache_dir, cache) = cache_fixture();
+        cache
+            .write_payload(&cached_snapshot(
+                &account_key(&token),
+                "2099-08-04T00:00:00Z",
+            ))
+            .unwrap();
+        let server = mockito::Server::new_async().await;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let silent = format!("http://{}", listener.local_addr().unwrap());
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut held = Vec::new();
+            while released.try_recv().is_err() && std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((socket, _)) => held.push(socket),
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        let endpoints = Endpoints {
+            me: format!("{silent}/api/auth/me"),
+            ..endpoints_for(&server)
+        };
+        let started = std::time::Instant::now();
+        let out = fetch_snapshot(
+            &reqwest::Client::new(),
+            &db_path,
+            &no_agent_auth(),
+            &cache,
+            &endpoints,
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        let elapsed = started.elapsed();
+        let _ = release.send(());
+        holder.join().unwrap();
+        assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+        assert!(!out.off_the_wire());
+        assert_eq!(out.snapshot.auto_pct, 40);
+    }
+
+    #[tokio::test]
+    async fn another_account_never_recalls_the_previous_accounts_email() {
+        let first = fake_token("user_123");
+        let second = fake_token("user_456");
+        let db_dir = TempDir::new().unwrap();
+        let db_path = seed_state_db(&db_dir, &first);
+        let (_cache_dir, cache) = cache_fixture();
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/usage-summary")
+            .with_status(200)
+            .with_body(sample_json())
+            .expect(1)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/auth/me")
+            .with_status(200)
+            .with_body(r#"{"email":"dev@example.test","sub":"auth0|user_123"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let live = run(&server, &db_path, &cache, Duration::ZERO).await;
+        assert_eq!(email_of(&live), Some("dev@example.test"));
+
+        // The second account's payload is written by hand, as if inherited:
+        // the first account's remembered address must not attach to it.
+        cache
+            .write_payload(&cached_snapshot(
+                &account_key(&second),
+                "2099-08-04T00:00:00Z",
+            ))
+            .unwrap();
+        let other_db = TempDir::new().unwrap();
+        let other_path = seed_state_db(&other_db, &second);
+        let other = run(&server, &other_path, &cache, Duration::from_secs(3600)).await;
+        assert!(!other.off_the_wire());
+        assert_eq!(email_of(&other), None);
+    }
+
+    #[tokio::test]
+    async fn a_new_session_of_the_same_user_does_not_recall_the_old_sessions_email() {
+        let old_session = fake_token("user_123");
+        // Same `sub`, different session: the quota cache is shared by user
+        // id, the remembered address is not.
+        let new_session = format!("{old_session}2");
+        let db_dir = TempDir::new().unwrap();
+        let db_path = seed_state_db(&db_dir, &old_session);
+        let (_cache_dir, cache) = cache_fixture();
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/usage-summary")
+            .with_status(200)
+            .with_body(sample_json())
+            .expect(1)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/auth/me")
+            .with_status(200)
+            .with_body(r#"{"email":"dev@example.test","sub":"auth0|user_123"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let live = run(&server, &db_path, &cache, Duration::ZERO).await;
+        assert_eq!(email_of(&live), Some("dev@example.test"));
+        assert_eq!(account_key(&old_session), account_key(&new_session));
+
+        let new_db = TempDir::new().unwrap();
+        let new_path = seed_state_db(&new_db, &new_session);
+        let cached = run(&server, &new_path, &cache, Duration::from_secs(3600)).await;
+        assert!(!cached.off_the_wire());
+        assert_eq!(email_of(&cached), None);
+
+        // Nor does the same session against another profile endpoint.
+        let endpoints = Endpoints {
+            me: format!("{}/api/auth/other-me", server.url()),
+            ..endpoints_for(&server)
+        };
+        let elsewhere = fetch_snapshot(
+            &reqwest::Client::new(),
+            &db_path,
+            &no_agent_auth(),
+            &cache,
+            &endpoints,
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        assert!(!elsewhere.off_the_wire());
+        assert_eq!(email_of(&elsewhere), None);
     }
 
     fn cache_fixture() -> (TempDir, Cache) {

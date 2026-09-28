@@ -82,6 +82,15 @@ métricas de consumo. Os endereços obtidos por API ficam fora dos caches de
 consumo em disco e são omitidos nos logs de depuração. A interface recebe apenas
 a identificação validada, vinculada à entrada correspondente. Após reiniciar,
 algumas fontes precisam da próxima resposta de uso para preencher o e-mail.
+Copilot e Cursor devolvem o consumo em cache sem fazer uma nova consulta de
+perfil. Nessa leitura, o endereço aparece apenas se já tiver sido validado para
+a conexão atual durante a execução do aplicativo.
+
+No Kimi, uma renovação de token feita pelo aplicativo mantém o consumo anterior
+como fallback durante uma indisponibilidade. Essa continuidade fica em memória:
+se o aplicativo reiniciar antes de obter uma nova leitura, o cache vinculado ao
+token anterior não será reutilizado. Uma troca de credencial feita fora do
+aplicativo também exige uma nova leitura.
 
 1. Confira no aplicativo ou na página oficial do provedor se sua conta está ativa.
 2. Volte ao AI Usage e use **Detectar provedores**, se a fonte ainda não aparecer.

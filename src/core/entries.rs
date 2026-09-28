@@ -157,14 +157,16 @@ impl TabId {
 /// [`tabs_with_desktop`]; this stays for the hermetic unit tests.
 #[cfg(test)]
 pub fn tabs_from_config(config: &Config) -> Vec<TabId> {
-    build_tabs(config, &[])
+    build_tabs(config, &[], &|_| true)
 }
 
 /// The production aggregate-view tab list: configured accounts plus every saved
 /// Claude Desktop profile that has usable credentials. Desktop discovery is
 /// best-effort and macOS-only; anywhere else this equals [`tabs_from_config`].
 pub fn tabs_with_desktop(config: &Config) -> Vec<TabId> {
-    build_tabs(config, &desktop_profile_labels(config))
+    build_tabs(config, &desktop_profile_labels(config), &|label| {
+        desktop_credential_usable(config, label)
+    })
 }
 
 /// Core expansion, parameterized on the Desktop account labels so it stays pure
@@ -172,23 +174,36 @@ pub fn tabs_with_desktop(config: &Config) -> Vec<TabId> {
 /// "Anthropic has accounts" for the default-tab suppression.
 ///
 /// In aggregate views, a label present in both a `[[anthropic.accounts]]` CLI
-/// entry and a Desktop profile is sourced from **Desktop**, and the CLI entry is
-/// dropped. The same account in two stores means two of them refreshing one
-/// rotating refresh token — each rotation invalidates the other's copy — and
-/// the CLI copy can even refresh to a stale/wrong identity that still
-/// authenticates but reports another account's (often zero) usage, which no
-/// credential-health check can catch. The app-maintained Desktop token is the
-/// one source that avoids both the rotation war and that silent misattribution.
-fn build_tabs(config: &Config, desktop_labels: &[String]) -> Vec<TabId> {
-    let desktop_set: HashSet<&str> = desktop_labels.iter().map(String::as_str).collect();
+/// entry and a Desktop profile gets exactly one source. The same account in two
+/// stores means two of them refreshing one rotating refresh token — each
+/// rotation invalidates the other's copy — and the CLI copy can even refresh to
+/// a stale/wrong identity that still authenticates but reports another
+/// account's (often zero) usage, which no credential-health check can catch.
+/// The app-maintained Desktop token avoids both, so it wins when
+/// `desktop_wins(label)` proves it usable; otherwise the configured CLI entry
+/// stays and the Desktop profile gets no tab, so a broken Desktop snapshot
+/// never hides a working account. `desktop_wins` is only consulted for
+/// colliding labels.
+fn build_tabs(
+    config: &Config,
+    desktop_labels: &[String],
+    desktop_wins: &dyn Fn(&str) -> bool,
+) -> Vec<TabId> {
     let mut tabs = Vec::new();
     for vendor in config.enabled_vendors() {
         if vendor == VendorId::Anthropic {
-            let accounts: Vec<_> = config
-                .anthropic
-                .all_accounts()
-                .into_iter()
+            let all_accounts = config.anthropic.all_accounts();
+            let cli_labels: HashSet<&str> = all_accounts.iter().map(|a| a.label.as_str()).collect();
+            let desktop_labels: Vec<&str> = desktop_labels
+                .iter()
+                .map(String::as_str)
+                .filter(|label| !cli_labels.contains(label) || desktop_wins(label))
+                .collect();
+            let desktop_set: HashSet<&str> = desktop_labels.iter().copied().collect();
+            let accounts: Vec<_> = all_accounts
+                .iter()
                 .filter(|a| !desktop_set.contains(a.label.as_str()))
+                .map(|a| a.label.clone())
                 .collect();
             // The default (unnamed) Claude tab is suppressible once every
             // account is named — but never when it would leave Anthropic with
@@ -198,11 +213,11 @@ fn build_tabs(config: &Config, desktop_labels: &[String]) -> Vec<TabId> {
             {
                 tabs.push(TabId::vendor(vendor));
             }
-            for acct in accounts {
-                tabs.push(TabId::account(acct.label));
+            for label in accounts {
+                tabs.push(TabId::account(label));
             }
             for label in desktop_labels {
-                tabs.push(TabId::desktop_account(label.clone()));
+                tabs.push(TabId::desktop_account(label));
             }
         } else if vendor == VendorId::Openrouter {
             if config.openrouter.show_default_account || config.openrouter.accounts.is_empty() {
@@ -244,6 +259,38 @@ fn desktop_profile_labels(config: &Config) -> Vec<String> {
         .filter(|p| p.has_credentials)
         .map(|p| p.label)
         .collect()
+}
+
+/// Whether the Desktop credential behind `label` can stand in for a colliding
+/// CLI entry. Resolves the same source the fetch would use (the live
+/// `config.json` for the active account, the snapshot otherwise), then checks
+/// it offline: no network, no refresh, no write-back. Any resolution failure
+/// keeps the CLI entry.
+fn desktop_credential_usable(config: &Config, label: &str) -> bool {
+    match crate::anthropic::desktop_creds::account_target(config, label) {
+        Ok((crate::anthropic::creds::CredsTarget::Desktop(source), _)) => {
+            desktop_source_usable(&source, chrono::Utc::now().timestamp())
+        }
+        _ => false,
+    }
+}
+
+/// Pure half of [`desktop_credential_usable`]: the blob decrypts to an
+/// inference-scoped token that is unexpired or that the fetch may refresh.
+/// A read-only source (the active account) cannot refresh, so an expired token
+/// there cannot report usage. Limit: a present refresh token is not proof the
+/// server still accepts it; proving that would mean refreshing here, rotating
+/// the token this check exists to protect, so a revoked one still wins and
+/// fails at fetch time.
+fn desktop_source_usable(
+    source: &crate::anthropic::desktop_creds::DesktopCreds,
+    now_secs: i64,
+) -> bool {
+    source.read().is_ok_and(|(creds, _)| {
+        let oauth = creds.claude_ai_oauth;
+        crate::anthropic::oauth::can_refresh(&oauth.refresh_token)
+            || oauth.expires_at_secs() > now_secs
+    })
 }
 
 #[cfg(test)]
@@ -448,7 +495,7 @@ pub(crate) mod tests {
     fn desktop_labels_become_account_tabs_after_cli_accounts() {
         // Pure core: desktop accounts follow CLI accounts, in the order given.
         let config = config_with_accounts(&["work"]);
-        let tabs = build_tabs(&config, &["gmail".into(), "hotmail".into()]);
+        let tabs = build_tabs(&config, &["gmail".into(), "hotmail".into()], &|_| true);
         assert_eq!(
             tabs,
             vec![
@@ -462,12 +509,12 @@ pub(crate) mod tests {
 
     #[test]
     fn a_desktop_profile_wins_a_label_collision_with_a_cli_account() {
-        // One tab per label; the Desktop source wins so the label is never fed
-        // from two stores refreshing one rotating token (which invalidate each
-        // other and can silently show a wrong account's usage). The CLI entry is
-        // dropped; a CLI-only label (work) is untouched.
+        // One tab per label; a Desktop source proven usable wins so the label is
+        // never fed from two stores refreshing one rotating token (which
+        // invalidate each other and can silently show a wrong account's usage).
+        // The CLI entry is dropped; a CLI-only label (work) is untouched.
         let config = config_with_accounts(&["gmail", "work"]);
-        let tabs = build_tabs(&config, &["gmail".into(), "hotmail".into()]);
+        let tabs = build_tabs(&config, &["gmail".into(), "hotmail".into()], &|_| true);
         assert_eq!(
             tabs,
             vec![
@@ -477,6 +524,140 @@ pub(crate) mod tests {
                 TabId::desktop_account("hotmail"),
             ]
         );
+    }
+
+    #[test]
+    fn an_unusable_desktop_profile_keeps_the_colliding_cli_account() {
+        // Two snapshot files do not prove a working token. When the Desktop
+        // credential for a colliding label is unusable, the configured CLI
+        // account keeps its tab and the Desktop profile gets none, so the label
+        // still has exactly one source. Only the collision is probed.
+        let config = config_with_accounts(&["gmail", "work"]);
+        let probed = std::cell::RefCell::new(Vec::new());
+        let tabs = build_tabs(&config, &["gmail".into(), "hotmail".into()], &|label| {
+            probed.borrow_mut().push(label.to_string());
+            false
+        });
+        assert_eq!(
+            tabs,
+            vec![
+                TabId::vendor(VendorId::Anthropic),
+                TabId::account("gmail"),
+                TabId::account("work"),
+                TabId::desktop_account("hotmail"),
+            ]
+        );
+        assert_eq!(probed.into_inner(), vec!["gmail".to_string()]);
+    }
+
+    #[test]
+    fn desktop_only_labels_are_never_probed() {
+        let config = config_with_accounts(&["work"]);
+        let tabs = build_tabs(&config, &["gmail".into()], &|label| {
+            panic!("probed non-colliding label {label}")
+        });
+        assert_eq!(
+            tabs,
+            vec![
+                TabId::vendor(VendorId::Anthropic),
+                TabId::account("work"),
+                TabId::desktop_account("gmail"),
+            ]
+        );
+    }
+
+    mod desktop_probe {
+        use super::super::desktop_source_usable;
+        use crate::anthropic::desktop_creds::source_for;
+        use crate::safe_storage;
+
+        const NOW: i64 = 1_800_000_000;
+
+        fn key() -> [u8; 16] {
+            safe_storage::derive_key(b"test-secret")
+        }
+
+        fn inference_entry(refresh: &str, expires_ms: Option<i64>) -> serde_json::Value {
+            let mut entry = serde_json::json!({
+                "token": "access-token-fixture",
+                "refreshToken": refresh,
+                "subscriptionType": "max",
+                "rateLimitTier": "default_claude_max_20x",
+            });
+            if let Some(ms) = expires_ms {
+                entry["expiresAt"] = ms.into();
+            }
+            serde_json::json!({ "client:org:https://api.anthropic.com:user:inference user:profile": entry })
+        }
+
+        /// A temp profile snapshot plus a live `config.json`, both holding
+        /// `plain` encrypted under `k`.
+        fn fixture(plain: &serde_json::Value, k: &[u8; 16]) -> tempfile::TempDir {
+            let root = tempfile::tempdir().unwrap();
+            let blob = safe_storage::encrypt(k, &serde_json::to_vec(plain).unwrap());
+            let profile = root.path().join("profile");
+            std::fs::create_dir_all(&profile).unwrap();
+            std::fs::write(profile.join("config-tokenCacheV2"), &blob).unwrap();
+            std::fs::write(profile.join("config-tokenCache"), &blob).unwrap();
+            let config_json = serde_json::json!({ "oauth:tokenCacheV2": blob });
+            std::fs::write(
+                root.path().join("config.json"),
+                serde_json::to_vec(&config_json).unwrap(),
+            )
+            .unwrap();
+            root
+        }
+
+        fn usable(root: &tempfile::TempDir, is_active: bool, k: [u8; 16]) -> bool {
+            let source = source_for(
+                &root.path().join("config.json"),
+                &root.path().join("profile"),
+                is_active,
+                k,
+            );
+            desktop_source_usable(&source, NOW)
+        }
+
+        const FUTURE_MS: i64 = (NOW + 3600) * 1000;
+        const PAST_MS: i64 = (NOW - 3600) * 1000;
+
+        #[test]
+        fn a_snapshot_that_does_not_decrypt_is_unusable() {
+            let root = fixture(&inference_entry("refresh", Some(FUTURE_MS)), &key());
+            let wrong = safe_storage::derive_key(b"other-secret");
+            assert!(!usable(&root, false, wrong));
+            assert!(!usable(&root, true, wrong));
+        }
+
+        #[test]
+        fn a_cache_without_an_inference_token_is_unusable() {
+            let plain = serde_json::json!({
+                "client:org:https://api.anthropic.com:user:profile": {
+                    "token": "profile-only", "refreshToken": "r", "expiresAt": FUTURE_MS,
+                }
+            });
+            let root = fixture(&plain, &key());
+            assert!(!usable(&root, false, key()));
+        }
+
+        #[test]
+        fn an_expired_read_only_active_token_is_unusable() {
+            // The active account is read-only (refresh blanked), so an expired
+            // token cannot recover; a missing expiry counts as expired.
+            let root = fixture(&inference_entry("refresh", Some(PAST_MS)), &key());
+            assert!(!usable(&root, true, key()));
+            let root = fixture(&inference_entry("", None), &key());
+            assert!(!usable(&root, false, key()));
+        }
+
+        #[test]
+        fn a_live_or_refreshable_token_is_usable() {
+            let root = fixture(&inference_entry("", Some(FUTURE_MS)), &key());
+            assert!(usable(&root, true, key()));
+            // An inactive snapshot may refresh an expired token at fetch time.
+            let root = fixture(&inference_entry("refresh", Some(PAST_MS)), &key());
+            assert!(usable(&root, false, key()));
+        }
     }
 
     #[test]
@@ -490,12 +671,12 @@ pub(crate) mod tests {
         // No accounts of either kind: the default tab survives (never leave
         // Anthropic tab-less).
         assert_eq!(
-            build_tabs(&config, &[]),
+            build_tabs(&config, &[], &|_| true),
             vec![TabId::vendor(VendorId::Anthropic)]
         );
         // A Desktop account is present: default suppressed, only the account.
         assert_eq!(
-            build_tabs(&config, &["gmail".into()]),
+            build_tabs(&config, &["gmail".into()], &|_| true),
             vec![TabId::desktop_account("gmail")]
         );
     }

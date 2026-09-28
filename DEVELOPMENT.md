@@ -53,6 +53,10 @@ make bundle
 O alvo gera `target/release/AI Usage.app` para arm64 e verifica sua assinatura.
 Ele não instala nem abre o bundle. Preserve o `CFBundleIdentifier` da cópia
 usada localmente (`ai-usagebar-tray`) ao preparar a substituição.
+Para uma instalação com outro identificador, defina `BUNDLE_ID` com o valor
+existente ao executar `make bundle`. O executável avulso histórico usava
+`com.akitaonrails.ai-usagebar-tray`; esse valor não deve substituir o identificador
+de um bundle que já usa `ai-usagebar-tray`.
 
 O script de assinatura aceita um executável ou bundle local:
 

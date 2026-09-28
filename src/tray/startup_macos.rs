@@ -5,7 +5,7 @@
 //! Only a plist byte-identical to the one this module writes is ever
 //! rewritten; anything else under our label is reported and left alone.
 //! Before an overwrite or a removal the current file is copied, never
-//! overwriting an earlier copy, under [`BACKUP_ROOT`]; turning the item off
+//! overwriting an earlier copy, under [`BACKUP_FOLDER`]; turning the item off
 //! then moves it to the Trash, so every change can be undone.
 
 use std::fs;
@@ -14,9 +14,10 @@ use std::path::{Component, Path, PathBuf};
 
 const LABEL: &str = "com.akitaonrails.ai-usagebar-tray";
 
-/// Permanent copies of the plist taken before it is overwritten or trashed,
-/// under `<stamp>/<absolute path of the plist>`.
-const BACKUP_ROOT: &str = "/tmp/claude-backups";
+/// Copies of the plist taken before it is overwritten or trashed, kept in the
+/// app's data folder so they outlive a restart, under
+/// `<stamp>/<absolute path of the plist>`.
+const BACKUP_FOLDER: &str = "Library/Application Support/ai-usagebar/login-item-backups";
 
 /// Everything in the plist after the escaped program path.
 const PLIST_TAIL: &str = r#"</string>
@@ -92,15 +93,15 @@ pub fn status() -> Result<Entry, String> {
 /// only moves it to an installed app bundle. Idempotent; call once at launch,
 /// away from the window thread.
 pub fn reconcile() -> Result<Reconciled, String> {
-    reconcile_at(&plist_path_or_err()?, &exe_path()?, &system_io())
+    reconcile_at(&plist_path_or_err()?, &exe_path()?, &system_io()?)
 }
 
 pub fn set_enabled(enabled: bool) -> Result<(), String> {
     let plist = plist_path_or_err()?;
     if enabled {
-        enable_at(&plist, &exe_path()?, &system_io())
+        enable_at(&plist, &exe_path()?, &system_io()?)
     } else {
-        disable_at(&plist, &system_io())
+        disable_at(&plist, &system_io()?)
     }
 }
 
@@ -113,6 +114,10 @@ fn plist_path() -> Option<PathBuf> {
 
 fn plist_path_or_err() -> Result<PathBuf, String> {
     plist_path().ok_or_else(|| "Could not find the home folder".to_string())
+}
+
+fn backup_root(home: &Path) -> PathBuf {
+    home.join(BACKUP_FOLDER)
 }
 
 fn exe_path() -> Result<PathBuf, String> {
@@ -130,12 +135,14 @@ struct Io<'a> {
 /// Same-second backups get `_1`, `_2`… rather than replacing each other.
 const MAX_BACKUP_ATTEMPTS: usize = 100;
 
-fn system_io() -> Io<'static> {
-    Io {
-        backup_root: PathBuf::from(BACKUP_ROOT),
+fn system_io() -> Result<Io<'static>, String> {
+    let home =
+        crate::cache::home_dir().map_err(|_| "Could not find the home folder".to_string())?;
+    Ok(Io {
+        backup_root: backup_root(&home),
         stamp: chrono::Local::now().format("%Y%m%d_%H%M%S").to_string(),
         trash: &trash_item,
-    }
+    })
 }
 
 fn trash_item(path: &Path) -> Result<(), String> {
@@ -203,12 +210,21 @@ fn reconcile_at(plist: &Path, exe: &Path, io: &Io<'_>) -> Result<Reconciled, Str
     }
 }
 
+/// Points the login item at this copy, unless this copy is one launchd must
+/// not open at login: a build, a disk image or a translocated app.
 fn enable_at(plist: &Path, exe: &Path, io: &Io<'_>) -> Result<(), String> {
-    match inspect_at(plist, exe)? {
-        Entry::Current => Ok(()),
-        Entry::Absent => write_plist(plist, exe),
+    let entry = inspect_at(plist, exe)?;
+    match entry {
+        Entry::Current => return Ok(()),
+        Entry::Unrecognized(reason) => return Err(reason),
+        Entry::Absent | Entry::Legacy { .. } => {}
+    }
+    if let Some(reason) = migration_blocker(exe) {
+        return Err(reason.into());
+    }
+    match entry {
         Entry::Legacy { .. } => replace(plist, exe, io),
-        Entry::Unrecognized(reason) => Err(reason),
+        _ => write_plist(plist, exe),
     }
 }
 
@@ -342,7 +358,29 @@ fn migration_blocker(exe: &Path) -> Option<&'static str> {
         || exe
             .components()
             .any(|part| part == Component::Normal("AppTranslocation".as_ref()));
-    transient.then_some("This copy is running from a temporary location")
+    if transient {
+        return Some("This copy is running from a temporary location");
+    }
+    in_cargo_output(exe).then_some("This copy is a build, not an installed app")
+}
+
+/// Whether `exe` sits under Cargo's `target/{debug,release}` or
+/// `target/<triple>/{debug,release}`, where `make bundle` leaves the app.
+fn in_cargo_output(exe: &Path) -> bool {
+    let parts: Vec<&str> = exe
+        .components()
+        .filter_map(|part| match part {
+            Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .collect();
+    let is_profile = |name: &str| name == "release" || name == "debug";
+    parts
+        .windows(2)
+        .any(|pair| pair[0] == "target" && is_profile(pair[1]))
+        || parts
+            .windows(3)
+            .any(|triple| triple[0] == "target" && triple[1].contains('-') && is_profile(triple[2]))
 }
 
 fn io_failure(action: &str, error: &std::io::Error) -> String {
@@ -558,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_moves_a_legacy_path_to_this_copy_after_a_permanent_backup() {
+    fn reconcile_moves_a_legacy_path_to_this_copy_after_a_durable_backup() {
         let sandbox = Sandbox::new();
         let legacy = released_plist(LEGACY_EXE);
         sandbox.write(&legacy);
@@ -631,6 +669,9 @@ mod tests {
             "/var/folders/xy/T/AppTranslocation/ABC/d/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
             "/Volumes/AI Usage/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
             "/Users/fixture/www/ai-usagebar/target/release/ai-usagebar-tray",
+            "/Users/fixture/www/ai-usagebar/target/release/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+            "/Users/fixture/www/ai-usagebar/target/debug/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+            "/Users/fixture/www/ai-usagebar/target/aarch64-apple-darwin/release/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
         ] {
             let sandbox = Sandbox::new();
             let legacy = released_plist(LEGACY_EXE);
@@ -822,6 +863,79 @@ mod tests {
         assert_eq!(sandbox.read(), released_plist(BUNDLE_EXE));
         assert_eq!(sandbox.backup_bodies(), vec![legacy]);
         assert!(sandbox.trashed.borrow().is_empty());
+    }
+
+    #[test]
+    fn enabling_from_a_copy_that_is_not_installed_is_refused() {
+        for exe in [
+            "/private/tmp/build/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+            "/var/folders/xy/T/AppTranslocation/ABC/d/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+            "/Volumes/AI Usage/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+            "/Users/fixture/www/ai-usagebar/target/release/ai-usagebar-tray",
+            "/Users/fixture/www/ai-usagebar/target/release/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+            "/Users/fixture/www/ai-usagebar/target/debug/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+            "/Users/fixture/www/ai-usagebar/target/aarch64-apple-darwin/release/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+        ] {
+            let sandbox = Sandbox::new();
+            let outcome = sandbox.run(|io| enable_at(&sandbox.plist, Path::new(exe), io));
+            assert!(outcome.is_err(), "{exe}: {outcome:?}");
+            assert!(!sandbox.plist.exists(), "{exe}");
+
+            let sandbox = Sandbox::new();
+            let legacy = released_plist(LEGACY_EXE);
+            sandbox.write(&legacy);
+            let outcome = sandbox.run(|io| enable_at(&sandbox.plist, Path::new(exe), io));
+            assert!(outcome.is_err(), "{exe}: {outcome:?}");
+            assert_eq!(sandbox.read(), legacy, "{exe}");
+            assert!(sandbox.backup_bodies().is_empty(), "{exe}");
+            assert!(sandbox.trashed.borrow().is_empty(), "{exe}");
+
+            let sandbox = Sandbox::new();
+            sandbox.write(&released_plist(exe));
+            assert_eq!(
+                sandbox.run(|io| enable_at(&sandbox.plist, Path::new(exe), io)),
+                Ok(()),
+                "{exe}: an item that already opens this copy stays as it is"
+            );
+            assert_eq!(sandbox.read(), released_plist(exe), "{exe}");
+        }
+    }
+
+    #[test]
+    fn only_cargo_output_counts_as_a_build() {
+        for exe in [
+            "/Users/fixture/www/ai-usagebar/target/release/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+            "/Users/fixture/www/ai-usagebar/target/debug/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+            "/Users/fixture/www/ai-usagebar/target/aarch64-apple-darwin/release/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+        ] {
+            assert!(in_cargo_output(Path::new(exe)), "{exe}");
+        }
+        for exe in [
+            BUNDLE_EXE,
+            "/Users/fixture/Applications/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+            "/Users/fixture/target/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+            "/Users/fixture/release/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+            "/Users/fixture/target/Apps/release/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+            "/Users/fixture/targets/release/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+            "/Users/fixture/target/release notes/AI Usage.app/Contents/MacOS/ai-usagebar-tray",
+        ] {
+            assert!(!in_cargo_output(Path::new(exe)), "{exe}");
+            assert_eq!(migration_blocker(Path::new(exe)), None, "{exe}");
+        }
+    }
+
+    #[test]
+    fn backups_live_in_application_support_not_a_temporary_folder() {
+        let root = backup_root(Path::new("/Users/fixture"));
+        assert_eq!(
+            root,
+            Path::new("/Users/fixture/Library/Application Support/ai-usagebar/login-item-backups")
+        );
+        assert!(
+            !TRANSIENT_ROOTS
+                .iter()
+                .any(|transient| root.starts_with(transient))
+        );
     }
 
     #[test]

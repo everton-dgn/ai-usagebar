@@ -57,3 +57,8 @@ aplicativo e guarda backup antes de alterar o caminho. Se o registro apontar
 para outro bundle que ainda existe, ele é preservado. Nesse caso, na cópia que
 pretende manter, desligue e ligue **Iniciar ao entrar** para escolher o destino.
 Não apague configurações ou contas para resolver uma duplicação de processo.
+
+**Iniciar ao entrar** exige uma cópia instalada. Aplicativos abertos de imagens
+de disco ou pastas temporárias não podem ser registrados como novo destino.
+Os backups dos registros alterados ficam em
+`~/Library/Application Support/ai-usagebar/login-item-backups/`.

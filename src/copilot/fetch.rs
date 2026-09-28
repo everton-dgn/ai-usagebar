@@ -1,16 +1,21 @@
 //! GitHub Copilot quota fetch with cache isolation and no credential storage.
 //!
-//! The account email is looked up on every call with the same token that
+//! The account email is looked up on every live call with the same token that
 //! reads the quota, best effort and never written to disk: a failed or slow
-//! profile request leaves `email` empty and the quota result untouched.
+//! profile request leaves `email` empty and the quota result untouched. A
+//! cache hit repeats, from memory, the address its payload's live call found.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
 use crate::cache::{Cache, acquire_lock_async};
 use crate::error::{AppError, Result};
+use crate::identity::AccountEmail;
 use crate::vendor::{MAX_BODY_BYTES, read_body_capped};
 
 use super::types::{Response, Snapshot, to_snapshot};
@@ -54,14 +59,58 @@ pub async fn fetch_snapshot(
     if let Some(bytes) = cache.fresh_payload(ttl)?
         && let Ok(snapshot) = parse_cache(&bytes, &target)
     {
-        let email = fetch_email(client, token, endpoints).await;
+        let email = email_memory().recall(cache, &email_binding(&target, endpoints));
         return Ok(crate::outcome::Outcome::cached(snapshot, cache, false).with_email(email));
     }
     let (live, email) = tokio::join!(
         fetch_live(client, token, endpoints),
         fetch_email(client, token, endpoints)
     );
-    settle(cache, &target, live).map(|outcome| outcome.with_email(email))
+    let wrote = live.is_ok();
+    let outcome = settle(cache, &target, live)?;
+    if wrote {
+        email_memory().record(cache, &email_binding(&target, endpoints), email.clone());
+    }
+    Ok(outcome.with_email(email))
+}
+
+/// What a remembered address is bound to: the cache target (quota endpoint
+/// and token digest) plus the profile endpoints that produced it.
+fn email_binding(target: &str, endpoints: &Endpoints) -> String {
+    format!(
+        "{target}|profile:{}|emails:{}",
+        endpoints.profile, endpoints.emails
+    )
+}
+
+/// The address each cache payload's live fetch reported, in this process.
+/// Memory only: a cache hit repeats it without waiting on the optional
+/// profile lookup, and only for the [`email_binding`] of that live fetch. A
+/// payload inherited from an earlier run shows no address.
+#[derive(Default)]
+struct EmailMemory(Mutex<HashMap<PathBuf, (String, Option<AccountEmail>)>>);
+
+fn email_memory() -> &'static EmailMemory {
+    static MEMORY: OnceLock<EmailMemory> = OnceLock::new();
+    MEMORY.get_or_init(EmailMemory::default)
+}
+
+impl EmailMemory {
+    fn entries(&self) -> MutexGuard<'_, HashMap<PathBuf, (String, Option<AccountEmail>)>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn record(&self, cache: &Cache, binding: &str, email: Option<AccountEmail>) {
+        self.entries()
+            .insert(cache.payload_path(), (binding.to_string(), email));
+    }
+
+    fn recall(&self, cache: &Cache, binding: &str) -> Option<AccountEmail> {
+        self.entries()
+            .get(&cache.payload_path())
+            .filter(|(known, _)| known == binding)
+            .and_then(|(_, email)| email.clone())
+    }
 }
 
 fn settle(cache: &Cache, target: &str, live: Result<Snapshot>) -> Result<FetchOutcome> {
@@ -573,14 +622,19 @@ mod tests {
             .with_body(QUOTA_BODY)
             .create_async()
             .await;
+        let mut profiles = Vec::new();
         for (token, email) in [("token-a", "a@example.test"), ("token-b", "b@example.test")] {
-            server
-                .mock("GET", "/user")
-                .match_header("authorization", format!("token {token}").as_str())
-                .with_status(200)
-                .with_body(format!(r#"{{"email":"{email}"}}"#))
-                .create_async()
-                .await;
+            // One lookup per live fetch; the cache hit asks nothing.
+            profiles.push(
+                server
+                    .mock("GET", "/user")
+                    .match_header("authorization", format!("token {token}").as_str())
+                    .with_status(200)
+                    .with_body(format!(r#"{{"email":"{email}"}}"#))
+                    .expect(1)
+                    .create_async()
+                    .await,
+            );
         }
         let dir = tempfile::tempdir().unwrap();
         let cache = cache_in(dir.path());
@@ -591,10 +645,171 @@ mod tests {
         let switched = fetch(&server, "token-b", &cache, ttl).await;
 
         quota.assert_async().await;
+        for profile in &profiles {
+            profile.assert_async().await;
+        }
         assert_eq!(email_of(&first), Some("a@example.test"));
         assert!(!cached.off_the_wire());
         assert_eq!(email_of(&cached), Some("a@example.test"));
         assert_eq!(email_of(&switched), Some("b@example.test"));
+    }
+
+    /// A profile host that accepts connections and never answers, on its own
+    /// thread. Dropping the returned sender releases it.
+    fn silent_profile_host() -> (
+        String,
+        std::sync::mpsc::Sender<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let silent = format!("http://{}", listener.local_addr().unwrap());
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut held = Vec::new();
+            while released.try_recv().is_err() && std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((socket, _)) => held.push(socket),
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        (silent, release, holder)
+    }
+
+    #[tokio::test]
+    async fn a_cache_hit_never_waits_on_the_profile_lookup() {
+        let mut server = mockito::Server::new_async().await;
+        let quota = server
+            .mock("GET", "/copilot_internal/user")
+            .with_status(200)
+            .with_body(QUOTA_BODY)
+            .expect(1)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/user")
+            .with_status(200)
+            .with_body(r#"{"email":"octo@example.test"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        let ttl = Duration::from_secs(3600);
+        let live = fetch(&server, "mock-oauth-token", &cache, ttl).await;
+        assert_eq!(email_of(&live), Some("octo@example.test"));
+
+        // The profile host now hangs; a cache hit must not notice.
+        let (silent, release, holder) = silent_profile_host();
+        let endpoints = Endpoints {
+            profile: format!("{silent}/user"),
+            emails: format!("{silent}/user/emails"),
+            ..endpoints_for(&server)
+        };
+        let started = std::time::Instant::now();
+        let cached = fetch_snapshot(
+            &reqwest::Client::new(),
+            "mock-oauth-token",
+            &cache,
+            &endpoints,
+            ttl,
+        )
+        .await
+        .unwrap();
+        let elapsed = started.elapsed();
+        let _ = release.send(());
+        holder.join().unwrap();
+        quota.assert_async().await;
+        assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+        assert!(!cached.off_the_wire());
+        assert_eq!(cached.snapshot.premium.as_ref().unwrap().used_pct(), 85);
+        // Other profile endpoints are another binding: no remembered address,
+        // and no lookup to wait for either.
+        assert_eq!(email_of(&cached), None);
+    }
+
+    #[tokio::test]
+    async fn an_inherited_cache_hit_carries_no_email_and_asks_for_none() {
+        let mut server = mockito::Server::new_async().await;
+        let quota = server
+            .mock("GET", "/copilot_internal/user")
+            .expect(0)
+            .create_async()
+            .await;
+        let profile = server.mock("GET", "/user").expect(0).create_async().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        let target = target_key(&endpoints_for(&server), "mock-oauth-token");
+        let snapshot = Snapshot {
+            plan: "pro".into(),
+            premium: None,
+            chat: None,
+            completions: None,
+            reset_at: None,
+        };
+        cache
+            .write_payload(
+                serde_json::json!({"target": target, "snapshot": snapshot})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+
+        let cached = fetch(
+            &server,
+            "mock-oauth-token",
+            &cache,
+            Duration::from_secs(3600),
+        )
+        .await;
+
+        quota.assert_async().await;
+        profile.assert_async().await;
+        assert!(!cached.off_the_wire());
+        assert_eq!(email_of(&cached), None);
+    }
+
+    #[tokio::test]
+    async fn another_profile_endpoint_does_not_recall_the_remembered_email() {
+        let mut server = mockito::Server::new_async().await;
+        mock_quota(&mut server, "mock-oauth-token").await;
+        server
+            .mock("GET", "/user")
+            .with_status(200)
+            .with_body(r#"{"email":"octo@example.test"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        let ttl = Duration::from_secs(3600);
+        let live = fetch(&server, "mock-oauth-token", &cache, ttl).await;
+        assert_eq!(email_of(&live), Some("octo@example.test"));
+
+        for endpoints in [
+            Endpoints {
+                profile: format!("{}/other-user", server.url()),
+                ..endpoints_for(&server)
+            },
+            Endpoints {
+                emails: format!("{}/other-emails", server.url()),
+                ..endpoints_for(&server)
+            },
+        ] {
+            let cached = fetch_snapshot(
+                &reqwest::Client::new(),
+                "mock-oauth-token",
+                &cache,
+                &endpoints,
+                ttl,
+            )
+            .await
+            .unwrap();
+            assert!(!cached.off_the_wire());
+            assert_eq!(email_of(&cached), None, "{endpoints:?}");
+        }
     }
 
     #[tokio::test]

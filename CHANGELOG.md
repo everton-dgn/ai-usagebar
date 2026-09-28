@@ -20,8 +20,18 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 - Indicação explícita quando a conexão não disponibiliza e-mail.
 - Cache do Kimi vinculado à credencial e à região, para impedir que uma troca
   de conta reutilize o consumo da conexão anterior.
+- Recuperação do consumo após falha de rede durante uma rotação de token do
+  Kimi realizada pelo aplicativo, preservando o isolamento entre contas.
+- Leitura do cache de consumo do Copilot e do Cursor sem aguardar a consulta
+  opcional de perfil; o e-mail validado é mantido apenas em memória.
+- Verificação da credencial Desktop antes de dar preferência a ela sobre uma
+  conta configurada com o mesmo nome.
 - Reconciliação segura do início automático após mudança da localização antiga
   para o bundle instalado, preservando a opção desligada.
+- Proteção contra registrar cópias temporárias no início automático e backups
+  do LaunchAgent em uma pasta persistente do aplicativo.
+- Substituição do bundle com a lixeira nativa quando o comando `trash` não está
+  disponível, preservando uma cópia do bundle anterior.
 - Apresentação da tecla Command e tradução do detalhe de ritmo em português.
 - Verificação de todas as tags com proveniência das divergências históricas,
   mantendo o changelog original intacto.

@@ -1,5 +1,5 @@
 //! Menu-bar strip: starred metrics, OpenUsage bar geometry, and a template
-//! RGBA glyph. Pure JSON in, pixels out — no AppKit, no HWND.
+//! RGBA glyph. Pure JSON in, pixels out — no AppKit.
 
 use std::collections::BTreeMap;
 
@@ -71,8 +71,8 @@ impl StripContent {
         self.groups.is_empty()
     }
 
-    /// One-line Text fallback when we cannot paint stacked type (Windows
-    /// NotifyIcon, or a host that only has `set_title`).
+    /// One-line Text fallback when we cannot paint stacked type (a host
+    /// that only has `set_title`).
     pub fn title_line(&self) -> String {
         let mut parts = Vec::new();
         for (_, name, metrics) in &self.groups {

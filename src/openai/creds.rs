@@ -45,7 +45,7 @@ pub fn read_from(path: &Path) -> Result<AuthFile> {
     let raw = std::fs::read_to_string(path).map_err(|e| AppError::io_at(path, e))?;
     serde_json::from_str(&raw).map_err(|e| {
         AppError::Credentials(format!(
-            "could not parse {}: {e}. Run `codex login` to re-authenticate.",
+            "could not parse {}: {e}. Sign in to Codex again.",
             path.display()
         ))
     })
@@ -237,23 +237,4 @@ mod tests {
     }
 
     // On Windows the home prefix is %USERPROFILE%, not $HOME.
-    #[cfg(windows)]
-    #[test]
-    fn default_path_uses_userprofile_on_windows() {
-        let p = default_path().unwrap();
-        let userprofile = std::env::var("USERPROFILE").expect("USERPROFILE set on Windows");
-        // directories::BaseDirs resolves the home via SHGetKnownFolderPath, which
-        // can differ from %USERPROFILE% in casing or path separator. Compare on a
-        // normalized basis (lowercased, backslashes) rather than Path::starts_with,
-        // which compares components case-sensitively even on Windows.
-        let norm = |s: &str| s.to_lowercase().replace('/', "\\");
-        let p_norm = norm(&p.to_string_lossy());
-        let up_norm = norm(&userprofile);
-        assert!(
-            p_norm.starts_with(up_norm.as_str()),
-            "{} should live under {}",
-            p.display(),
-            userprofile
-        );
-    }
 }

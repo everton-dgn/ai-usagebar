@@ -269,7 +269,10 @@ fn handle_auth_failure(cache: &Cache, plan_label: String, transient: bool) -> Re
     let original = if transient {
         AppError::Transport("no cache and refresh failed transiently".into())
     } else {
-        AppError::Credentials("token refresh failed; run `claude` to re-auth".into())
+        AppError::Credentials(
+            "token refresh failed; a new Claude Code sign-in is needed, which this app cannot do"
+                .into(),
+        )
     };
     crate::outcome::fallback(cache, None, original, |bytes| {
         parse_payload(bytes, plan_label)

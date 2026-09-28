@@ -100,8 +100,7 @@ pub fn default_agent_auth_path() -> Result<PathBuf> {
 pub fn read_agent_access_token(path: &Path) -> Result<String> {
     if !path.exists() {
         return Err(AppError::Credentials(format!(
-            "cursor-agent auth file not found at {}. Run `cursor-agent` and sign in at least \
-             once, then try again.",
+            "cursor-agent auth file not found at {}. Sign in to Cursor, then try again.",
             sanitize_untrusted_path(path)
         )));
     }
@@ -118,7 +117,7 @@ pub fn read_agent_access_token(path: &Path) -> Result<String> {
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| {
             AppError::Credentials(format!(
-                "no accessToken in {}. Sign in with `cursor-agent` again.",
+                "no accessToken in {}. Sign in to Cursor again.",
                 sanitize_untrusted_path(path)
             ))
         })?;

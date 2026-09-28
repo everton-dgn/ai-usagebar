@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use crate::cache::atomic_write;
 use crate::error::{AppError, Result};
 
-#[cfg(target_os = "macos")]
 use super::keychain;
 
 /// Disk shape (matches claudebar's jq paths).
@@ -185,17 +184,9 @@ pub fn is_unusable(oauth: &OauthCreds) -> bool {
 pub fn resolve(target: &CredsTarget) -> Result<(CredentialsFile, CredsSource)> {
     match target {
         CredsTarget::Explicit(p) => Ok((read_from(p)?, CredsSource::File(p.clone()))),
-        CredsTarget::Default(p) => {
-            #[cfg(target_os = "macos")]
-            return read_default_with(p, keychain::read_raw);
-            #[cfg(not(target_os = "macos"))]
-            read_default_with(p, || Ok(None))
-        }
+        CredsTarget::Default(p) => read_default_with(p, keychain::read_raw),
         CredsTarget::Named { path, config_dir } => {
-            #[cfg(target_os = "macos")]
-            return read_named_with(path, config_dir, keychain::read_raw_for);
-            #[cfg(not(target_os = "macos"))]
-            read_named_with(path, config_dir, |_| Ok(None))
+            read_named_with(path, config_dir, keychain::read_raw_for)
         }
         CredsTarget::Desktop(desktop) => {
             let (creds, writeback) = desktop.read()?;
@@ -273,7 +264,7 @@ fn read_named_with(
 fn parse(raw: &str, source: &str) -> Result<CredentialsFile> {
     serde_json::from_str(raw).map_err(|e| {
         AppError::Credentials(format!(
-            "could not parse {source}: {e}. Run `claude` to re-authenticate."
+            "could not parse {source}: {e}. A new Claude Code sign-in is needed, which this app cannot do."
         ))
     })
 }
@@ -304,28 +295,18 @@ fn merge_oauth(existing: Option<&str>, new_oauth: &OauthCreds) -> Result<serde_j
 pub fn write_back_to(source: &CredsSource, new_oauth: &OauthCreds) -> Result<()> {
     match source {
         CredsSource::File(path) => write_back(path, new_oauth),
-        #[cfg(target_os = "macos")]
         CredsSource::Keychain => {
             let existing = keychain::read_raw()?;
             let doc = merge_oauth(existing.as_deref(), new_oauth)?;
             let json = serde_json::to_string(&doc).map_err(AppError::Json)?;
             keychain::write_raw(&json)
         }
-        #[cfg(not(target_os = "macos"))]
-        CredsSource::Keychain => Err(AppError::Other(
-            "Keychain credentials source is macOS-only".into(),
-        )),
-        #[cfg(target_os = "macos")]
         CredsSource::NamedKeychain(config_dir) => {
             let existing = keychain::read_raw_for(config_dir)?;
             let doc = merge_oauth(existing.as_deref(), new_oauth)?;
             let json = serde_json::to_string(&doc).map_err(AppError::Json)?;
             keychain::write_raw_for(config_dir, &json)
         }
-        #[cfg(not(target_os = "macos"))]
-        CredsSource::NamedKeychain(_) => Err(AppError::Other(
-            "Keychain credentials source is macOS-only".into(),
-        )),
         CredsSource::Desktop(writeback) => writeback.write(new_oauth),
     }
 }
@@ -656,25 +637,6 @@ mod tests {
 
     // On Windows the home prefix is %USERPROFILE%, not $HOME — assert the
     // resolver honors it so the credential file is found natively.
-    #[cfg(windows)]
-    #[test]
-    fn default_path_uses_userprofile_on_windows() {
-        let p = default_path().unwrap();
-        let userprofile = std::env::var("USERPROFILE").expect("USERPROFILE set on Windows");
-        // directories::BaseDirs resolves the home via SHGetKnownFolderPath, which
-        // can differ from %USERPROFILE% in casing or path separator. Compare on a
-        // normalized basis (lowercased, backslashes) rather than Path::starts_with,
-        // which compares components case-sensitively even on Windows.
-        let norm = |s: &str| s.to_lowercase().replace('/', "\\");
-        let p_norm = norm(&p.to_string_lossy());
-        let up_norm = norm(&userprofile);
-        assert!(
-            p_norm.starts_with(up_norm.as_str()),
-            "{} should live under {}",
-            p.display(),
-            userprofile
-        );
-    }
 
     #[test]
     fn merge_oauth_preserves_unknown_top_level_fields() {

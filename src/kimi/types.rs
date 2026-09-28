@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::error::{AppError, Result};
+use crate::identity::AccountEmail;
 use crate::usage::KimiSnapshot;
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -208,12 +209,13 @@ fn extract_block(block: UsageBlock) -> Result<(u64, u64, u64, Option<DateTime<Ut
     Ok((limit, used, remaining, reset))
 }
 
-/// The profile response from `/coding/v1/me`, read for exactly one field.
+/// The profile response from `/coding/v1/me`, read for two fields.
 ///
-/// That endpoint also returns the account's email, phone, nickname, avatar and
-/// ids. **None of them are deserialized here** — serde drops unknown fields, so
-/// the personal data never enters a snapshot, the cache, or an error message.
-/// Keep it that way: the plan label is the only thing this vendor needs.
+/// That endpoint also returns the account's phone, nickname, avatar and ids.
+/// **None of those are deserialized here** — serde drops unknown fields, so
+/// that personal data never enters a snapshot, the cache, or an error message.
+/// The address is read only as a validated [`AccountEmail`], whose `Debug` is
+/// redacted, and it travels on the outcome, never in the snapshot or cache.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct UserInfoResponse {
@@ -221,9 +223,26 @@ pub struct UserInfoResponse {
     /// "Allegretto", "Allegro". Kimi names its plans after tempo markings, so
     /// this reads as a product name and not as a gamification badge.
     user_level_name: Option<String>,
+    /// Top-level `email`. Anything but a well-formed address is no address,
+    /// never a reason to lose the plan label.
+    #[serde(deserialize_with = "de_account_email")]
+    email: Option<AccountEmail>,
+}
+
+fn de_account_email<'de, D>(d: D) -> std::result::Result<Option<AccountEmail>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(value.as_str().and_then(AccountEmail::parse))
 }
 
 impl UserInfoResponse {
+    /// The signed-in account's address, when the profile carried a valid one.
+    pub fn account_email(&self) -> Option<AccountEmail> {
+        self.email.clone()
+    }
+
     pub fn plan_label(&self) -> Option<String> {
         self.user_level_name
             .as_deref()
@@ -312,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn the_profile_response_yields_only_the_tier_name() {
+    fn the_profile_response_yields_the_tier_name_and_a_redacted_email() {
         let raw = r#"{
             "user_id": "u-1", "nickname": "someone", "email": "someone@example.com",
             "phone": {"country_code": "55", "number": "999999999"},
@@ -321,11 +340,34 @@ mod tests {
         }"#;
         let me: UserInfoResponse = serde_json::from_str(raw).unwrap();
         assert_eq!(me.plan_label(), Some("Allegretto".into()));
-        // The struct has no field to hold the personal data, so nothing else
-        // can leak into a snapshot or a Debug line.
+        assert_eq!(
+            me.account_email().as_ref().map(AccountEmail::as_str),
+            Some("someone@example.com")
+        );
+        // The phone has no field to land in and the address is redacted, so
+        // neither can leak into a Debug line.
         let rendered = format!("{me:?}");
         assert!(!rendered.contains("example.com"), "{rendered}");
         assert!(!rendered.contains("999999999"), "{rendered}");
+    }
+
+    #[test]
+    fn an_unusable_profile_email_is_no_email_and_keeps_the_tier_name() {
+        for email in [
+            r#""""#,
+            r#""not-an-address""#,
+            r#""a@b@c""#,
+            "42",
+            "null",
+            r#"{"address":"nested@example.com"}"#,
+        ] {
+            let raw = format!(r#"{{"email": {email}, "user_level_name": "Allegro"}}"#);
+            let me: UserInfoResponse = serde_json::from_str(&raw).unwrap();
+            assert_eq!(me.account_email(), None, "{raw}");
+            assert_eq!(me.plan_label(), Some("Allegro".into()), "{raw}");
+        }
+        let me: UserInfoResponse = serde_json::from_str("{}").unwrap();
+        assert_eq!(me.account_email(), None);
     }
 
     #[test]

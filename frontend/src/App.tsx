@@ -1,0 +1,544 @@
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Footer, TopBar } from "@/components/Chrome";
+import type { RowAction } from "@/components/RowMenu";
+import type { RowLists } from "@/components/dnd";
+import type { Layout, ProviderView, Screen } from "@/lib/types";
+import { LanguageProvider, translate } from "@/lib/i18n";
+import { cn } from "@/lib/utils";
+import { About } from "@/screens/About";
+import { Dashboard } from "@/screens/Dashboard";
+import { MacDashboard, MacPanelHeader } from "@/screens/MacDashboard";
+import { ProviderDetail } from "@/screens/ProviderDetail";
+import { Settings, type SettingsTab } from "@/screens/Settings";
+import {
+  absorbPayload,
+  applyCardLayout,
+  applyTheme,
+  emptyLayout,
+  focusOnVisibility,
+  hintPending,
+  emptyPayload,
+  loadLayout,
+  layoutForProviderView,
+  memoryStorage,
+  mergeVisibleOrder,
+  moveRowToList,
+  parseHostPayload,
+  applyCardNames,
+  prefsForCard,
+  projectCards,
+  renameCard,
+  resetProviderViewLayout,
+  resolvedTheme,
+  saveLayout,
+  seedStars,
+  sendCommand,
+  setRowEnabled,
+  stripCommand,
+  toggleStar,
+  updateProviderViewLayout,
+} from "./model.js";
+import { measurePanelHeight, panelHeight } from "./panel-size.js";
+
+type Direction = "back" | "forward";
+
+/** Screens ordered as the OpenUsage pager lays them out: dashboard ← provider → settings. */
+const SCREEN_DEPTH: Record<Screen, number> = { dashboard: 0, provider: 2, settings: 3, about: 4 };
+
+function resolveStorage(onError: () => void) {
+  try {
+    const ls = window.localStorage;
+    ls.setItem("__aiub_t", "1");
+    ls.removeItem("__aiub_t");
+    return ls;
+  } catch {
+    onError();
+    return memoryStorage();
+  }
+}
+
+export default function App() {
+  const [initial] = useState(() => {
+    let error = false;
+    let durable = true;
+    const storage = resolveStorage(() => { error = true; durable = false; });
+    const layout = loadLayout(storage, () => { error = true; });
+    return { storage, layout, error, durable };
+  });
+  const storageRef = useRef(initial.storage);
+  const [storageError, setStorageError] = useState(initial.error);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const [payload, setPayload] = useState(() => emptyPayload(""));
+  const [layout, setLayout] = useState<Layout>(initial.layout);
+  const [screen, setScreen] = useState<Screen>("dashboard");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const [direction, setDirection] = useState<Direction>("forward");
+  const [providerId, setProviderId] = useState("");
+  const [providerView, setProviderView] = useState<ProviderView>("overview");
+  // A menu-bar click opens only that provider/account, without the overview tabs.
+  const [focusId, setFocusId] = useState("");
+  const [presentationRevision, setPresentationRevision] = useState(0);
+  // Where the provider detail was opened from, so Back returns there: the
+  // Settings provider list, or the dashboard header's Customize shortcut.
+  const [providerFrom, setProviderFrom] = useState<Screen>("settings");
+  const [aboutFrom, setAboutFrom] = useState<Screen>("dashboard");
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [locked, setLocked] = useState(false);
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const [rowMenuOpen, setRowMenuOpen] = useState(false);
+  const [resetArmed, setResetArmed] = useState(false);
+  const [starError, setStarError] = useState("");
+  const [popoverVisible, setPopoverVisible] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const cards = useMemo(
+    () => (payload.hostError ? [] : applyCardNames(projectCards(payload, nowMs), layout.names)),
+    [payload, nowMs, layout.names],
+  );
+  const visible = useMemo(() => applyCardLayout(cards, layout), [cards, layout]);
+  const currentCard = cards.find((card) => card.id === providerId);
+  const providerLayout = layoutForProviderView(layout, providerView);
+  const dashboardView: ProviderView = focusId ? "individual" : "overview";
+  const dashboardLayout = layoutForProviderView(layout, dashboardView);
+
+  // The host decides whether a blur or an outside click closes the popover.
+  useEffect(() => {
+    sendCommand("set-pinned", { value: layout.pinned });
+  }, [layout.pinned]);
+
+  function commit(next: Layout) {
+    setLayout(next);
+    persistLayout(next);
+    sendCommand("strip", stripCommand(next, cards));
+  }
+
+  function persistLayout(next: Layout) {
+    const saved = saveLayout(storageRef.current, next);
+    setStorageError(!saved || !initial.durable);
+  }
+
+  function go(next: Screen) {
+    setDirection(SCREEN_DEPTH[next] < SCREEN_DEPTH[screen] ? "back" : "forward");
+    setScreen(next);
+    setResetArmed(false);
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+  }
+
+  // Provider visibility and order live in the Settings Providers tab.
+  function openCustomize() {
+    setSettingsTab("providers");
+    go("settings");
+  }
+
+  function changeSettingsTab(next: SettingsTab) {
+    setSettingsTab(next);
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+  }
+
+  function goBack() {
+    if (screen === "about") {
+      go(aboutFrom === "about" ? "dashboard" : aboutFrom);
+      return;
+    }
+    if (screen === "provider") go(providerFrom);
+    else go("dashboard");
+  }
+
+  function openAbout() {
+    setOptionsOpen(false);
+    if (screen !== "about") setAboutFrom(screen);
+    go("about");
+  }
+
+  useEffect(() => {
+    applyTheme(layout.theme);
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => applyTheme(layout.theme);
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, [layout.theme]);
+
+  useEffect(() => {
+    document.documentElement.lang = layout.language;
+  }, [layout.language]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    window.__AIUB_APPLY__ = (raw) => {
+      const next = parseHostPayload(raw);
+      setPayload(next);
+      setLayout((current) => {
+        const cards = projectCards(next, Date.now());
+        const synced = seedStars(absorbPayload(current, next.entries), cards);
+        // Do not overwrite unreadable preferences with defaults on refresh.
+        if (synced !== current && !initial.error) persistLayout(synced);
+        sendCommand("strip", stripCommand(synced, cards));
+        return synced;
+      });
+    };
+    window.__AIUB_FOCUS__ = (id, revision, targetScreen = "dashboard") => {
+      setFocusId(typeof id === "string" ? id : "");
+      // Even reopening the same provider must acknowledge this native request.
+      if (revision !== undefined) setPresentationRevision(revision);
+      if (id || revision !== undefined) setScreen(targetScreen);
+    };
+    window.__AIUB_VISIBLE__ = (visible, provider, targetScreen = "dashboard") => {
+      // Visibility changes are also sizing boundaries. ResizeObserver callbacks
+      // can be suspended while the WebView is hidden, so force a fresh measurement
+      // as soon as the native host opens the popover again.
+      setPopoverVisible(visible);
+      setFocusId((current) => focusOnVisibility(current, visible, provider));
+      if (visible && provider !== undefined) setScreen(targetScreen);
+      if (visible) return;
+      // Closing the popover resets navigation: back to the dashboard, scrolled to the top,
+      // menus closed (OpenUsage "Closing").
+      setOptionsOpen(false);
+      setRowMenuOpen(false);
+      setResetArmed(false);
+      setScreen("dashboard");
+      if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    };
+    window.__AIUB_LOCKCLICKS__ = (ms) => {
+      const hold = Math.max(0, Number(ms) || 0);
+      setLocked(true);
+      document.documentElement.style.pointerEvents = "none";
+      window.setTimeout(() => {
+        setLocked(false);
+        document.documentElement.style.pointerEvents = "";
+      }, hold);
+    };
+    sendCommand("ready");
+    return () => {
+      delete window.__AIUB_APPLY__;
+      delete window.__AIUB_FOCUS__;
+      delete window.__AIUB_LOCKCLICKS__;
+      delete window.__AIUB_VISIBLE__;
+    };
+  }, []);
+
+  // The panel follows its content (PanelHeightCoordinator): report the intrinsic height of the
+  // shell — chrome plus unscrolled content — and let the host clamp it to the work area. A
+  // macrotask, not requestAnimationFrame: the WebView stops painting while the popover is
+  // hidden, and a payload that lands then must still size the window before it is shown.
+  useLayoutEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) return;
+    let frame = 0;
+    let last = -1;
+    const report = () => {
+      frame = 0;
+      const measured = measurePanelHeight(shell);
+      const compact = !!focusId && screen === "dashboard";
+      const height = panelHeight(measured, compact);
+      if (height <= 0 || height === last) return;
+      last = height;
+      sendCommand("resize", {
+        height, compact, theme: resolvedTheme(layout.theme),
+        provider: focusId, screen, revision: presentationRevision,
+      });
+    };
+    const schedule = () => {
+      if (frame === 0) frame = window.setTimeout(report, 0);
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(shell);
+    for (const child of Array.from(shell.children)) observer.observe(child);
+    const content = shell.querySelector<HTMLElement>("[data-scroll-content]");
+    if (content) observer.observe(content);
+    schedule();
+    return () => {
+      observer.disconnect();
+      if (frame !== 0) window.clearTimeout(frame);
+    };
+  }, [screen, payload, layout, popoverVisible, focusId, presentationRevision]);
+
+  function onKeyDown(event: KeyboardEvent) {
+    if (locked || event.defaultPrevented || optionsOpen || rowMenuOpen) return;
+    // The shortcut recorder owns every key while it records (Escape cancels it, not the screen).
+    if (document.activeElement?.closest("[data-recording]")) return;
+    // Controls own Enter/Escape: switches, pickers, menus, sortable handles.
+    const target = event.target instanceof Element ? event.target : null;
+    const onControl = !!target?.closest(
+      'button, input, select, textarea, [role="button"], [role="option"], [role="listbox"], [role="menu"], [role="menuitem"]',
+    );
+    if (event.key === "Escape") {
+      if (onControl && screen !== "dashboard" && target?.closest('[role="listbox"], [role="menu"]')) return;
+      if (screen !== "dashboard") goBack();
+      else sendCommand("close");
+      return;
+    }
+    if (event.key === "Enter" && !onControl) {
+      if (screen === "dashboard") openCustomize();
+      else goBack();
+    }
+  }
+
+  useEffect(() => {
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  });
+
+  function toggleShowAs() {
+    commit({ ...layout, showAs: layout.showAs === "used" ? "left" : "used" });
+  }
+
+  // Two clicks within three seconds; a native confirm() would steal focus and the
+  // popover hides itself on focus loss. Like OpenUsage's Reset All, it also re-runs
+  // provider detection so the layout starts from the tools on this machine.
+  function resetAll() {
+    if (!resetArmed) {
+      setResetArmed(true);
+      window.setTimeout(() => setResetArmed(false), 3000);
+      return;
+    }
+    setResetArmed(false);
+    commit(
+      absorbPayload(
+        {
+          ...emptyLayout(),
+          language: layout.language,
+          alwaysShowPace: layout.alwaysShowPace,
+          resetTimes: layout.resetTimes,
+          showAs: layout.showAs,
+          showPlan: layout.showPlan,
+          panelView: layout.panelView,
+          colorThresholds: layout.colorThresholds,
+          pinned: layout.pinned,
+          theme: layout.theme,
+          timeFormat: layout.timeFormat,
+        },
+        payload.entries,
+      ),
+    );
+    sendCommand("detect");
+  }
+
+  function resetProviderRows(id: string, view: ProviderView = "overview") {
+    if (!id) return;
+    commit(resetProviderViewLayout(layout, view, id));
+  }
+
+  function openProvider(id: string, from: Screen, view: ProviderView = dashboardView) {
+    setProviderId(id);
+    setProviderView(view);
+    setProviderFrom(from);
+    go("provider");
+  }
+
+  function reorderRows(lists: RowLists) {
+    if (!currentCard) return;
+    const prevOff = prefsForCard(currentCard, providerLayout).off || {};
+    commit(updateProviderViewLayout(layout, providerView, {
+      rows: { ...providerLayout.rows, [providerId]: { always: lists.always, demand: lists.demand, off: prevOff } },
+    }));
+  }
+
+  // Row context menu. Hide / Always show / Show on demand rewrite that provider's row prefs the
+  // same way the Customize screen does; Refresh and Customize are provider-level shortcuts.
+  function onRowAction(id: string, key: string, action: RowAction) {
+    const card = cards.find((item) => item.id === id);
+    if (!card) return;
+    if (action === "refresh") {
+      sendCommand("refresh-entry", { id });
+      return;
+    }
+    if (action === "customize") {
+      openProvider(id, "dashboard");
+      return;
+    }
+    if (action === "star") {
+      const result = toggleStar(layout.stars, id, key);
+      if (result.error) {
+        setStarError(result.error);
+        window.setTimeout(() => setStarError(""), 2200);
+        return;
+      }
+      commit({ ...layout, stars: result.stars });
+      return;
+    }
+    const prefs = prefsForCard(card, layout);
+    const next = action === "hide" ? setRowEnabled(prefs, key, false) : moveRowToList(prefs, key, action);
+    commit({ ...layout, rows: { ...layout.rows, [id]: next } });
+  }
+
+  const title =
+    screen === "settings"
+      ? translate(layout.language, "Settings")
+      : screen === "about"
+        ? translate(layout.language, "About")
+        : currentCard?.title || "Provider";
+
+  const macHeader = (
+    <MacPanelHeader
+      focusId={focusId}
+      view={layout.panelView}
+      pinned={layout.pinned}
+      onView={(panelView) => commit({ ...layout, panelView })}
+      onPin={(pinned) => commit({ ...layout, pinned })}
+      onOpenSettings={() => focusId ? openProvider(focusId, "dashboard", "individual") : go("settings")}
+    />
+  );
+
+  return (
+    <LanguageProvider language={layout.language}>
+    <div
+      ref={shellRef}
+      className={cn(
+        "flex h-full flex-col overflow-hidden rounded-[13px] bg-background text-foreground",
+        "mac-panel",
+      )}
+    >
+      {storageError ? (
+        <div role="alert" className="px-[var(--panel-pad)] py-2 text-[length:var(--sz-badge)] text-meter-red">
+          {translate(layout.language, "Preferences storage is unavailable. Your changes may not survive a restart.")}
+        </div>
+      ) : null}
+      {screen !== "dashboard" ? (
+        <TopBar
+          resetArmed={resetArmed}
+          title={title}
+          resetLabel={screen === "provider" ? `${translate(layout.language, "Reset")} ${title} · ${translate(layout.language, providerView === "individual" ? "Individual" : "Full list")}` : undefined}
+          onBack={goBack}
+          onReset={screen === "provider" ? () => resetProviderRows(providerId, providerView) : undefined}
+        />
+      ) : null}
+      <div ref={scrollRef} data-scroll className="min-h-0 flex-1 overflow-y-auto">
+        <div
+          key={screen}
+          data-direction={direction}
+          data-scroll-content
+          className={cn(
+            "screen-enter px-[var(--panel-pad)] pb-0",
+            screen === "dashboard" ? "pt-[var(--panel-pad)]" : "pt-0",
+          )}
+        >
+          {screen === "dashboard" ? (
+            layout.panelView === "tabs" || focusId ? (
+              <>
+                {macHeader}
+                <MacDashboard
+                  cards={focusId ? cards : visible}
+                  layout={dashboardLayout}
+                  nowMs={nowMs}
+                  payload={payload}
+                  focusId={focusId}
+                  onOpenCustomize={openCustomize}
+                  onSwitchAccount={(vendor, label) => sendCommand("switch-account", { vendor, label })}
+                  onToggleCollapse={(id) => commit(updateProviderViewLayout(layout, dashboardView, {
+                    collapsed: { ...dashboardLayout.collapsed, [id]: !dashboardLayout.collapsed[id] },
+                  }))}
+                />
+              </>
+            ) : (
+              <>
+              {macHeader}
+              <Dashboard
+              cards={cards}
+              hint={hintPending(layout)}
+              layout={layout}
+              nowMs={nowMs}
+              payload={payload}
+              visible={visible}
+              onCustomizeProvider={(id) => openProvider(id, "dashboard")}
+              onDismissHint={() => commit({ ...layout, hintDismissed: true })}
+              onOpenCustomize={openCustomize}
+              onResetProvider={resetProviderRows}
+              onReorder={(ids) => commit({ ...layout, cardOrder: mergeVisibleOrder(layout.cardOrder, ids) })}
+              onRowAction={onRowAction}
+              onRowMenuOpenChange={setRowMenuOpen}
+              onSwitchAccount={(vendor, label) => sendCommand("switch-account", { vendor, label })}
+              onToggleCollapse={(id) => {
+                const collapsed = { ...layout.collapsed };
+                if (collapsed[id]) delete collapsed[id];
+                else collapsed[id] = true;
+                commit({ ...layout, collapsed });
+              }}
+              onToggleShowAs={toggleShowAs}
+              />
+              </>
+            )
+          ) : null}
+          {screen === "provider" ? (
+            <ProviderDetail
+              key={providerId}
+              card={currentCard}
+              layout={providerLayout}
+              view={providerView}
+              onView={setProviderView}
+              onToggleCollapse={(expanded) => commit(updateProviderViewLayout(layout, providerView, {
+                collapsed: { ...providerLayout.collapsed, [providerId]: !expanded },
+              }))}
+              starError={starError}
+              onReorderRows={reorderRows}
+              onToggleStar={(key) => {
+                if (!currentCard) return;
+                const result = toggleStar(layout.stars, currentCard.id, key);
+                if (result.error) {
+                  setStarError(result.error);
+                  window.setTimeout(() => setStarError(""), 2200);
+                  return;
+                }
+                commit({ ...layout, stars: result.stars });
+              }}
+              onToggleRow={(key, on) => {
+                if (!currentCard) return;
+                commit(updateProviderViewLayout(layout, providerView, {
+                  rows: { ...providerLayout.rows, [providerId]: setRowEnabled(prefsForCard(currentCard, providerLayout), key, on) },
+                }));
+              }}
+              onRename={(name) => {
+                if (!currentCard) return;
+                commit({ ...layout, names: renameCard(layout.names, currentCard.id, name) });
+              }}
+            />
+          ) : null}
+          {screen === "about" ? <About payload={payload} /> : null}
+          {screen === "settings" ? (
+            <Settings
+              tab={settingsTab}
+              onTabChange={changeSettingsTab}
+              cards={cards}
+              layout={layout}
+              payload={payload}
+              onAlwaysShowPace={(alwaysShowPace) => commit({ ...layout, alwaysShowPace })}
+              onUsageGoal={(usageGoal) => commit({ ...layout, usageGoal })}
+              onLanguage={(language) => commit({ ...layout, language })}
+              onOpenProvider={(id) => openProvider(id, "settings")}
+              onReorderProviders={(ids) => commit({ ...layout, cardOrder: mergeVisibleOrder(layout.cardOrder, ids) })}
+              onToggleProvider={(id, on) => {
+                const hidden = { ...layout.hidden };
+                if (on) delete hidden[id];
+                else hidden[id] = true;
+                commit({ ...layout, hidden });
+              }}
+              onResetCustomization={resetAll}
+              resetArmed={resetArmed}
+              onResetTimes={(resetTimes) => commit({ ...layout, resetTimes })}
+              onShowAs={(showAs) => commit({ ...layout, showAs })}
+              onTheme={(theme) => commit({ ...layout, theme })}
+              onTimeFormat={(timeFormat) => commit({ ...layout, timeFormat })}
+              onPanelView={(panelView) => commit({ ...layout, panelView })}
+              onShowPlan={(showPlan) => commit({ ...layout, showPlan })}
+              onColorThresholds={(colorThresholds) => commit({ ...layout, colorThresholds })}
+            />
+          ) : null}
+        </div>
+      </div>
+      {!(focusId && screen === "dashboard") ? <Footer
+        optionsOpen={optionsOpen}
+        payload={payload}
+        onOpenAbout={openAbout}
+        onOpenSettings={() => {
+          setOptionsOpen(false);
+          go("settings");
+        }}
+        onOptionsOpenChange={setOptionsOpen}
+      /> : null}
+    </div>
+    </LanguageProvider>
+  );
+}

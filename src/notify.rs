@@ -48,7 +48,6 @@ const CREDIT_WARNING_SECS: i64 = 48 * 3600;
 const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A notifier that hangs must not hang the bar with it.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 const SPAWN_KILL_AFTER: Duration = Duration::from_secs(5);
 
 /// Urgency band for one notification. `notify-send`'s `-u` maps directly.
@@ -58,16 +57,6 @@ pub enum Urgency {
     Normal,
     /// The window is exhausted (`pct >= 100`).
     Critical,
-}
-
-#[cfg(target_os = "linux")]
-impl Urgency {
-    fn as_arg(self) -> &'static str {
-        match self {
-            Self::Normal => "normal",
-            Self::Critical => "critical",
-        }
-    }
 }
 
 /// One notification to deliver. `key` is the dedupe identity the state map
@@ -296,7 +285,6 @@ impl NotifyState {
     fn write_to(&self, path: &Path) -> crate::error::Result<()> {
         let bytes = serde_json::to_vec(&self.entries)?;
         crate::cache::atomic_write(path, &bytes)?;
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             if let Ok(meta) = std::fs::metadata(path) {
@@ -321,74 +309,17 @@ pub trait NotifySink {
 }
 
 /// The do-nothing sink for platforms without a desktop delivery backend.
-#[cfg(any(not(any(target_os = "linux", target_os = "macos")), test))]
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct NoopSink;
 
-#[cfg(any(not(any(target_os = "linux", target_os = "macos")), test))]
+#[cfg(test)]
 impl NotifySink for NoopSink {
     fn deliver(&mut self, _notification: &Notification) {}
 }
 
-/// Linux `notify-send` sink. argv only — never a shell — with stderr nulled:
-/// the notification daemon's complaints are not the bar's problem. A missing
-/// binary or a failed spawn is swallowed; a hanging one is killed after
-/// [`SPAWN_KILL_AFTER`].
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
-pub struct NotifySendSink {
-    program: String,
-}
-
-#[cfg(target_os = "linux")]
-impl Default for NotifySendSink {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl NotifySendSink {
-    pub fn new() -> Self {
-        Self {
-            program: "notify-send".to_string(),
-        }
-    }
-
-    /// Point at a specific executable — the seam the failing-notifier guard
-    /// test uses, and the way a future desktop integration pins a path.
-    pub fn with_program(program: impl Into<String>) -> Self {
-        Self {
-            program: program.into(),
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl NotifySink for NotifySendSink {
-    fn deliver(&mut self, notification: &Notification) {
-        let spawned = std::process::Command::new(&self.program)
-            .arg("-a")
-            .arg("ai-usagebar")
-            .arg("-c")
-            .arg("quota")
-            .arg("-u")
-            .arg(notification.urgency.as_arg())
-            .arg(&notification.title)
-            .arg(&notification.body)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-        if let Ok(child) = spawned {
-            reap(child);
-        }
-    }
-}
-
 /// Wait for the notifier, killing it at the cap. Desktop delivery normally
 /// returns in milliseconds; the cap only matters when the service is wedged.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn reap(mut child: std::process::Child) {
     let deadline = std::time::Instant::now() + SPAWN_KILL_AFTER;
     loop {
@@ -407,20 +338,13 @@ fn reap(mut child: std::process::Child) {
 }
 
 fn production_sink() -> Box<dyn NotifySink + Send> {
-    #[cfg(target_os = "linux")]
-    return Box::new(NotifySendSink::new());
-    #[cfg(target_os = "macos")]
-    return Box::new(MacNotificationSink);
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    return Box::new(NoopSink);
+    Box::new(MacNotificationSink)
 }
 
 /// AppleScript's Standard Additions sends a native Notification Center banner.
 /// Passing title and body as argv keeps provider text out of the script source.
-#[cfg(target_os = "macos")]
 struct MacNotificationSink;
 
-#[cfg(target_os = "macos")]
 impl NotifySink for MacNotificationSink {
     fn deliver(&mut self, notification: &Notification) {
         const SCRIPT: &str = "on run argv\n display notification (item 2 of argv) with title (item 1 of argv)\nend run";
@@ -514,12 +438,12 @@ impl RefreshInput {
     /// Banked credits ride along only when the vendor reports them and the
     /// report would surface them (`available > 0`).
     pub(crate) fn from_tab(
-        tab: &crate::tui::app::TabId,
-        state: &crate::tui::app::TabState,
+        tab: &crate::core::entries::TabId,
+        state: &crate::core::entries::TabState,
         now: DateTime<Utc>,
     ) -> Option<Self> {
-        use crate::tui::app::{TabSource, TabState};
-        use crate::tui::panels::{Section, sections_with_metadata_for};
+        use crate::core::entries::{TabSource, TabState};
+        use crate::core::sections::{Section, sections_with_metadata_for};
 
         let TabState::Ready(ready) = state else {
             return None;
@@ -897,7 +821,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn state_file_is_mode_0600() {
         use std::os::unix::fs::PermissionsExt;
         let (dir, path) = state_path();
@@ -1008,34 +931,6 @@ mod tests {
         assert!(sink.delivered.is_empty());
     }
 
-    /// The guard test for the whole feature: a notifier that cannot even be
-    /// spawned must not make the check error, panic, or skip the state
-    /// bookkeeping. `run_at` has no failure channel at all — this pins that.
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn a_missing_notifier_binary_is_a_silent_no_op() {
-        let (dir, path) = state_path();
-        let mut sink = NotifySendSink::with_program("/nonexistent/notify-send");
-        let input = input(vec![row("Weekly (7d)", 97, None)]);
-        run_at(
-            &input,
-            97,
-            &path,
-            Duration::from_secs(2),
-            &mut sink,
-            at(23, 12, 0),
-        );
-        assert!(
-            path.exists(),
-            "state bookkeeping is independent of delivery"
-        );
-        assert!(
-            NotifyState::read_from(&path).is_notified("anthropic@gmail::Weekly (7d)"),
-            "the crossing is marked even though nothing was delivered"
-        );
-        drop(dir);
-    }
-
     #[test]
     fn noop_sink_records_nothing_and_never_fails() {
         let (dir, path) = state_path();
@@ -1057,13 +952,14 @@ mod tests {
 
     #[test]
     fn from_tab_projects_rows_account_and_credits() {
-        use crate::tui::app::{ReadyTab, TabId, TabState};
+        use crate::core::entries::{ReadyTab, TabId, TabState};
         use crate::usage::{
             AnthropicSnapshot, ResetCredit, ResetCredits, UsageWindow, VendorSnapshot,
         };
 
         let reset = at(24, 2, 0);
         let state = TabState::Ready(Box::new(ReadyTab {
+            email: None,
             snapshot: VendorSnapshot::Anthropic(AnthropicSnapshot {
                 plan: "Claude Max 20x".into(),
                 session: UsageWindow {
@@ -1102,6 +998,7 @@ mod tests {
 
         // A Codex snapshot carries its banked credits through.
         let state = TabState::Ready(Box::new(ReadyTab {
+            email: None,
             snapshot: VendorSnapshot::Openai(crate::usage::OpenAiSnapshot {
                 plan: "ChatGPT Pro".into(),
                 session: None,
@@ -1142,13 +1039,14 @@ mod tests {
 
     #[test]
     fn from_tab_skips_grouped_slices_and_unavailable_credits() {
-        use crate::tui::app::{ReadyTab, TabId, TabState};
+        use crate::core::entries::{ReadyTab, TabId, TabState};
         use crate::usage::{
             ResetCredit, ResetCredits, SuperGrokPeriod, SuperGrokProduct, SuperGrokSnapshot,
             VendorSnapshot,
         };
 
         let state = TabState::Ready(Box::new(ReadyTab {
+            email: None,
             snapshot: VendorSnapshot::SuperGrok(SuperGrokSnapshot {
                 plan: "SuperGrok Heavy".into(),
                 account: "scope".into(),
@@ -1188,15 +1086,7 @@ mod tests {
 
     #[test]
     fn from_tab_returns_none_for_unready_states() {
-        use crate::tui::app::{TabId, TabState};
-        assert!(
-            RefreshInput::from_tab(
-                &TabId::vendor(crate::vendor::VendorId::Zai),
-                &TabState::Loading,
-                at(23, 12, 0)
-            )
-            .is_none()
-        );
+        use crate::core::entries::{TabId, TabState};
         assert!(
             RefreshInput::from_tab(
                 &TabId::vendor(crate::vendor::VendorId::Zai),

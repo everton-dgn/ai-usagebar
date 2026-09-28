@@ -30,6 +30,7 @@ use super::cloud;
 use super::credential::{self, StoredToken};
 use crate::cache::{Cache, acquire_lock_async};
 use crate::error::{AppError, Result};
+use crate::identity::AccountEmail;
 use crate::usage::{AntigravitySnapshot, AntigravitySource, UsageWindow};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -41,10 +42,9 @@ const STATUS_RPC: &str = "exa.language_server_pb.LanguageServerService/GetUserSt
 const DEFAULT_PLAN: &str = "Antigravity";
 
 const NO_LOCAL_SERVER: &str = "Antigravity: no local server found. Quota is only served while \
-                               Antigravity is running — open the Antigravity app, or an interactive \
-                               `agy` session, or point ANTIGRAVITY_LS_ADDRESS at a host:port.";
+                               Antigravity is running — open the Antigravity app.";
 
-const AGY_CSRF_UNAVAILABLE: &str = "Antigravity: the running `agy` server requires a CSRF token \
+const AGY_CSRF_UNAVAILABLE: &str = "Antigravity: the running agy server requires a CSRF token \
                                    that it does not publish.";
 
 /// Appended to [`NO_LOCAL_SERVER`] once the remote fallback has also come up
@@ -164,11 +164,14 @@ pub async fn fetch_snapshot_at(
         },
     };
     let account = origin.account();
+    // Only the local session that answered this poll vouches for an address;
+    // the fallbacks below replay a cache whose owner they cannot check.
+    let email = origin.email();
 
     if let Some(bytes) = cache.fresh_payload(cache_ttl)?
         && let Ok(outcome) = reuse_cache(bytes, cache, false, account.as_deref(), now)
     {
-        return Ok(outcome);
+        return Ok(outcome.with_email(email));
     }
 
     let default_endpoints = cloud::Endpoints::default();
@@ -182,7 +185,7 @@ pub async fn fetch_snapshot_at(
         Ok(snap) => {
             let bytes = serde_json::to_vec(&snap_to_json(&snap))?;
             cache.write_payload(&bytes)?;
-            Ok(crate::outcome::Outcome::fresh(snap))
+            Ok(crate::outcome::Outcome::fresh(snap).with_email(email))
         }
         Err(e) if e.is_transient() => fallback_silent(cache, now, e),
         Err(AppError::Http { status, body }) => {
@@ -206,6 +209,8 @@ struct Session {
     csrf: Option<String>,
     plan: String,
     account: String,
+    /// Display address from the same `GetUserStatus` answer as `account`.
+    email: Option<AccountEmail>,
 }
 
 /// Which source this fetch will draw on, decided before the cache is consulted
@@ -222,6 +227,15 @@ impl Origin {
             Origin::Local(Ok(session)) => Some(session.account.clone()),
             Origin::Remote(Ok(token)) => Some(remote_account(&token.fingerprint)),
             Origin::Local(Err(_)) | Origin::Remote(Err(_)) => None,
+        }
+    }
+
+    /// The signed-in address, from the local session only. The saved Google
+    /// session carries no address, and nothing else may stand in for one.
+    fn email(&self) -> Option<AccountEmail> {
+        match self {
+            Origin::Local(Ok(session)) => session.email.clone(),
+            Origin::Local(Err(_)) | Origin::Remote(_) => None,
         }
     }
 }
@@ -287,6 +301,7 @@ async fn open_session(client: &reqwest::Client, bases: Option<&[Candidate]>) -> 
                     csrf,
                     plan: plan_from_status(&v),
                     account: account_key(&v),
+                    email: account_email(&v),
                 });
             }
             Err(e) => {
@@ -578,6 +593,14 @@ async fn fetch_remote(
     snap.account = remote_account(&token.fingerprint);
     snap.source = AntigravitySource::Remote;
     Ok(snap)
+}
+
+/// The address `GetUserStatus` reports for the signed-in account, when it is a
+/// well-formed one. Kept out of the snapshot and its cache; see [`account_key`].
+fn account_email(user_status: &serde_json::Value) -> Option<AccountEmail> {
+    user_status["userStatus"]["email"]
+        .as_str()
+        .and_then(AccountEmail::parse)
 }
 
 /// Identity of the signed-in account, fingerprinted rather than stored in
@@ -958,7 +981,6 @@ fn is_antigravity_process(comm: &str, exe: Option<&str>) -> bool {
 /// account-wide quota, so whichever answers first is authoritative — and pid
 /// order is used only to keep the result reproducible, since `/proc`, `lsof`
 /// and the Windows TCP table each enumerate in their own order.
-#[cfg(any(test, target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn probe_order(per_pid: std::collections::BTreeMap<u32, Vec<u16>>) -> Vec<(u32, u16)> {
     let groups: Vec<(u32, Vec<u16>)> = per_pid
         .into_iter()
@@ -989,84 +1011,12 @@ fn probe_order(per_pid: std::collections::BTreeMap<u32, Vec<u16>>) -> Vec<(u32, 
     ports
 }
 
-/// Loopback `(pid, port)` pairs listened on by any running Antigravity
-/// product.
-///
-/// Reads `/proc` directly rather than shelling out to `ss`/`lsof`: find the
-/// candidate pids, collect their socket inodes, then keep the listening TCP
-/// entries owning one of those inodes. All three products report the *same*
-/// shared quota, so whichever answers first is authoritative.
-#[cfg(target_os = "linux")]
-pub(crate) fn discover_ls_ports() -> Vec<(u32, u16)> {
-    use std::collections::{BTreeMap, HashMap};
-
-    // Socket inode -> owning pid, so the ports found in `/proc/net` can be
-    // grouped back per process for `probe_order`.
-    let mut owners: HashMap<u64, u32> = HashMap::new();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    for entry in entries.flatten() {
-        let pid_dir = entry.path();
-        let Some(pid) = pid_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| name.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let Ok(comm) = std::fs::read_to_string(pid_dir.join("comm")) else {
-            continue;
-        };
-        let exe = std::fs::read_link(pid_dir.join("exe")).ok();
-        if !is_antigravity_process(&comm, exe.as_deref().and_then(|p| p.to_str())) {
-            continue;
-        }
-        let Ok(fds) = std::fs::read_dir(pid_dir.join("fd")) else {
-            continue;
-        };
-        for fd in fds.flatten() {
-            let Ok(target) = std::fs::read_link(fd.path()) else {
-                continue;
-            };
-            if let Some(ino) = target
-                .to_str()
-                .and_then(|s| s.strip_prefix("socket:["))
-                .and_then(|s| s.strip_suffix(']'))
-                .and_then(|s| s.parse::<u64>().ok())
-            {
-                owners.insert(ino, pid);
-            }
-        }
-    }
-
-    if owners.is_empty() {
-        return Vec::new();
-    }
-
-    let mut per_pid: BTreeMap<u32, Vec<u16>> = BTreeMap::new();
-    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        let Ok(contents) = std::fs::read_to_string(table) else {
-            continue;
-        };
-        for line in contents.lines().skip(1) {
-            if let Some((port, ino)) = parse_proc_net_line(line)
-                && let Some(&pid) = owners.get(&ino)
-            {
-                per_pid.entry(pid).or_default().push(port);
-            }
-        }
-    }
-    probe_order(per_pid)
-}
-
 /// macOS has no `/proc`, so fall back to `lsof` (present on every macOS
 /// install by default, unlike Linux where shelling out was deliberately
 /// avoided — see the doc comment above). `-F pcn` asks for machine-parsable
 /// output: one `p<pid>` line per process, one `c<command>` line for its name,
 /// then an `n<address>` line per matching socket already filtered down to
 /// listening TCP sockets by `-iTCP -sTCP:LISTEN`.
-#[cfg(target_os = "macos")]
 pub(crate) fn discover_ls_ports() -> Vec<(u32, u16)> {
     let Ok(output) = std::process::Command::new("lsof")
         .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pcn"])
@@ -1081,10 +1031,7 @@ pub(crate) fn discover_ls_ports() -> Vec<(u32, u16)> {
 }
 
 /// Pure parser for `lsof -F pcn` output, kept separate from process spawning
-/// so the parsing logic is unit-testable without shelling out. Compiled under
-/// `test` on every platform, like [`matching_windows_ports`], so its tests are
-/// not macOS-only.
-#[cfg(any(test, target_os = "macos"))]
+/// so the parsing logic is unit-testable without shelling out.
 fn parse_lsof_pcn(output: &str) -> Vec<(u32, u16)> {
     let mut per_pid: std::collections::BTreeMap<u32, Vec<u16>> = std::collections::BTreeMap::new();
     // The pid arrives on the `p` line and the command name on the `c` line
@@ -1110,239 +1057,6 @@ fn parse_lsof_pcn(output: &str) -> Vec<(u32, u16)> {
         }
     }
     probe_order(per_pid)
-}
-
-#[cfg(any(test, target_os = "windows"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WindowsTcpRow {
-    local_addr: [u8; 4],
-    local_port: u32,
-    pid: u32,
-}
-
-#[cfg(any(test, target_os = "windows"))]
-fn decode_windows_process_name(raw: &[u16]) -> String {
-    let end = raw.iter().position(|&unit| unit == 0).unwrap_or(raw.len());
-    String::from_utf16_lossy(&raw[..end])
-}
-
-#[cfg(any(test, target_os = "windows"))]
-fn matching_windows_process_ids(processes: &[(u32, String)]) -> std::collections::HashSet<u32> {
-    processes
-        .iter()
-        .filter(|(_, name)| is_antigravity_process(name, None))
-        .map(|(pid, _)| *pid)
-        .collect()
-}
-
-/// Loopback ports owned by the matching processes, grouped per pid and handed
-/// to [`probe_order`], which explains why the grouping matters.
-#[cfg(any(test, target_os = "windows"))]
-fn matching_windows_ports(
-    pids: &std::collections::HashSet<u32>,
-    rows: &[WindowsTcpRow],
-) -> Vec<(u32, u16)> {
-    let mut per_pid: std::collections::BTreeMap<u32, Vec<u16>> = std::collections::BTreeMap::new();
-    for row in rows {
-        if !pids.contains(&row.pid) || row.local_addr != [127, 0, 0, 1] {
-            continue;
-        }
-        let port = u16::from_be((row.local_port & u32::from(u16::MAX)) as u16);
-        if port != 0 {
-            per_pid.entry(row.pid).or_default().push(port);
-        }
-    }
-    probe_order(per_pid)
-}
-
-#[cfg(any(test, target_os = "windows"))]
-fn checked_windows_row_count(
-    buffer_len: usize,
-    rows_offset: usize,
-    row_size: usize,
-    declared: usize,
-) -> Option<usize> {
-    let rows_len = row_size.checked_mul(declared)?;
-    let end = rows_offset.checked_add(rows_len)?;
-    (row_size != 0 && end <= buffer_len).then_some(declared)
-}
-
-#[cfg(target_os = "windows")]
-struct WindowsHandle(windows_sys::Win32::Foundation::HANDLE);
-
-#[cfg(target_os = "windows")]
-impl Drop for WindowsHandle {
-    fn drop(&mut self) {
-        unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(self.0);
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn windows_processes() -> Vec<(u32, String)> {
-    use std::mem::size_of;
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
-        TH32CS_SNAPPROCESS,
-    };
-
-    let handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-    if handle == INVALID_HANDLE_VALUE {
-        return Vec::new();
-    }
-    let snapshot = WindowsHandle(handle);
-    let mut entry = PROCESSENTRY32W::default();
-    let Ok(entry_size) = u32::try_from(size_of::<PROCESSENTRY32W>()) else {
-        return Vec::new();
-    };
-    entry.dwSize = entry_size;
-    if unsafe { Process32FirstW(snapshot.0, &mut entry) } == 0 {
-        return Vec::new();
-    }
-
-    let mut processes = Vec::new();
-    loop {
-        processes.push((
-            entry.th32ProcessID,
-            decode_windows_process_name(&entry.szExeFile),
-        ));
-        if unsafe { Process32NextW(snapshot.0, &mut entry) } == 0 {
-            break;
-        }
-    }
-    processes
-}
-
-#[cfg(target_os = "windows")]
-fn parse_windows_tcp_rows(buffer: &[u32], used_bytes: usize) -> Vec<WindowsTcpRow> {
-    use std::mem::{offset_of, size_of, size_of_val};
-    use windows_sys::Win32::NetworkManagement::IpHelper::{
-        MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
-    };
-
-    let available = used_bytes.min(size_of_val(buffer));
-    let rows_offset = offset_of!(MIB_TCPTABLE_OWNER_PID, table);
-    if available < size_of::<u32>() || available < rows_offset {
-        return Vec::new();
-    }
-    let base = buffer.as_ptr().cast::<u8>();
-    let declared = unsafe { base.cast::<u32>().read_unaligned() } as usize;
-    if checked_windows_row_count(
-        available,
-        rows_offset,
-        size_of::<MIB_TCPROW_OWNER_PID>(),
-        declared,
-    )
-    .is_none()
-    {
-        return Vec::new();
-    }
-
-    let rows = unsafe { base.add(rows_offset).cast::<MIB_TCPROW_OWNER_PID>() };
-    (0..declared)
-        .map(|index| unsafe { rows.add(index).read_unaligned() })
-        .map(|row| WindowsTcpRow {
-            local_addr: row.dwLocalAddr.to_ne_bytes(),
-            local_port: row.dwLocalPort,
-            pid: row.dwOwningPid,
-        })
-        .collect()
-}
-
-#[cfg(target_os = "windows")]
-fn windows_tcp_rows() -> Vec<WindowsTcpRow> {
-    use std::mem::size_of;
-    use std::ptr::null_mut;
-    use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
-    use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, TCP_TABLE_OWNER_PID_LISTENER,
-    };
-    use windows_sys::Win32::Networking::WinSock::AF_INET;
-
-    let mut size = 0u32;
-    let status = unsafe {
-        GetExtendedTcpTable(
-            null_mut(),
-            &mut size,
-            0,
-            u32::from(AF_INET),
-            TCP_TABLE_OWNER_PID_LISTENER,
-            0,
-        )
-    };
-    if status != ERROR_INSUFFICIENT_BUFFER {
-        return Vec::new();
-    }
-
-    for _ in 0..3 {
-        let Some(words) = (size as usize)
-            .checked_add(size_of::<u32>() - 1)
-            .map(|bytes| bytes / size_of::<u32>())
-        else {
-            return Vec::new();
-        };
-        if words == 0 {
-            return Vec::new();
-        }
-        let mut buffer = Vec::<u32>::new();
-        if buffer.try_reserve_exact(words).is_err() {
-            return Vec::new();
-        }
-        buffer.resize(words, 0);
-        let mut used = size;
-        let status = unsafe {
-            GetExtendedTcpTable(
-                buffer.as_mut_ptr().cast(),
-                &mut used,
-                0,
-                u32::from(AF_INET),
-                TCP_TABLE_OWNER_PID_LISTENER,
-                0,
-            )
-        };
-        if status == ERROR_INSUFFICIENT_BUFFER {
-            size = used;
-            continue;
-        }
-        if status != 0 {
-            return Vec::new();
-        }
-        return parse_windows_tcp_rows(&buffer, used as usize);
-    }
-    Vec::new()
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn discover_ls_ports() -> Vec<(u32, u16)> {
-    let pids = matching_windows_process_ids(&windows_processes());
-    if pids.is_empty() {
-        return Vec::new();
-    }
-    matching_windows_ports(&pids, &windows_tcp_rows())
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub(crate) fn discover_ls_ports() -> Vec<(u32, u16)> {
-    Vec::new()
-}
-
-/// Pull `(local_port, inode)` out of a listening row of `/proc/net/tcp`.
-/// Columns: `sl local_address rem_address st ... uid timeout inode`.
-#[cfg(target_os = "linux")]
-fn parse_proc_net_line(line: &str) -> Option<(u16, u64)> {
-    let cols: Vec<&str> = line.split_whitespace().collect();
-    if cols.len() < 10 {
-        return None;
-    }
-    // 0x0A == TCP_LISTEN. Anything else is an established/closing socket.
-    if cols[3] != "0A" {
-        return None;
-    }
-    let port = u16::from_str_radix(cols[1].split(':').nth(1)?, 16).ok()?;
-    let inode = cols[9].parse::<u64>().ok()?;
-    Some((port, inode))
 }
 
 // ---------------------------------------------------------------------------
@@ -2029,20 +1743,6 @@ mod tests {
         assert_eq!(plan_from_status(&empty), DEFAULT_PLAN);
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn proc_net_parser_keeps_only_listening_rows() {
-        let listen = "   0: 0100007F:975B 00000000:0000 0A 00000000:00000000 \
-                      00:00000000 00000000  1000        0 123456 1 0000 100 0";
-        assert_eq!(parse_proc_net_line(listen), Some((38747, 123456)));
-
-        let established = "   1: 0100007F:975B 0100007F:A1B2 01 00000000:00000000 \
-                           00:00000000 00000000  1000        0 123457 1 0000 100 0";
-        assert_eq!(parse_proc_net_line(established), None);
-
-        assert_eq!(parse_proc_net_line("garbage"), None);
-    }
-
     #[test]
     fn explicit_address_comes_first_and_gets_a_scheme() {
         let candidate = |base: &str, pid| Candidate {
@@ -2342,90 +2042,6 @@ mod tests {
         assert!(!is_antigravity_process("", None));
     }
 
-    #[test]
-    fn windows_process_names_decode_until_nul_and_tolerate_invalid_utf16() {
-        let mut raw: Vec<u16> = "agy.exe".encode_utf16().collect();
-        raw.extend([0, b'x' as u16]);
-        assert_eq!(decode_windows_process_name(&raw), "agy.exe");
-        assert_eq!(decode_windows_process_name(&[0xd800]), "�");
-        assert_eq!(decode_windows_process_name(&[]), "");
-    }
-
-    #[test]
-    fn windows_process_filter_keeps_only_antigravity_pids() {
-        let processes = vec![
-            (10, "agy.exe".to_string()),
-            (20, "language_server_windows_x64.exe".to_string()),
-            (30, "sshd.exe".to_string()),
-        ];
-        let pids = matching_windows_process_ids(&processes);
-        assert_eq!(pids, std::collections::HashSet::from([10, 20]));
-    }
-
-    #[test]
-    fn windows_listener_filter_joins_pid_loopback_and_port() {
-        let pids = std::collections::HashSet::from([10]);
-        let rows = [
-            WindowsTcpRow {
-                local_addr: [127, 0, 0, 1],
-                local_port: u32::from(59870u16.to_be()),
-                pid: 10,
-            },
-            WindowsTcpRow {
-                local_addr: [127, 0, 0, 1],
-                local_port: u32::from(59868u16.to_be()),
-                pid: 10,
-            },
-            WindowsTcpRow {
-                local_addr: [127, 0, 0, 1],
-                local_port: u32::from(59870u16.to_be()),
-                pid: 10,
-            },
-            WindowsTcpRow {
-                local_addr: [0, 0, 0, 0],
-                local_port: u32::from(50000u16.to_be()),
-                pid: 10,
-            },
-            WindowsTcpRow {
-                local_addr: [127, 0, 0, 1],
-                local_port: u32::from(50001u16.to_be()),
-                pid: 99,
-            },
-            WindowsTcpRow {
-                local_addr: [127, 0, 0, 1],
-                local_port: 0,
-                pid: 10,
-            },
-        ];
-        assert_eq!(
-            matching_windows_ports(&pids, &rows),
-            vec![(10, 59870), (10, 59868)]
-        );
-    }
-
-    /// Antigravity 2.0 and an interactive `agy` session at once. Their port
-    /// pairs must not be flattened into one set: sorting all four descending
-    /// would put pid 20's TLS listener ahead of pid 10's RPC listener.
-    #[test]
-    fn windows_ports_from_two_products_keep_tls_listeners_last() {
-        let pids = std::collections::HashSet::from([10, 20]);
-        let row = |port: u16, pid: u32| WindowsTcpRow {
-            local_addr: [127, 0, 0, 1],
-            local_port: u32::from(port.to_be()),
-            pid,
-        };
-        let rows = [
-            row(40000, 10),
-            row(40001, 10),
-            row(50000, 20),
-            row(50001, 20),
-        ];
-        assert_eq!(
-            matching_windows_ports(&pids, &rows),
-            vec![(10, 40001), (20, 50001), (10, 40000), (20, 50000)]
-        );
-    }
-
     /// The high-to-low preference only means something per product, so the
     /// grouping is what keeps a second product's TLS listener from being
     /// probed before the first product's RPC listener.
@@ -2513,71 +2129,6 @@ mod tests {
             );
         }
         assert!(candidate_bases_with(Some("/"), vec![]).is_empty());
-    }
-
-    #[test]
-    fn windows_table_bounds_reject_truncation_and_overflow() {
-        assert_eq!(checked_windows_row_count(52, 4, 24, 2), Some(2));
-        assert_eq!(checked_windows_row_count(51, 4, 24, 2), None);
-        assert_eq!(checked_windows_row_count(4, 4, 24, 0), Some(0));
-        assert_eq!(checked_windows_row_count(52, 4, 0, 2), None);
-        assert_eq!(
-            checked_windows_row_count(usize::MAX, 4, 24, usize::MAX),
-            None
-        );
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_tcp_table_parser_copies_complete_rows_only() {
-        use std::mem::{offset_of, size_of};
-        use windows_sys::Win32::NetworkManagement::IpHelper::{
-            MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
-        };
-
-        let offset = offset_of!(MIB_TCPTABLE_OWNER_PID, table);
-        let used = offset + 2 * size_of::<MIB_TCPROW_OWNER_PID>();
-        let words = used.div_ceil(size_of::<u32>());
-        let mut buffer = vec![0u32; words];
-        let first = MIB_TCPROW_OWNER_PID {
-            dwLocalAddr: u32::from_ne_bytes([127, 0, 0, 1]),
-            dwLocalPort: u32::from(59868u16.to_be()),
-            dwOwningPid: 10,
-            ..Default::default()
-        };
-        let second = MIB_TCPROW_OWNER_PID {
-            dwLocalAddr: u32::from_ne_bytes([127, 0, 0, 1]),
-            dwLocalPort: u32::from(59870u16.to_be()),
-            dwOwningPid: 10,
-            ..Default::default()
-        };
-        unsafe {
-            buffer.as_mut_ptr().write_unaligned(2);
-            let rows = buffer
-                .as_mut_ptr()
-                .cast::<u8>()
-                .add(offset)
-                .cast::<MIB_TCPROW_OWNER_PID>();
-            rows.write_unaligned(first);
-            rows.add(1).write_unaligned(second);
-        }
-
-        assert_eq!(
-            parse_windows_tcp_rows(&buffer, used),
-            vec![
-                WindowsTcpRow {
-                    local_addr: [127, 0, 0, 1],
-                    local_port: u32::from(59868u16.to_be()),
-                    pid: 10,
-                },
-                WindowsTcpRow {
-                    local_addr: [127, 0, 0, 1],
-                    local_port: u32::from(59870u16.to_be()),
-                    pid: 10,
-                },
-            ]
-        );
-        assert!(parse_windows_tcp_rows(&buffer, used - 1).is_empty());
     }
 
     #[test]
@@ -3312,5 +2863,179 @@ mod tests {
             parse_cache_at(&legacy, None, now()).unwrap().source,
             AntigravitySource::Local
         );
+    }
+
+    // --- account email ---------------------------------------------------
+
+    /// A local language server signed in as `email`, answering `quota_hits`
+    /// quota RPCs with `quota_status`.
+    async fn local_server(
+        email: &str,
+        status_hits: usize,
+        quota_status: usize,
+        quota_hits: usize,
+    ) -> (mockito::ServerGuard, mockito::Mock) {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/")
+            .with_status(404)
+            .create_async()
+            .await;
+        let status_path = format!("/{STATUS_RPC}");
+        server
+            .mock("POST", status_path.as_str())
+            .with_status(200)
+            .with_body(
+                serde_json::json!({"userStatus": {"userTier": {"name": "Pro"}, "email": email}})
+                    .to_string(),
+            )
+            .expect(status_hits)
+            .create_async()
+            .await;
+        let quota_path = format!("/{QUOTA_RPC}");
+        let quota = server
+            .mock("POST", quota_path.as_str())
+            .with_status(quota_status)
+            .with_body(if quota_status == 200 {
+                QUOTA_JSON
+            } else {
+                "{}"
+            })
+            .expect(quota_hits)
+            .create_async()
+            .await;
+        (server, quota)
+    }
+
+    async fn run_local(
+        cache: &Cache,
+        server: &mockito::Server,
+        ttl: Duration,
+    ) -> Result<FetchOutcome> {
+        let eps = endpoints(server);
+        run(
+            cache,
+            RemoteOverride {
+                credential: SavedCredential::Absent,
+                endpoints: Some(&eps),
+                local_bases: Some(vec![Candidate::from(server.url())]),
+            },
+            ttl,
+        )
+        .await
+    }
+
+    #[test]
+    fn only_a_well_formed_status_address_is_an_account_email() {
+        let email = |v: serde_json::Value| account_email(&v).map(|e| e.as_str().to_owned());
+        assert_eq!(
+            email(serde_json::json!({"userStatus": {"email": "person@example.test"}})),
+            Some("person@example.test".into())
+        );
+        for status in [
+            serde_json::json!({}),
+            serde_json::json!({"userStatus": {}}),
+            serde_json::json!({"userStatus": {"email": ""}}),
+            serde_json::json!({"userStatus": {"email": "not-an-address"}}),
+            serde_json::json!({"userStatus": {"email": 42}}),
+            serde_json::json!({"email": "top-level@example.test"}),
+        ] {
+            assert_eq!(email(status.clone()), None, "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_local_sessions_email_rides_the_outcome_but_never_the_cache() {
+        let (server, quota) = local_server("person@example.test", 2, 200, 1).await;
+        let (_td, cache) = fixture();
+
+        let live = run_local(&cache, &server, Duration::ZERO).await.unwrap();
+        assert!(live.off_the_wire());
+        assert_eq!(
+            live.email.as_ref().map(AccountEmail::as_str),
+            Some("person@example.test")
+        );
+        assert!(
+            !format!("{live:?}").contains("person@"),
+            "Debug leaks the address"
+        );
+        let stored = String::from_utf8(cache.maybe_payload().unwrap().unwrap()).unwrap();
+        assert!(!stored.contains("person@"), "{stored}");
+
+        // A fresh cache for the same session reuses the payload and still
+        // carries the address this poll's `GetUserStatus` reported.
+        let cached = run_local(&cache, &server, Duration::from_secs(3600))
+            .await
+            .unwrap();
+        quota.assert_async().await;
+        assert!(!cached.off_the_wire());
+        assert_eq!(
+            cached.email.as_ref().map(AccountEmail::as_str),
+            Some("person@example.test")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_switched_account_gets_its_own_email_never_the_previous_one() {
+        let (first, _) = local_server("first@example.test", 1, 200, 1).await;
+        let (second, second_quota) = local_server("second@example.test", 1, 200, 1).await;
+        let (_td, cache) = fixture();
+
+        run_local(&cache, &first, Duration::ZERO).await.unwrap();
+        // Within the TTL, but the fingerprint no longer matches: the cache is
+        // refused and the new account is fetched live.
+        let switched = run_local(&cache, &second, Duration::from_secs(3600))
+            .await
+            .unwrap();
+        second_quota.assert_async().await;
+        assert!(switched.off_the_wire());
+        assert_eq!(
+            switched.email.as_ref().map(AccountEmail::as_str),
+            Some("second@example.test")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_quota_call_replays_the_cache_without_any_email() {
+        let (first, _) = local_server("first@example.test", 1, 200, 1).await;
+        let (second, _) = local_server("second@example.test", 1, 500, 1).await;
+        let (_td, cache) = fixture();
+
+        run_local(&cache, &first, Duration::ZERO).await.unwrap();
+        // The fallback replays whatever was cached, without checking whose it
+        // is, so the current session's address must not be pinned on it.
+        let replay = run_local(&cache, &second, Duration::ZERO).await.unwrap();
+        assert!(replay.stale);
+        assert!(replay.email.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_session_without_a_usable_address_yields_no_email() {
+        let (server, _) = local_server("not-an-address", 1, 200, 1).await;
+        let (_td, cache) = fixture();
+        let out = run_local(&cache, &server, Duration::ZERO).await.unwrap();
+        assert_eq!(out.snapshot.source, AntigravitySource::Local);
+        assert!(out.email.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_saved_google_session_never_supplies_an_email() {
+        let mut server = mockito::Server::new_async().await;
+        let eps = endpoints(&server);
+        quota_mock(&mut server, "KEYRING-AT").create_async().await;
+        server
+            .mock("POST", "/daily/plan")
+            .with_status(200)
+            .with_body(r#"{"currentTier":{"name":"google_ai_pro"}}"#)
+            .create_async()
+            .await;
+        let blob = keyring_blob(VALID, true);
+        let (_td, cache) = fixture();
+
+        let out = run(&cache, remote(&blob, &eps), Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(out.snapshot.source, AntigravitySource::Remote);
+        assert!(out.email.is_none());
     }
 }

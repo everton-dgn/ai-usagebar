@@ -1,0 +1,8 @@
+# tag	tag_object	kind	successor	published_sha256
+v0.1.0	7d4ade243e1b6c80363f7310b919ae9580cf68ee	no-changelog	-	-
+v0.2.0	f637299ed46acba1fb1b657370bc0e95342023a3	no-changelog	-	-
+v0.3.0	78df6fe902298c7cabd2f7974ec2438a621df1d8	no-changelog	-	-
+v0.3.1	54ad5baa3a1027e0abae41eef9c478f8b8bdeda2	no-changelog	-	-
+v0.3.2	b1044f14bd5281f9093ce26d3bef0be0fc8adf92	no-changelog	-	-
+v0.17.0	310ae6747da1c2185a47bb9beb0dd3497d9be87c	superseded	v0.17.1	12ce80b0c6a1e4afc3411cb4d9330e3df6309dd7f09962e7088af3646f95fd72
+v1.20.0	a29355aafc6c9a248fbe6a284d3ecf850362c495	superseded	v1.20.1	86114a9e5ef27aaff657afaad7fd612447b79cabff71961e88756c16e331b35e

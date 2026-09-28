@@ -31,7 +31,7 @@ use std::time::Duration;
 use serde_json::{Map, Value};
 
 use crate::config::AnthropicAccount;
-use crate::error::{AppError, Result};
+use crate::error::{AccountFailure, AppError, Result};
 
 /// The `claude` CLI's per-config-dir state file. Holds a plaintext
 /// `oauthAccount` identity marker (uuid, email, org) — never a token.
@@ -174,7 +174,8 @@ pub fn switch_cli_account(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(".ai-usagebar-account-switch.lock");
-    let _lock = crate::cache::acquire_lock(&lock_path, Duration::from_secs(2))?;
+    let _lock = crate::cache::acquire_lock(&lock_path, Duration::from_secs(2))
+        .map_err(|error| error.for_account(AccountFailure::LockUnavailable))?;
 
     let target = accounts
         .iter()
@@ -192,39 +193,51 @@ pub fn switch_cli_account(
     // Read every piece needed for both the move and its rollback before the
     // first write. An empty default slot is safe to populate without --force;
     // an unrecognised *existing* login is the destructive case.
-    let original_default = store.read_default()?;
+    let original_default = store
+        .read_default()
+        .map_err(|error| error.for_account(AccountFailure::StorageUnavailable))?;
     if active.as_deref() == Some(label) && original_default.is_some() {
-        if store.read_named(&target.config_dir())?.is_none() {
+        if store
+            .read_named(&target.config_dir())
+            .map_err(|error| error.for_account(AccountFailure::StorageUnavailable))?
+            .is_none()
+        {
             return Ok(CliSwitchOutcome::AlreadyActive);
         }
         if opts.dry_run {
             return Ok(CliSwitchOutcome::WouldRemoveDuplicate);
         }
-        store.delete_named(&target.config_dir())?;
+        store
+            .delete_named(&target.config_dir())
+            .map_err(|error| error.for_account(AccountFailure::StorageUnavailable))?;
         return Ok(CliSwitchOutcome::RemovedDuplicate);
     }
     if active.is_none() && original_default.is_some() && !opts.force {
         return Err(AppError::Credentials(format!(
-            "the `claude` CLI is signed into an account that is not managed here, so \
-             switching to {label:?} would overwrite a login that cannot be saved first. \
-             Register it with `ai-usagebar account add <label>`, or pass --force to \
-             discard it."
-        )));
+            "Claude Code is signed into an account that is not managed here, so \
+             switching to {label:?} would overwrite a login that cannot be saved first."
+        ))
+        .for_account(AccountFailure::UnmanagedLogin));
     }
 
     // Fail before touching anything if the target has never been signed in.
-    let target_blob = store.read_named(&target.config_dir())?.ok_or_else(|| {
-        AppError::Credentials(format!(
-            "no stored credential for {label:?}; sign it in once with \
-             `ai-usagebar account add {label}`"
-        ))
-    })?;
+    let target_blob = store
+        .read_named(&target.config_dir())
+        .map_err(|error| error.for_account(AccountFailure::StorageUnavailable))?
+        .ok_or_else(|| {
+            AppError::Credentials(format!(
+                "no stored credential for {label:?}; that account has never been signed in \
+             here"
+            ))
+            .for_account(AccountFailure::MissingLogin)
+        })?;
     let oauth_account =
         oauth_account_in(&target.config_dir().join(CLAUDE_JSON)).ok_or_else(|| {
             AppError::Credentials(format!(
-                "the identity marker for {label:?} is missing or invalid; sign it in again with \
-             `ai-usagebar account add {label}` before switching"
+                "the identity marker for {label:?} is missing or invalid; that account needs a \
+             new sign-in before switching"
             ))
+            .for_account(AccountFailure::InvalidState)
         })?;
     let original_marker = read_optional(home_claude_json)?;
     let merged_marker = merge_oauth_account(
@@ -236,7 +249,9 @@ pub fn switch_cli_account(
         .as_deref()
         .and_then(|outgoing| accounts.iter().find(|account| account.label == outgoing));
     let original_outgoing_named = match outgoing_account {
-        Some(account) => store.read_named(&account.config_dir())?,
+        Some(account) => store
+            .read_named(&account.config_dir())
+            .map_err(|error| error.for_account(AccountFailure::StorageUnavailable))?,
         None => None,
     };
 
@@ -302,7 +317,7 @@ pub fn adopt_current(
     // One read: the identity checked is the identity written.
     let live = oauth_account_in(home_claude_json).ok_or_else(|| {
         AppError::Credentials(
-            "plain `claude` is not signed in, so there is no login to adopt; run `claude` first"
+            "Claude Code is not signed in, so there is no login to adopt; a Claude Code sign-in is needed, which this app cannot do"
                 .into(),
         )
     })?;
@@ -332,7 +347,7 @@ pub fn adopt_current(
     }
     if store.read_default()?.is_none() {
         return Err(AppError::Credentials(
-            "the default `claude` credential slot is empty; run `claude` to sign in first".into(),
+            "the default Claude Code credential slot is empty; a Claude Code sign-in is needed, which this app cannot do".into(),
         ));
     }
     let marker = marker_path(&account.config_dir());
@@ -416,7 +431,8 @@ fn with_rollback(error: AppError, rollback: Result<()>) -> AppError {
         Ok(()) => error,
         Err(rollback) => AppError::Other(format!(
             "{error}; automatic rollback was incomplete: {rollback}"
-        )),
+        ))
+        .for_account(AccountFailure::RecoveryRequired),
     }
 }
 
@@ -429,68 +445,29 @@ fn oauth_account_in(claude_json: &Path) -> Option<Value> {
         .cloned()
 }
 
-#[cfg(not(target_os = "macos"))]
-fn unsupported() -> AppError {
-    AppError::Credentials(
-        "switching the `claude` CLI login is supported on macOS only (elsewhere, run \
-         `CLAUDE_CONFIG_DIR=<account dir> claude` to use a specific account)"
-            .into(),
-    )
-}
-
 impl CredentialStore for KeychainStore {
     fn read_default(&self) -> Result<Option<String>> {
-        #[cfg(target_os = "macos")]
-        return super::keychain::read_raw();
-        #[cfg(not(target_os = "macos"))]
-        Err(unsupported())
+        super::keychain::read_raw()
     }
 
     fn write_default(&self, blob: &str) -> Result<()> {
-        #[cfg(target_os = "macos")]
-        return super::keychain::write_raw(blob);
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = blob;
-            Err(unsupported())
-        }
+        super::keychain::write_raw(blob)
     }
 
     fn delete_default(&self) -> Result<()> {
-        #[cfg(target_os = "macos")]
-        return super::keychain::delete_raw();
-        #[cfg(not(target_os = "macos"))]
-        Err(unsupported())
+        super::keychain::delete_raw()
     }
 
     fn read_named(&self, config_dir: &Path) -> Result<Option<String>> {
-        #[cfg(target_os = "macos")]
-        return super::keychain::read_raw_for(config_dir);
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = config_dir;
-            Err(unsupported())
-        }
+        super::keychain::read_raw_for(config_dir)
     }
 
     fn write_named(&self, config_dir: &Path, blob: &str) -> Result<()> {
-        #[cfg(target_os = "macos")]
-        return super::keychain::write_raw_for(config_dir, blob);
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (config_dir, blob);
-            Err(unsupported())
-        }
+        super::keychain::write_raw_for(config_dir, blob)
     }
 
     fn delete_named(&self, config_dir: &Path) -> Result<()> {
-        #[cfg(target_os = "macos")]
-        return super::keychain::delete_raw_for(config_dir);
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = config_dir;
-            Err(unsupported())
-        }
+        super::keychain::delete_raw_for(config_dir)
     }
 }
 
@@ -813,7 +790,7 @@ mod tests {
             &f.store,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("--force"), "{error}");
+        assert!(error.to_string().contains("not managed here"), "{error}");
         assert_eq!(f.store.default.borrow().as_deref(), Some("personal-live"));
 
         switch_cli_account(
@@ -925,7 +902,10 @@ mod tests {
             &f.store,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("account add work"), "{error}");
+        assert!(
+            error.to_string().contains("never been signed in"),
+            "{error}"
+        );
         assert_eq!(f.store.default.borrow().as_deref(), Some("personal-live"));
     }
 

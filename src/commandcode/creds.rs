@@ -25,8 +25,9 @@ const OFFICIAL_AUTH_FILE: &str = ".commandcode/auth.json";
 const CREDENTIAL_KEYS: &[&str] = &["command-code", "commandcode"];
 
 pub const SIGNED_OUT: &str =
-    "Command Code is not signed in. Run `commandcode` and sign in, or set COMMANDCODE_API_KEY.";
-pub const EXPIRED: &str = "Command Code sign-in expired. Run `commandcode` to sign in again.";
+    "Command Code is not signed in. Signing in is not available in this app.";
+pub const EXPIRED: &str =
+    "Command Code sign-in expired. A new sign-in is needed, which this app cannot do.";
 
 /// A credential and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]

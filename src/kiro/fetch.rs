@@ -6,7 +6,9 @@
 //! own `/usage` slash command invokes. Cache/stale/error-fallback shape
 //! mirrors `cursor::fetch`.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -14,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::{Cache, acquire_lock_async, atomic_write};
 use crate::error::{AppError, Result};
+use crate::identity::AccountEmail;
 use crate::usage::KiroSnapshot;
 use crate::vendor::{MAX_BODY_BYTES, read_body_capped};
 
@@ -57,6 +60,32 @@ struct PersistedOAuth {
     expires_at: DateTime<Utc>,
 }
 
+/// The display email from the last successful `GetUsageLimits` response, per
+/// cache directory and bound to the account key it was returned for. Memory
+/// only: it never enters the quota cache, and a different account key or a
+/// live response without an email leaves no email to show.
+static IDENTITIES: Mutex<BTreeMap<PathBuf, (String, AccountEmail)>> = Mutex::new(BTreeMap::new());
+
+fn remember_email(cache: &Cache, account: &str, email: Option<AccountEmail>) {
+    let mut identities = IDENTITIES.lock().unwrap_or_else(PoisonError::into_inner);
+    match email {
+        Some(email) => {
+            identities.insert(cache.dir().to_path_buf(), (account.to_owned(), email));
+        }
+        None => {
+            identities.remove(cache.dir());
+        }
+    }
+}
+
+fn remembered_email(cache: &Cache, account: &str) -> Option<AccountEmail> {
+    let identities = IDENTITIES.lock().unwrap_or_else(PoisonError::into_inner);
+    identities
+        .get(cache.dir())
+        .filter(|(owner, _)| owner == account)
+        .map(|(_, email)| email.clone())
+}
+
 /// This vendor's [`Outcome`](crate::outcome::Outcome) — the shared shape,
 /// specialised to its snapshot.
 pub type FetchOutcome = crate::outcome::Outcome<KiroSnapshot>;
@@ -98,7 +127,7 @@ async fn fetch_snapshot_at(
     if let Some(bytes) = cache.fresh_payload(cache_ttl)?
         && let Ok(outcome) = reuse_cache(&bytes, cache, false, &creds.account_key, now)
     {
-        return Ok(outcome);
+        return Ok(outcome.with_email(remembered_email(cache, &creds.account_key)));
     }
 
     apply_persisted_oauth(cache, &mut creds)?;
@@ -111,7 +140,7 @@ async fn fetch_snapshot_at(
             &derived
         }
     };
-    match fetch_live(client, endpoints, cache, &creds, now).await {
+    let outcome = match fetch_live(client, endpoints, cache, &creds, now).await {
         Ok(snap) => {
             let bytes = serde_json::to_vec(&snap_to_json(&snap, &creds.account_key))?;
             cache.write_payload(&bytes)?;
@@ -125,7 +154,8 @@ async fn fetch_snapshot_at(
             }
             fallback_with_error(cache, &creds.account_key, now, e)
         }
-    }
+    };
+    outcome.map(|outcome| outcome.with_email(remembered_email(cache, &creds.account_key)))
 }
 
 fn fallback_silent(
@@ -279,7 +309,6 @@ fn write_persisted_oauth(cache: &Cache, persisted: &PersistedOAuth) -> Result<()
     let path = oauth_cache_path(cache);
     let bytes = serde_json::to_vec_pretty(persisted)?;
     atomic_write(&path, &bytes)?;
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
@@ -312,7 +341,7 @@ async fn fetch_live(
         })?
         .map_err(|e| {
             AppError::Credentials(format!(
-                "Kiro CLI token refresh failed ({e}). Run `kiro-cli login` again."
+                "Kiro CLI token refresh failed ({e}). A new Kiro CLI sign-in is needed, which this app cannot do."
             ))
         })?;
         let expires_in = i64::try_from(refreshed.expires_in)
@@ -333,7 +362,7 @@ async fn fetch_live(
         };
         write_persisted_oauth(cache, &persisted).map_err(|e| {
             AppError::Credentials(format!(
-                "refreshed Kiro CLI credentials could not be saved ({e}); run `kiro-cli login` again if the refresh token was rotated"
+                "refreshed Kiro CLI credentials could not be saved ({e}); a new Kiro CLI sign-in is needed if the refresh token was rotated, which this app cannot do"
             ))
         })?;
         persisted.access_token
@@ -374,9 +403,12 @@ async fn fetch_live(
     }
 
     let bytes = read_body_capped(resp, MAX_BODY_BYTES).await?;
-    let parsed: UsageLimitsResponse = serde_json::from_slice(&bytes)
+    let mut parsed: UsageLimitsResponse = serde_json::from_slice(&bytes)
         .map_err(|e| AppError::Schema(format!("kiro usage-limits response: {e}")))?;
-    types::to_snapshot(parsed)
+    let email = parsed.email.take();
+    let snap = types::to_snapshot(parsed)?;
+    remember_email(cache, &creds.account_key, email);
+    Ok(snap)
 }
 
 #[cfg(test)]
@@ -580,7 +612,6 @@ mod tests {
         assert_eq!(persisted["access_token"], "NEW-AT");
         assert_eq!(persisted["refresh_token"], "ROTATED-RT");
         assert_eq!(persisted["account"], account_key(&db_dir));
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(oauth_cache_path(&cache))
@@ -791,6 +822,166 @@ mod tests {
         assert_eq!(out.snapshot.plan, "KIRO POWER");
         assert!(!out.stale);
         m.assert_async().await;
+    }
+
+    fn usage_json_with_email(email: &str) -> String {
+        let mut body: serde_json::Value = serde_json::from_str(&usage_json()).unwrap();
+        body["userInfo"] = serde_json::json!({"userId": "test-user-id", "email": email});
+        body.to_string()
+    }
+
+    async fn serve(body: String, status: usize) -> mockito::ServerGuard {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/")
+            .with_status(status)
+            .with_body(body)
+            .create_async()
+            .await;
+        server
+    }
+
+    async fn fetch_via(
+        server: &mockito::ServerGuard,
+        db_path: &Path,
+        cache: &Cache,
+        ttl: Duration,
+    ) -> Result<FetchOutcome> {
+        fetch_snapshot_at(
+            &reqwest::Client::new(),
+            db_path,
+            cache,
+            ttl,
+            Some(&Endpoints {
+                usage_limits: server.url(),
+                token: format!("{}/token", server.url()),
+            }),
+            Utc::now(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn live_email_is_kept_in_memory_for_the_same_account_only() {
+        let db_dir = TempDir::new().unwrap();
+        let db_path = seed_db(&db_dir, "2099-01-01T00:00:00Z");
+        let first_key = account_key(&db_dir);
+        let (_cache_dir, cache) = cache_fixture();
+
+        let live = serve(usage_json_with_email("person@example.test"), 200).await;
+        let out = fetch_via(&live, &db_path, &cache, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert!(out.off_the_wire());
+        assert_eq!(
+            out.email.as_ref().map(AccountEmail::as_str),
+            Some("person@example.test")
+        );
+        assert!(!format!("{out:?}").contains("person@example.test"));
+
+        // The quota cache holds neither the email, the user ID nor a token.
+        let bytes = cache
+            .fresh_payload(Duration::from_secs(60))
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        for leaked in [
+            "person@example.test",
+            "test-user-id",
+            "userInfo",
+            "email",
+            "\"AT\"",
+            "RT",
+        ] {
+            assert!(!text.contains(leaked), "{leaked} in {text}");
+        }
+
+        // A cache hit for the same account keeps the email from memory. The
+        // unreachable endpoint proves no live call was made.
+        let cached = fetch_snapshot_at(
+            &reqwest::Client::new(),
+            &db_path,
+            &cache,
+            Duration::from_secs(60),
+            Some(&Endpoints {
+                usage_limits: "http://127.0.0.1:1".into(),
+                token: "http://127.0.0.1:1".into(),
+            }),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cached.email, out.email);
+
+        // So does the fallback when the live call fails.
+        let down = serve(String::new(), 503).await;
+        let fallback = fetch_via(&down, &db_path, &cache, Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(fallback.stale);
+        assert_eq!(fallback.email, out.email);
+
+        // Another Kiro sign-in has another account key: the previous email is
+        // not shown for it, and its own response carries none. With a profile
+        // ARN the key is derived from the ARN alone, so the switch changes it.
+        let profile =
+            serde_json::json!({"arn": "arn:aws:codewhisperer:us-east-1:2:profile/B"}).to_string();
+        Connection::open(&db_path)
+            .unwrap()
+            .execute(
+                "UPDATE state SET value = ?1 WHERE key = 'api.codewhisperer.profile'",
+                [&profile],
+            )
+            .unwrap();
+        assert_ne!(
+            db::read_credentials(&db_path).unwrap().account_key,
+            first_key
+        );
+        let other = serve(usage_json(), 200).await;
+        let switched = fetch_via(&other, &db_path, &cache, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert!(switched.off_the_wire());
+        assert_eq!(switched.email, None);
+    }
+
+    #[tokio::test]
+    async fn a_live_response_without_email_forgets_the_previous_one() {
+        let db_dir = TempDir::new().unwrap();
+        let db_path = seed_db(&db_dir, "2099-01-01T00:00:00Z");
+        let (_cache_dir, cache) = cache_fixture();
+
+        let first = serve(usage_json_with_email("person@example.test"), 200).await;
+        let out = fetch_via(&first, &db_path, &cache, Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(out.email.is_some());
+
+        let second = serve(usage_json_with_email("not-an-address"), 200).await;
+        let out = fetch_via(&second, &db_path, &cache, Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(out.off_the_wire());
+        assert_eq!(out.email, None);
+
+        let down = serve(String::new(), 503).await;
+        let fallback = fetch_via(&down, &db_path, &cache, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(fallback.email, None);
+    }
+
+    #[test]
+    fn remembered_email_is_bound_to_cache_and_account() {
+        let (_one_dir, one) = cache_fixture();
+        let (_two_dir, two) = cache_fixture();
+        let email = AccountEmail::parse("person@example.test");
+        remember_email(&one, "account-a", email.clone());
+        assert_eq!(remembered_email(&one, "account-a"), email);
+        assert_eq!(remembered_email(&one, "account-b"), None);
+        assert_eq!(remembered_email(&two, "account-a"), None);
+        remember_email(&one, "account-a", None);
+        assert_eq!(remembered_email(&one, "account-a"), None);
     }
 
     /// The credit cycle rolled over while cached: serving that cache during

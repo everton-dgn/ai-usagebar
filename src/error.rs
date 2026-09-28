@@ -7,6 +7,17 @@ use std::path::PathBuf;
 
 pub type Result<T> = std::result::Result<T, AppError>;
 
+/// Stable account-operation categories, separate from diagnostic text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountFailure {
+    RecoveryRequired,
+    UnmanagedLogin,
+    MissingLogin,
+    InvalidState,
+    StorageUnavailable,
+    LockUnavailable,
+}
+
 pub const AUTH_FAILURE_MESSAGE: &str =
     "authentication rejected — credentials may be missing, expired, or invalid";
 
@@ -39,6 +50,15 @@ pub enum AppError {
     /// rather than a transient failure.
     #[error("credentials error: {0}")]
     Credentials(String),
+
+    /// Preserve legacy diagnostics while allowing GUI workers to return only
+    /// a fixed category, without parsing or exposing the diagnostic contents.
+    #[error("{source}")]
+    Account {
+        kind: AccountFailure,
+        #[source]
+        source: Box<AppError>,
+    },
 
     /// HTTP request failed at the transport layer (DNS, TLS, timeout, connect).
     /// Maps to claudebar's "HTTP 000" — show `Loading…`, don't write
@@ -83,6 +103,13 @@ pub enum AppError {
 }
 
 impl AppError {
+    pub(crate) fn for_account(self, kind: AccountFailure) -> Self {
+        Self::Account {
+            kind,
+            source: Box::new(self),
+        }
+    }
+
     /// Convenience for non-pathful I/O.
     pub fn io_at(path: impl Into<PathBuf>, source: io::Error) -> Self {
         AppError::Io {

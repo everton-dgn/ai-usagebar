@@ -153,7 +153,7 @@ fn antigravity_present() -> bool {
     // Antigravity also reports with every product closed, from the Google
     // session it saved. Detecting only a *running* server would skip a
     // provider that works — and because a vendor is looked at once, the miss
-    // would stick until `--all`. Our own cached token is the prompt-free
+    // would stick until a forced re-probe. Our own cached token is the prompt-free
     // signal that the remote path is live; the keyring is deliberately not
     // consulted here.
     crate::cache::Cache::for_vendor(crate::vendor::VendorId::Antigravity.slug()).is_ok_and(
@@ -293,8 +293,8 @@ pub fn run_once(
     run_once_report(config_path, state_path, force).map(|report| report.enabled)
 }
 
-/// [`run_once`] keeping the whole [`DetectReport`] — what the `detect`
-/// subcommand prints. Same real probe, same `catch_unwind` guard.
+/// [`run_once`] keeping the whole [`DetectReport`]. Same real probe, same
+/// `catch_unwind` guard.
 pub fn run_once_report(
     config_path: Option<&Path>,
     state_path: &Path,
@@ -303,57 +303,6 @@ pub fn run_once_report(
     run_once_with(config_path, state_path, force, |vendor, config| {
         catch_unwind(AssertUnwindSafe(|| has_local_credentials(vendor, config))).unwrap_or(false)
     })
-}
-
-/// `ai-usagebar detect [--all] [--json]`: one-shot local credential detection
-/// as a command, so any frontend (or the user) can run it at startup.
-/// Uses the real config and state paths — tests go through
-/// [`run_once_with`] and [`format_report`] instead.
-pub fn run_cli(all: bool, json: bool) -> i32 {
-    let report =
-        default_state_path().and_then(|state_path| run_once_report(None, &state_path, all));
-    match report {
-        Ok(report) if json => match serde_json::to_string(&report) {
-            Ok(text) => {
-                println!("{text}");
-                0
-            }
-            Err(error) => {
-                eprintln!("ai-usagebar detect: {error}");
-                1
-            }
-        },
-        Ok(report) => {
-            println!(
-                "{}",
-                format_report(&report, &crate::config::config_path_hint())
-            );
-            0
-        }
-        Err(error) => {
-            eprintln!("ai-usagebar detect: {}", error.user_message());
-            1
-        }
-    }
-}
-
-/// Human-readable `detect` output. `config_hint` is where the enables were
-/// written, shown only when something was enabled.
-pub fn format_report(report: &DetectReport, config_hint: &str) -> String {
-    if report.enabled.is_empty() {
-        let noun = if report.probed == 1 {
-            "vendor"
-        } else {
-            "vendors"
-        };
-        return format!("Nothing new detected ({} {noun} checked)", report.probed);
-    }
-    let names: Vec<&str> = report
-        .enabled
-        .iter()
-        .map(|vendor| vendor.display_name())
-        .collect();
-    format!("Enabled: {}\nWritten to {config_hint}", names.join(", "))
 }
 
 /// [`run_once_report`] with the probe injected — the test seam, so the
@@ -638,9 +587,8 @@ enabled = false
         );
 
         // `force` re-probes every vendor, but it still cannot overrule an
-        // explicit `enabled = false`. That makes `detect --all` safe to run at
-        // any time: it can add providers, never silently undo a decision. A
-        // user who wants Cursor back turns it on in Settings or in the file.
+        // explicit `enabled = false`. That makes a forced detection safe to run
+        // at any time: it can add providers, never silently undo a decision.
         let forced = run_once_with(Some(&config_path), &state_path, true, probe).unwrap();
         assert!(forced.enabled.is_empty(), "{forced:?}");
         assert_eq!(forced.probed, VendorId::all().len());
@@ -664,44 +612,6 @@ enabled = false
 
         let forced = plan(&config, &state, &all, true, |_| false);
         assert_eq!(forced.probed, 3);
-    }
-
-    #[test]
-    fn format_report_lists_display_names_and_where_they_were_written() {
-        let report = DetectReport {
-            enabled: vec![VendorId::Cursor, VendorId::Kiro],
-            known: VendorId::all().to_vec(),
-            probed: 3,
-        };
-
-        let text = format_report(&report, "/home/u/.config/ai-usagebar/config.toml");
-
-        assert_eq!(
-            text,
-            "Enabled: Cursor, Kiro\nWritten to /home/u/.config/ai-usagebar/config.toml"
-        );
-    }
-
-    #[test]
-    fn format_report_says_how_many_were_checked_when_nothing_changed() {
-        let none = DetectReport {
-            enabled: vec![],
-            known: VendorId::all().to_vec(),
-            probed: 3,
-        };
-        assert_eq!(
-            format_report(&none, "unused"),
-            "Nothing new detected (3 vendors checked)"
-        );
-
-        let one = DetectReport {
-            probed: 1,
-            ..none.clone()
-        };
-        assert_eq!(
-            format_report(&one, "unused"),
-            "Nothing new detected (1 vendor checked)"
-        );
     }
 
     /// The `--json` contract: slugs, three fields, no paths and no secrets.

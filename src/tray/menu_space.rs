@@ -6,14 +6,12 @@
 //! Without the permission only this app's own chart item is known.
 
 use objc2_app_kit::{NSApplicationActivationPolicy, NSWorkspace};
-use objc2_application_services::{
-    AXError, AXIsProcessTrusted, AXIsProcessTrustedWithOptions, AXUIElement, AXValue, AXValueType,
-    kAXTrustedCheckOptionPrompt,
-};
-use objc2_core_foundation::{
-    CFArray, CFBoolean, CFDictionary, CFRetained, CFString, CFType, CGRect,
-};
+use objc2_application_services::{AXError, AXIsProcessTrusted, AXUIElement, AXValue, AXValueType};
+use objc2_core_foundation::{CFArray, CFRetained, CFString, CFType, CGRect};
 use std::ptr::NonNull;
+
+#[path = "accessibility_prompt.rs"]
+pub(crate) mod accessibility_prompt;
 
 /// Whether this process holds the Accessibility permission.
 pub fn trusted() -> bool {
@@ -21,15 +19,13 @@ pub fn trusted() -> bool {
     unsafe { AXIsProcessTrusted() }
 }
 
-/// Ask for the Accessibility permission that reading the app's menus needs;
-/// macOS shows its own prompt when it is missing. Called only when the user
-/// turns centering on, never at launch, so a restart does not prompt again.
-pub fn request_access() {
-    // SAFETY: an immutable HIServices constant.
-    let key: &CFString = unsafe { kAXTrustedCheckOptionPrompt };
-    let options = CFDictionary::<CFString, CFBoolean>::from_slices(&[key], &[CFBoolean::new(true)]);
-    // SAFETY: the options dictionary maps the prompt key to a CFBoolean.
-    unsafe { AXIsProcessTrustedWithOptions(Some(options.as_opaque())) };
+/// Guide the user through authorizing this exact running app. Called only
+/// when the user turns centering on, never at launch or if already trusted.
+pub fn request_access(changed: impl Fn() + 'static) {
+    if trusted() {
+        return;
+    }
+    accessibility_prompt::show(Box::new(changed));
 }
 
 /// Where the frontmost app's menus end, in screen points from the left, or

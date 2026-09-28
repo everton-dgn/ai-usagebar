@@ -1,4 +1,4 @@
-//! Shared vendor IDs and renderer/fetcher structs used by the widget and TUI.
+//! Shared vendor IDs, HTTP limits and fetch helpers used by every provider.
 //!
 //! Snapshots remain a discriminated `VendorSnapshot` enum because the vendors
 //! have genuinely different shapes — see `usage.rs`.
@@ -7,12 +7,9 @@ use std::collections::BTreeSet;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use clap::ValueEnum;
-
 use crate::usage::VendorSnapshot;
-use crate::widget::cli::Cli;
 
-/// Outer reqwest client timeout shared by widget and TUI entry points.
+/// Outer reqwest client timeout shared by every provider fetch.
 /// Vendor fetchers still apply their own tighter per-request timeouts.
 pub const HTTP_CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -147,10 +144,8 @@ pub async fn read_body_capped(
     Ok(buf)
 }
 
-/// Stable enum used by `--vendor` and in config files.
-#[derive(
-    Debug, Clone, Copy, ValueEnum, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize,
-)]
+/// Stable provider id used in config files and report entry ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VendorId {
     Anthropic,
@@ -183,13 +178,12 @@ pub enum VendorId {
     ModelStudio,
 }
 
-/// How a provider authenticates. Drives what a frontend offers a provider that
-/// is not usable yet: a command to run, a variable to set, or an app to sign
-/// in to.
+/// How a provider authenticates: a login saved by another product, an API
+/// key, or a local product's own session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthKind {
-    /// An interactive login writes a credential file. `login_command` runs it.
+    /// Another product's interactive login writes a credential file.
     Oauth,
     /// An API key, from the environment or an inline `api_key` in config.
     ApiKey,
@@ -451,68 +445,52 @@ impl VendorId {
         }
     }
 
-    /// Command that signs this provider in, or `""` when signing in happens
-    /// somewhere this cannot name — a desktop app's own window. The strings
-    /// are the ones the vendor modules' own credential errors already print,
-    /// so a status row and a failed fetch tell the user to run the same thing.
-    /// One sentence telling the user how to sign this provider in, for a UI
-    /// that has an error card and no room for a manual.
+    /// One sentence telling the user where this provider's credential comes
+    /// from, for a UI that has an error card and no room for a manual.
     ///
-    /// This is product knowledge, so it lives beside [`Self::login_command`]
-    /// rather than in a frontend table. The Windows popover grew its own copy
-    /// first and it disagreed with this one for five of eight providers before
-    /// it had shipped — the match here is exhaustive, so a new provider cannot
-    /// be added without saying how a person signs into it.
+    /// The app reads credentials other products already saved on this Mac; it
+    /// has no sign-in flow or API-key field of its own. So the sentence names a
+    /// graphical app to sign in to where one exists, and otherwise states the
+    /// limitation. It never asks the user to run a command or edit a file. The
+    /// match is exhaustive, so a new provider cannot be added without saying
+    /// where its credential comes from.
     pub const fn sign_in_hint(self) -> &'static str {
         match self {
-            VendorId::Anthropic => "Run `claude` in a terminal, then Refresh.",
-            VendorId::Openai => "Run `codex login` in a terminal, then Refresh.",
-            VendorId::Copilot => "Run `gh auth login` in a terminal, then Refresh.",
-            VendorId::Kiro => "Run `kiro-cli login` in a terminal, then Refresh.",
-            VendorId::Kimi => "Run `kimi` in a terminal, or set an API key.",
-            VendorId::CommandCode => "Run `commandcode` in a terminal, then Refresh.",
+            VendorId::Anthropic => {
+                "Needs a saved Claude Code sign-in on this Mac. Signing in is not available in this app."
+            }
+            VendorId::Openai => "Sign in to the Codex app on this Mac, then Refresh.",
+            VendorId::Copilot => {
+                "Needs a saved GitHub CLI sign-in with Copilot access. Signing in is not available \
+                 in this app."
+            }
+            VendorId::Kiro => {
+                "Needs a saved Kiro CLI sign-in. Signing in is not available in this app."
+            }
+            VendorId::Kimi => {
+                "Needs a saved Kimi Code sign-in. Signing in and API keys are not available in \
+                 this app yet."
+            }
+            VendorId::CommandCode => {
+                "Needs a saved Command Code sign-in. Signing in is not available in this app."
+            }
             VendorId::NousResearch => {
-                "Run `ai-usagebar auth nous login` in a terminal, then Refresh."
+                "Needs a saved Nous Research sign-in. Signing in is not available in this app."
+            }
+            VendorId::Supergrok => {
+                "Needs a saved Grok Build sign-in. Signing in is not available in this app."
+            }
+            VendorId::ModelStudio => {
+                "Needs a saved Model Studio console sign-in. Signing in is not available in this \
+                 app."
             }
             VendorId::Cursor => "Sign in to the Cursor app, then Refresh.",
-            VendorId::Antigravity => "Open Antigravity or run `agy`, then Refresh.",
-            VendorId::Grok | VendorId::Supergrok => "Sign in with `grok`, then Refresh.",
+            VendorId::Antigravity => "Open Antigravity and sign in, then Refresh.",
             VendorId::Grokbot => "Install and sign in to the Grok Bot desktop app, then Refresh.",
-            // Local login through the official CLI's own console session.
-            VendorId::ModelStudio => {
-                "Install the official `bl` CLI and run `bl auth login --console`, then Refresh."
-            }
-            // Key-only providers: there is nothing to log into, only a key to
-            // put in the config. Ollama Cloud's key is minted at
-            // ollama.com/settings/keys; the local `ollama` CLI's Ed25519 key
-            // is a registry credential, not a quota one, and is never read.
-            VendorId::AnthropicApi
-            | VendorId::Zai
-            | VendorId::Openrouter
-            | VendorId::Deepseek
-            | VendorId::Kilo
-            | VendorId::Novita
-            | VendorId::Moonshot
-            | VendorId::Minimax
-            | VendorId::OpenCodeGo
-            | VendorId::Ollama
-            | VendorId::OrcaRouter => "Add an API key in Settings, then Refresh.",
-        }
-    }
-
-    pub const fn login_command(self) -> &'static str {
-        match self {
-            VendorId::Anthropic => "claude",
-            VendorId::Openai => "codex login",
-            VendorId::Copilot => "gh auth login",
-            VendorId::CommandCode => "commandcode",
-            VendorId::NousResearch => "ai-usagebar auth nous login",
-            VendorId::Kiro => "kiro-cli login",
-            // The `bl` CLI's console login is the whole credential.
-            VendorId::ModelStudio => "bl auth login --console",
-            // Kimi takes a key *or* the Kimi Code CLI's own OAuth login, which
-            // is what a subscriber already has locally.
-            VendorId::Kimi => "kimi",
+            // Key-only providers: there is nothing to log into, only a key,
+            // and the app has no key field yet. Ollama Cloud's key is minted
+            // at ollama.com/settings/keys; the local `ollama` CLI's Ed25519
+            // key is a registry credential, not a quota one, and is never read.
             VendorId::AnthropicApi
             | VendorId::Zai
             | VendorId::Openrouter
@@ -521,14 +499,10 @@ impl VendorId {
             | VendorId::Novita
             | VendorId::Moonshot
             | VendorId::Grok
-            | VendorId::Supergrok
-            | VendorId::Grokbot
-            | VendorId::Antigravity
-            | VendorId::Cursor
             | VendorId::Minimax
             | VendorId::OpenCodeGo
             | VendorId::Ollama
-            | VendorId::OrcaRouter => "",
+            | VendorId::OrcaRouter => "API keys cannot be added in this app yet.",
         }
     }
 
@@ -568,33 +542,33 @@ impl VendorId {
 /// there with a single `outcome.map(VendorSnapshot::Whichever)`.
 pub type VendorOutcome = crate::outcome::Outcome<VendorSnapshot>;
 
-/// Options forwarded to renderers from the CLI.
-#[derive(Debug, Clone)]
-pub struct RenderOpts {
-    pub format: Option<String>,
-    pub tooltip_format: Option<String>,
-    pub icon: Option<String>,
-    pub pace_tolerance: u32,
-    pub format_pace_color: bool,
-    pub tooltip_pace_pts: bool,
-}
-
-impl RenderOpts {
-    pub fn from_cli(cli: &Cli) -> Self {
-        Self {
-            format: cli.format.clone(),
-            tooltip_format: cli.tooltip_format.clone(),
-            icon: cli.icon.clone(),
-            pace_tolerance: cli.pace_tolerance,
-            format_pace_color: cli.format_pace_color,
-            tooltip_pace_pts: cli.tooltip_pace_pts,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The app has no terminal flow, so no hint may tell the user to run
+    /// anything or edit a file.
+    #[test]
+    fn no_sign_in_hint_asks_for_a_command() {
+        for vendor in VendorId::all() {
+            let hint = vendor.sign_in_hint();
+            assert!(!hint.is_empty(), "{} has no hint", vendor.slug());
+            for forbidden in [
+                "`",
+                "Run ",
+                "run ",
+                "terminal",
+                "ai-usagebar",
+                "config.toml",
+            ] {
+                assert!(
+                    !hint.contains(forbidden),
+                    "{} hint {hint:?} contains {forbidden:?}",
+                    vendor.slug()
+                );
+            }
+        }
+    }
 
     #[test]
     fn every_vendor_has_stable_machine_and_display_names() {

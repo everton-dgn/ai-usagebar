@@ -6,8 +6,10 @@
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, Bool, Sel};
-use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2::runtime::{AnyClass, AnyObject, AnyProtocol, Bool, Sel};
+use objc2::{
+    AnyThread, ClassType, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel,
+};
 use std::ptr::NonNull;
 
 use objc2::runtime::ProtocolObject;
@@ -15,20 +17,21 @@ use objc2_app_kit::{
     NSAccessibility, NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua,
     NSAppearanceNameDarkAqua, NSApplication, NSApplicationDidChangeScreenParametersNotification,
     NSAttributedStringAttachmentConveniences, NSAttributedStringNSStringDrawing,
-    NSAutoresizingMaskOptions, NSBackingStoreType, NSBaselineOffsetAttributeName, NSButton,
-    NSColor, NSCompositingOperation, NSControl, NSControlStateValueOn, NSEvent, NSEventMask,
+    NSBackingStoreType, NSBaselineOffsetAttributeName, NSBezierPath, NSButton, NSColor,
+    NSCompositingOperation, NSControl, NSControlStateValueOn, NSEvent, NSEventMask,
     NSEventModifierFlags, NSEventType, NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
-    NSImage, NSLayoutAttribute, NSMenu, NSMenuItem, NSPanel, NSRectFillUsingOperation, NSResponder,
-    NSScreen, NSStackView, NSStatusBar, NSStatusItem, NSStatusWindowLevel, NSTextAttachment,
-    NSTextField, NSUserInterfaceLayoutOrientation, NSVariableStatusItemLength, NSView,
-    NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
-    NSWorkspaceDidActivateApplicationNotification,
+    NSImage, NSLayoutAttribute, NSLineCapStyle, NSMenu, NSMenuItem, NSPanel,
+    NSRectFillUsingOperation, NSResponder, NSScreen, NSStackView, NSStatusBar, NSStatusItem,
+    NSStatusWindowLevel, NSTextAttachment, NSTextField, NSUserInterfaceLayoutOrientation,
+    NSVariableStatusItemLength, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode,
+    NSWindowStyleMask, NSWorkspace, NSWorkspaceDidActivateApplicationNotification,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSData, NSDictionary, NSMutableAttributedString,
-    NSNotification, NSNotificationCenter, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRect,
-    NSSize, NSString,
+    NSNotification, NSNotificationCenter, NSNumber, NSObject, NSObjectProtocol, NSPoint,
+    NSProcessInfo, NSRect, NSSize, NSString,
 };
+use objc2_quartz_core::{CAAutoresizingMask, CALayer};
 
 use super::menu_bar::{Chip, Level};
 use super::menu_space;
@@ -59,6 +62,12 @@ pub enum ItemAction {
     Click { index: usize, right: bool },
     /// A pick in a provider's menu: the item's `tag`.
     Menu { tag: isize },
+    /// The menu bar began the expanded session of the item at `index`: its
+    /// left click, which the system tracks itself on macOS 27.
+    Expanded { index: usize },
+    /// The menu bar ended that session: a long press released, a drag out
+    /// or a cancel.
+    Collapsed { index: usize },
 }
 
 type Callback = Box<dyn Fn(ItemAction)>;
@@ -283,14 +292,14 @@ fn place(panel: &NSPanel, stack: &NSStackView, menu_end: Option<f64>, chart_left
 
 /// Where a provider is drawn: its own status item, or a button in the center.
 enum Slot {
-    Status(Retained<NSStatusItem>),
+    Status(Retained<NSStatusItem>, Option<ExpandedSession>),
     Center(Retained<NSButton>),
 }
 
 impl Slot {
     fn button(&self, mtm: MainThreadMarker) -> Option<Retained<NSButton>> {
         match self {
-            Slot::Status(item) => item.button(mtm).map(Retained::into_super),
+            Slot::Status(item, _) => item.button(mtm).map(Retained::into_super),
             Slot::Center(button) => Some(button.clone()),
         }
     }
@@ -425,7 +434,15 @@ impl ProviderItems {
                     }
                     button.sendActionOn(NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp);
                 }
-                created.push((chip.id.clone(), Slot::Status(item)));
+                let target = self.target.clone();
+                let session = ExpandedSession::attach(&item, move |began| {
+                    (target.ivars().callback)(if began {
+                        ItemAction::Expanded { index }
+                    } else {
+                        ItemAction::Collapsed { index }
+                    })
+                });
+                created.push((chip.id.clone(), Slot::Status(item, session)));
             }
             created.reverse();
             self.items = created;
@@ -437,7 +454,7 @@ impl ProviderItems {
                 .get(index + 1)
                 .is_some_and(|next| vendor(&next.id) == vendor(&chip.id));
             let title = chip_title(chip);
-            if let Slot::Status(item) = item {
+            if let Slot::Status(item, _) = item {
                 item.setLength(title.size().width + 2.0 * ITEM_ROOM);
             }
             if let Some(button) = item.button(mtm) {
@@ -464,7 +481,7 @@ impl ProviderItems {
         let bar = NSStatusBar::systemStatusBar();
         for (_, slot) in self.items.drain(..) {
             match slot {
-                Slot::Status(item) => bar.removeStatusItem(&item),
+                Slot::Status(item, _) => bar.removeStatusItem(&item),
                 Slot::Center(button) => button.removeFromSuperview(),
             }
         }
@@ -498,14 +515,34 @@ impl ProviderItems {
         for (index, (_, slot)) in self.items.iter().enumerate() {
             let on = open == Some(index);
             match slot {
-                Slot::Status(item) => {
+                Slot::Status(item, session) => {
                     if let Some(button) = item.button(mtm) {
-                        mark_open(&button, on);
+                        // The menu bar draws its own capsule for a session.
+                        mark_open(&button, on && session.is_none());
+                    }
+                    if let Some(session) = session {
+                        session.sync(on);
                     }
                 }
                 Slot::Center(button) => mark_open(button, on),
             }
         }
+    }
+
+    /// The host has handled the item's `Expanded` action.
+    pub fn acknowledge(&self, index: usize) {
+        if let Some((_, Slot::Status(_, Some(session)))) = self.items.get(index) {
+            session.acknowledge();
+        }
+    }
+
+    /// Whether a press at `timestamp` landed on the item at `index` while
+    /// its session was open. See [`ExpandedSession::open_before`].
+    pub fn session_open_before(&self, index: usize, timestamp: f64) -> bool {
+        matches!(
+            self.items.get(index),
+            Some((_, Slot::Status(_, Some(session)))) if session.open_before(timestamp)
+        )
     }
 
     /// Each item's frame in AppKit screen coordinates.
@@ -529,14 +566,28 @@ impl ProviderItems {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let Some(button) = self.items.get(index).and_then(|(_, slot)| slot.button(mtm)) else {
+        let Some((_, slot)) = self.items.get(index) else {
             return;
         };
-        self.show_menu_on_button(&button, lines);
+        let Some(button) = slot.button(mtm) else {
+            return;
+        };
+        let session = match slot {
+            Slot::Status(_, session) => session.as_ref(),
+            Slot::Center(_) => None,
+        };
+        self.show_menu_on_button(&button, lines, session);
     }
 
     /// Use the same native menu actions for the chart's own status button.
-    pub fn show_menu_on_button(&self, button: &NSButton, lines: &[MenuLine]) {
+    /// With a `session`, the menu bar presents the menu and draws the same
+    /// capsule as for the item's left click.
+    pub fn show_menu_on_button(
+        &self,
+        button: &NSButton,
+        lines: &[MenuLine],
+        session: Option<&ExpandedSession>,
+    ) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
@@ -568,8 +619,16 @@ impl ProviderItems {
             };
             menu.addItem(&entry);
         }
+        if let Some(session) = session {
+            session.present_menu(button, &menu);
+            return;
+        }
         let below = NSPoint::new(0.0, button.bounds().size.height + 4.0);
+        // tray-icon highlights on right-down but does not clear it on
+        // right-up. The popover/menu fill must be the only persistent one.
+        button.highlight(false);
         menu.popUpMenuPositioningItem_atLocation_inView(None, below, Some(button));
+        button.highlight(false);
     }
 }
 
@@ -598,7 +657,330 @@ enum Rule {
     Center(Retained<NSView>),
 }
 
-const PILL_RADIUS: f64 = 6.0;
+/// Stable app identity: a usage gauge with AI sparkles.
+pub fn template_main_image(point: f64) -> Retained<NSImage> {
+    let block = RcBlock::new(move |dst: NSRect| {
+        let scale = dst.size.width.min(dst.size.height) / 18.0;
+        let point =
+            |x: f64, y: f64| NSPoint::new(dst.origin.x + x * scale, dst.origin.y + y * scale);
+        NSColor::blackColor().setStroke();
+        NSColor::blackColor().setFill();
+
+        let rim = NSBezierPath::bezierPath();
+        rim.setLineWidth(1.7 * scale);
+        rim.setLineCapStyle(NSLineCapStyle::Round);
+        // Leave room in the upper-right arc for the AI sparkle.
+        for (start, end) in [(225.0, 95.0), (10.0, -45.0)] {
+            rim.moveToPoint(point(
+                8.1 + 6.4 * f64::to_radians(start).cos(),
+                7.4 + 6.4 * f64::to_radians(start).sin(),
+            ));
+            rim.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise(
+                point(8.1, 7.4),
+                6.4 * scale,
+                start,
+                end,
+                true,
+            );
+        }
+        rim.stroke();
+
+        let ticks = NSBezierPath::bezierPath();
+        ticks.setLineWidth(1.3 * scale);
+        ticks.setLineCapStyle(NSLineCapStyle::Round);
+        for (from, to) in [
+            ((3.8, 7.4), (4.6, 7.4)),
+            ((7.7, 11.1), (7.7, 11.9)),
+            ((11.8, 7.4), (12.6, 7.4)),
+        ] {
+            ticks.moveToPoint(point(from.0, from.1));
+            ticks.lineToPoint(point(to.0, to.1));
+        }
+        ticks.stroke();
+
+        let needle = NSBezierPath::bezierPath();
+        needle.setLineWidth(1.8 * scale);
+        needle.setLineCapStyle(NSLineCapStyle::Round);
+        needle.moveToPoint(point(8.1, 7.4));
+        needle.lineToPoint(point(10.7, 10.0));
+        needle.stroke();
+        NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+            point(6.8, 6.1),
+            NSSize::new(2.6 * scale, 2.6 * scale),
+        ))
+        .fill();
+
+        for (x, y, radius) in [(13.8, 13.4, 3.2), (2.6, 15.4, 1.25)] {
+            let sparkle = NSBezierPath::bezierPath();
+            let inset = radius * 0.18;
+            sparkle.moveToPoint(point(x, y + radius));
+            for (tip, before, after) in [
+                (
+                    (x + radius, y),
+                    (x + inset, y + inset),
+                    (x + inset, y + inset),
+                ),
+                (
+                    (x, y - radius),
+                    (x + inset, y - inset),
+                    (x + inset, y - inset),
+                ),
+                (
+                    (x - radius, y),
+                    (x - inset, y - inset),
+                    (x - inset, y - inset),
+                ),
+                (
+                    (x, y + radius),
+                    (x - inset, y + inset),
+                    (x - inset, y + inset),
+                ),
+            ] {
+                sparkle.curveToPoint_controlPoint1_controlPoint2(
+                    point(tip.0, tip.1),
+                    point(before.0, before.1),
+                    point(after.0, after.1),
+                );
+            }
+            sparkle.closePath();
+            sparkle.fill();
+        }
+        Bool::from(true)
+    });
+    let image =
+        NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(point, point), false, &block);
+    image.setTemplate(true);
+    image
+}
+
+/// Height of the menu bar's own capsule for a pressed or open status item
+/// on macOS 27, measured on a 30-point bar. Every highlight this app draws
+/// uses the same capsule so all items match the system's.
+const CAPSULE_HEIGHT: f64 = 24.0;
+
+/// The system capsule's shape inside `bounds`: full width, vertically centered.
+fn capsule_rect(bounds: NSRect) -> NSRect {
+    let height = CAPSULE_HEIGHT.min(bounds.size.height);
+    NSRect::new(
+        NSPoint::new(
+            bounds.origin.x,
+            bounds.origin.y + (bounds.size.height - height) / 2.0,
+        ),
+        NSSize::new(bounds.size.width, height),
+    )
+}
+
+#[derive(Default)]
+struct ChartFillIvars {
+    active: Cell<bool>,
+}
+
+define_class!(
+    // SAFETY: a passive background, without mouse handling or a custom cell.
+    #[unsafe(super(NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "AiubChartFill"]
+    #[ivars = ChartFillIvars]
+    struct ChartFill;
+
+    impl ChartFill {
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<&NSView> { None }
+
+        #[unsafe(method(drawRect:))]
+        fn draw(&self, _rect: NSRect) {
+            if self.ivars().active.get() {
+                pill_color(self).setFill();
+                let rect = capsule_rect(self.bounds());
+                let radius = rect.size.height / 2.0;
+                NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius)
+                    .fill();
+            }
+        }
+    }
+);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChartAction {
+    Pressed,
+    Released(tray_icon::MouseButton),
+    Cancelled,
+}
+
+struct ChartTargetIvars {
+    fill: Retained<ChartFill>,
+    callback: Box<dyn Fn(ChartAction)>,
+    open: Cell<bool>,
+    pressed: Cell<Option<tray_icon::MouseButton>>,
+    inside: Cell<bool>,
+    pending: Cell<bool>,
+    /// The menu bar draws the press and open capsule itself (macOS 27).
+    system: Cell<bool>,
+}
+
+define_class!(
+    // SAFETY: an event-only view. The original NSStatusBarButton keeps its
+    // native cell and image rendering; no superclass mouse tracking is used.
+    #[unsafe(super(NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "AiubChartTarget"]
+    #[ivars = ChartTargetIvars]
+    struct ChartTarget;
+
+    impl ChartTarget {
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool { true }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) { self.begin(event, tray_icon::MouseButton::Left); }
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &NSEvent) { self.finish(event, tray_icon::MouseButton::Left); }
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &NSEvent) { self.begin(event, tray_icon::MouseButton::Right); }
+        #[unsafe(method(rightMouseUp:))]
+        fn right_mouse_up(&self, event: &NSEvent) { self.finish(event, tray_icon::MouseButton::Right); }
+        #[unsafe(method(otherMouseDown:))]
+        fn other_mouse_down(&self, event: &NSEvent) {
+            if event.buttonNumber() == 2 { self.begin(event, tray_icon::MouseButton::Middle); }
+        }
+        #[unsafe(method(otherMouseUp:))]
+        fn other_mouse_up(&self, event: &NSEvent) {
+            if event.buttonNumber() == 2 { self.finish(event, tray_icon::MouseButton::Middle); }
+        }
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) { self.drag(event); }
+        #[unsafe(method(rightMouseDragged:))]
+        fn right_mouse_dragged(&self, event: &NSEvent) { self.drag(event); }
+        #[unsafe(method(otherMouseDragged:))]
+        fn other_mouse_dragged(&self, event: &NSEvent) { self.drag(event); }
+    }
+);
+
+impl ChartTarget {
+    fn contains_event(&self, event: &NSEvent) -> bool {
+        let point = self.convertPoint_fromView(event.locationInWindow(), None);
+        let bounds = self.bounds();
+        point.x >= bounds.min().x
+            && point.x < bounds.max().x
+            && point.y >= bounds.min().y
+            && point.y < bounds.max().y
+    }
+
+    fn update_fill(&self) {
+        let ivars = self.ivars();
+        let press = ivars.pending.get() || (ivars.pressed.get().is_some() && ivars.inside.get());
+        ivars
+            .fill
+            .ivars()
+            .active
+            .set(ivars.open.get() || (press && !ivars.system.get()));
+        ivars.fill.setNeedsDisplay(true);
+    }
+
+    fn begin(&self, event: &NSEvent, button: tray_icon::MouseButton) {
+        if !self.contains_event(event) {
+            return;
+        }
+        // A new down is authoritative, including after a lost mouse-up during
+        // menu-bar reordering or a change of Space. Never strand the receiver.
+        self.ivars().pressed.set(Some(button));
+        self.ivars().inside.set(true);
+        self.ivars().pending.set(false);
+        self.update_fill();
+        (self.ivars().callback)(ChartAction::Pressed);
+    }
+
+    fn drag(&self, event: &NSEvent) {
+        self.ivars().inside.set(self.contains_event(event));
+        self.update_fill();
+    }
+
+    fn finish(&self, event: &NSEvent, button: tray_icon::MouseButton) {
+        if self.ivars().pressed.get() != Some(button) {
+            return;
+        }
+        self.ivars().pressed.set(None);
+        let inside = self.contains_event(event);
+        // Keep the same fill until the host acknowledges the action. This
+        // avoids a blank frame between mouse-up and the queued popover open.
+        self.ivars().pending.set(inside);
+        self.update_fill();
+        (self.ivars().callback)(if inside {
+            ChartAction::Released(button)
+        } else {
+            ChartAction::Cancelled
+        });
+    }
+
+    fn cancel(&self) {
+        self.ivars().pressed.set(None);
+        self.ivars().pending.set(false);
+        self.update_fill();
+    }
+}
+
+fn chart_target(button: &NSButton) -> Option<Retained<ChartTarget>> {
+    button
+        .subviews()
+        .into_iter()
+        .find_map(|view| view.downcast::<ChartTarget>().ok())
+}
+
+/// Install one receiver without tray-icon's independent pressed highlight.
+pub fn install_chart_button(button: &NSButton, callback: impl Fn(ChartAction) + 'static) {
+    if chart_target(button).is_some() {
+        return;
+    }
+    let Some(content) = button.window().and_then(|window| window.contentView()) else {
+        return;
+    };
+    let fill = ChartFill::alloc(button.mtm()).set_ivars(ChartFillIvars::default());
+    // SAFETY: both views are initialized on the main thread in their parent's bounds.
+    let fill: Retained<ChartFill> =
+        unsafe { msg_send![super(fill), initWithFrame: content.bounds()] };
+    fill.setAccessibilityElement(false);
+    // A sibling behind the button cannot tint or cover its native template glyph.
+    content.addSubview_positioned_relativeTo(&fill, NSWindowOrderingMode::Below, None);
+    let target = ChartTarget::alloc(button.mtm()).set_ivars(ChartTargetIvars {
+        fill,
+        callback: Box::new(callback),
+        open: Cell::new(false),
+        pressed: Cell::new(None),
+        inside: Cell::new(false),
+        pending: Cell::new(false),
+        system: Cell::new(false),
+    });
+    let target: Retained<ChartTarget> =
+        unsafe { msg_send![super(target), initWithFrame: button.bounds()] };
+    target.setAccessibilityElement(false);
+    button.addSubview(&target);
+    button.setTransparent(false);
+    fit_chart_button(button);
+}
+
+/// Leave the press feedback to the menu bar, which draws it out of process.
+/// A press drawn here as well would stack a second highlight on it.
+pub fn use_system_highlight(button: &NSButton) {
+    if let Some(target) = chart_target(button) {
+        target.ivars().system.set(true);
+        target.update_fill();
+    }
+}
+
+pub fn cancel_chart_press(button: &NSButton) {
+    if let Some(target) = chart_target(button) {
+        target.cancel();
+    }
+}
+
+/// Only the host handling the release may finish the queued click. A data
+/// refresh can update `open` before that event reaches the host.
+pub fn acknowledge_chart_click(button: &NSButton) {
+    if let Some(target) = chart_target(button) {
+        target.ivars().pending.set(false);
+        target.update_fill();
+    }
+}
 
 /// Expand the chart's native button and tray-icon's full-button event surface
 /// to the actual menu bar height. AppKit initially gives the button 22 points
@@ -615,9 +997,31 @@ pub fn fit_chart_button(button: &NSButton) {
     if height <= 0.0 {
         return;
     }
-    let old_bounds = button.bounds();
-    let sizing =
-        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable;
+    let pin_to_edges = |view: &NSView, container: &NSView| {
+        let identifier = NSString::from_str("ai-usagebar-main-button-edges");
+        if container.constraints().iter().any(|constraint| {
+            constraint.identifier().as_deref() == Some(&identifier)
+                // SAFETY: these are live constraints installed on this view.
+                && unsafe { constraint.firstItem() }
+                    .is_some_and(|item| std::ptr::eq(&*item, view.as_ref() as &AnyObject))
+        }) {
+            return;
+        }
+        view.setTranslatesAutoresizingMaskIntoConstraints(false);
+        for constraint in [
+            view.topAnchor()
+                .constraintEqualToAnchor(&container.topAnchor()),
+            view.bottomAnchor()
+                .constraintEqualToAnchor(&container.bottomAnchor()),
+            view.leadingAnchor()
+                .constraintEqualToAnchor(&container.leadingAnchor()),
+            view.trailingAnchor()
+                .constraintEqualToAnchor(&container.trailingAnchor()),
+        ] {
+            constraint.setIdentifier(Some(&identifier));
+            constraint.setActive(true);
+        }
+    };
     // Current AppKit wraps the button in an NSView inset by four points at
     // both vertical edges. Expand that wrapper as well, or it clips the fill
     // and intercepts hit-testing before the button can receive an edge click.
@@ -626,49 +1030,247 @@ pub fn fit_chart_button(button: &NSButton) {
         if unsafe { parent.superview() }.as_deref() != Some(content.as_ref()) {
             return;
         }
-        let frame = parent.frame();
-        parent.setAutoresizingMask(sizing);
-        parent.setFrame(NSRect::new(
-            NSPoint::new(frame.origin.x, content.bounds().origin.y),
-            NSSize::new(frame.size.width, height),
-        ));
+        pin_to_edges(&parent, &content);
     }
-    // tray-icon installs its event receiver over the entire original button.
-    // Give that overlay the same autoresizing as the button, without resizing
-    // any smaller image/content views AppKit may add.
+    if let Some(target) = chart_target(button) {
+        // AppKit may move the status button to a different content view.
+        // Reattach before adding constraints, which require a common ancestor.
+        let fill = &target.ivars().fill;
+        // SAFETY: the target retains this live view on the main thread.
+        if unsafe { fill.superview() }.as_deref() != Some(content.as_ref()) {
+            fill.removeFromSuperview();
+            content.addSubview_positioned_relativeTo(fill, NSWindowOrderingMode::Below, None);
+        }
+        pin_to_edges(&target.ivars().fill, &content);
+        pin_to_edges(&target, button);
+    }
+    // tray-icon 0.25 positions this child using button.frame(), which is in
+    // the parent's coordinates. Identify it independently of that frame and
+    // pin it to bounds so refreshes cannot leave an offset or a dead edge.
     for child in button.subviews() {
-        if child.frame() == old_bounds {
-            child.setAutoresizingMask(sizing);
+        if child.class().name().to_bytes() == b"TaoTrayTarget" {
+            child.setHidden(chart_target(button).is_some());
+            pin_to_edges(&child, button);
         }
     }
-    let frame = button.frame();
-    button.setAutoresizingMask(sizing);
-    button.setFrame(NSRect::new(
-        NSPoint::new(frame.origin.x, parent.bounds().origin.y),
-        NSSize::new(frame.size.width, height),
-    ));
+    // A frame assignment only lasts until AppKit's next layout, which puts
+    // the original 22-point inset back. Constraints keep both surfaces full
+    // height after image changes, tracking and window layout.
+    pin_to_edges(button, &parent);
+    content.layoutSubtreeIfNeeded();
 }
 
-/// Draw or clear the open-item highlight behind `button`. A status item's
-/// button does not keep AppKit's highlight once its click ends, so the pill is
-/// drawn on the button's own layer, the same size as the hover highlight.
+/// Draw or clear the open-item highlight without replacing the native cell.
 pub fn mark_open(button: &NSButton, on: bool) {
+    // Clear tray-icon's independent pressed state before drawing our fill.
+    // In particular, a right click or interrupted press can leave it behind
+    // when the popover is dismissed outside the button.
+    button.highlight(false);
+    if let Some(target) = chart_target(button) {
+        target.ivars().open.set(on);
+        target.update_fill();
+        if let Some(layer) = button.layer() {
+            layer.setBackgroundColor(None);
+        }
+        return;
+    }
     let view: &NSView = button;
     view.setWantsLayer(true);
     if let Some(layer) = view.layer() {
         // WindowServer passes physical clicks through fully transparent pixels
         // in the centered panel, even when NSView::hitTest finds the button.
-        // Keep a nearly invisible fill on inactive centered buttons as well.
-        let color = if on {
-            Some(pill_color(view))
-        } else if button.downcast_ref::<CenterButton>().is_some() {
-            Some(NSColor::colorWithWhite_alpha(0.0, 0.01))
-        } else {
-            None
+        // Keep a nearly invisible fill over the whole centered button.
+        let clickable = button
+            .downcast_ref::<CenterButton>()
+            .map(|_| NSColor::colorWithWhite_alpha(0.0, 0.01).CGColor());
+        layer.setBackgroundColor(clickable.as_deref());
+        layer.setCornerRadius(0.0);
+        let capsule = capsule_layer(&layer);
+        let rect = capsule_rect(view.bounds());
+        capsule.setFrame(rect);
+        capsule.setCornerRadius(rect.size.height / 2.0);
+        let color = on.then(|| pill_color(view).CGColor());
+        capsule.setBackgroundColor(color.as_deref());
+    }
+}
+
+const CAPSULE_LAYER: &str = "ai-usagebar-capsule";
+
+/// The open-item capsule behind a button's content, created once.
+fn capsule_layer(layer: &CALayer) -> Retained<CALayer> {
+    let name = NSString::from_str(CAPSULE_LAYER);
+    // SAFETY: reading the sublayers of a live layer on the main thread.
+    let existing = unsafe { layer.sublayers() }.and_then(|sublayers| {
+        sublayers
+            .iter()
+            .find(|sublayer| sublayer.name().as_deref() == Some(&*name))
+    });
+    existing.unwrap_or_else(|| {
+        let capsule = CALayer::new();
+        capsule.setName(Some(&name));
+        // Width follows the button when its title changes; the height stays
+        // the capsule's, centered in the bar.
+        capsule.setAutoresizingMask(
+            CAAutoresizingMask::LayerWidthSizable
+                | CAAutoresizingMask::LayerMinYMargin
+                | CAAutoresizingMask::LayerMaxYMargin,
+        );
+        layer.insertSublayer_atIndex(&capsule, 0);
+        capsule
+    })
+}
+
+/// Instance state of [`SessionDelegate`].
+pub struct SessionIvars {
+    callback: Box<dyn Fn(bool)>,
+    /// A session began and the host has not handled it yet. A redraw in
+    /// between must not read the still-closed popover as a reason to cancel.
+    opening: Cell<bool>,
+    /// System uptime when the session began, the clock of `NSEvent::timestamp`.
+    began_at: Cell<f64>,
+    /// A context menu is showing; its session, until it ends, is not the
+    /// item's interface.
+    menu: Cell<bool>,
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements and this class does not
+    // implement Drop. Both methods match NSStatusItemExpandedInterfaceDelegate.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "AiubExpandedSessionDelegate"]
+    #[ivars = SessionIvars]
+    struct SessionDelegate;
+
+    impl SessionDelegate {
+        #[unsafe(method(statusItem:didBeginExpandedInterfaceSession:))]
+        fn began(&self, _item: &NSStatusItem, _session: &AnyObject) {
+            if self.ivars().menu.get() {
+                return;
+            }
+            self.ivars().opening.set(true);
+            self.ivars().began_at.set(NSProcessInfo::processInfo().systemUptime());
+            (self.ivars().callback)(true);
         }
-        .map(|c| c.CGColor());
-        layer.setBackgroundColor(color.as_deref());
-        layer.setCornerRadius(PILL_RADIUS);
+
+        #[unsafe(method(statusItemDidEndExpandedInterfaceSession:animated:))]
+        fn ended(&self, _item: &NSStatusItem, _animated: Bool) {
+            // The menu's own session ends as the menu closes, before its
+            // fade-out lets `performClick` return. A press in between begins
+            // the item's next session and must reach the host.
+            if self.ivars().menu.replace(false) {
+                return;
+            }
+            self.ivars().opening.set(false);
+            (self.ivars().callback)(false);
+        }
+    }
+);
+
+/// A status item whose left click the menu bar tracks as an expanded
+/// interface session (`NSStatusItemExpandedInterfaceDelegate`, macOS 27).
+/// The menu bar then draws one capsule for both the press and the open item,
+/// the same one every native status item gets. objc2-app-kit 0.3 predates
+/// this API, so it is reached by selector and only where the OS has it.
+pub struct ExpandedSession {
+    item: Retained<NSStatusItem>,
+    delegate: Retained<SessionDelegate>,
+}
+
+impl ExpandedSession {
+    /// `callback` gets `true` when a session begins and `false` when it ends.
+    /// `None` on macOS before 27, where the item keeps its own highlight.
+    pub fn attach(item: &NSStatusItem, callback: impl Fn(bool) + 'static) -> Option<Self> {
+        if !item.respondsToSelector(sel!(setExpandedInterfaceDelegate:)) {
+            return None;
+        }
+        let class: &AnyClass = SessionDelegate::class();
+        if let Some(protocol) = AnyProtocol::get(c"NSStatusItemExpandedInterfaceDelegate") {
+            // SAFETY: the class implements both of the protocol's methods;
+            // adding a protocol it already has is a no-op.
+            unsafe {
+                objc2::ffi::class_addProtocol(class as *const AnyClass as *mut AnyClass, protocol)
+            };
+        }
+        let mtm = MainThreadMarker::new()?;
+        let delegate = SessionDelegate::alloc(mtm).set_ivars(SessionIvars {
+            callback: Box::new(callback),
+            opening: Cell::new(false),
+            began_at: Cell::new(f64::INFINITY),
+            menu: Cell::new(false),
+        });
+        // SAFETY: NSObject's init takes no arguments and returns the object.
+        let delegate: Retained<SessionDelegate> = unsafe { msg_send![super(delegate), init] };
+        // SAFETY: the item holds the delegate weakly; `Self` keeps it alive
+        // and clears the reference on drop.
+        let _: () = unsafe { msg_send![item, setExpandedInterfaceDelegate: &*delegate] };
+        Some(Self {
+            item: item.retain(),
+            delegate,
+        })
+    }
+
+    fn session(&self) -> Option<Retained<AnyObject>> {
+        // SAFETY: a readonly, nullable object property of a live item.
+        unsafe { msg_send![&*self.item, expandedInterfaceSession] }
+    }
+
+    /// Whether the menu bar tracks an open session for this item now.
+    pub fn active(&self) -> bool {
+        self.session().is_some()
+    }
+
+    /// Whether a press at `timestamp` (`NSEvent::timestamp`) landed on a
+    /// session that was already open. While one is, a click on the item
+    /// reaches this app only through a global event monitor, and the host
+    /// closes the interface itself. The monitor can deliver the very press
+    /// that began the session after the session began, so the order in which
+    /// the two arrive proves nothing; the press's own time does.
+    pub fn open_before(&self, timestamp: f64) -> bool {
+        let ivars = self.delegate.ivars();
+        !ivars.opening.get() && ivars.began_at.get() < timestamp && self.active()
+    }
+
+    /// The host has acted on the session's beginning.
+    pub fn acknowledge(&self) {
+        self.delegate.ivars().opening.set(false);
+    }
+
+    /// Show `menu` from the item the way the menu bar shows a status item's
+    /// own menu, with its capsule, and return once it closes. The menu is
+    /// the item's only while it shows: an item with a menu sends its left
+    /// click to the menu instead of the session.
+    pub fn present_menu(&self, button: &NSButton, menu: &NSMenu) {
+        let ivars = self.delegate.ivars();
+        ivars.menu.set(true);
+        self.item.setMenu(Some(menu));
+        // SAFETY: the item's own live button; with a menu assigned, the
+        // click tracks that menu and returns when it closes.
+        unsafe { button.performClick(None) };
+        self.item.setMenu(None);
+        ivars.menu.set(false);
+    }
+
+    /// End the menu bar's session once this app's interface is no longer
+    /// open for the item, e.g. closed by a click elsewhere or the keyboard.
+    pub fn sync(&self, open: bool) {
+        if open || self.delegate.ivars().opening.get() {
+            return;
+        }
+        if let Some(session) = self.session() {
+            // SAFETY: `cancel` takes no arguments; the delegate then receives
+            // the end of the session.
+            let _: () = unsafe { msg_send![&*session, cancel] };
+        }
+    }
+}
+
+impl Drop for ExpandedSession {
+    fn drop(&mut self) {
+        // SAFETY: clearing a weak delegate reference on a live item.
+        let _: () = unsafe {
+            msg_send![&*self.item, setExpandedInterfaceDelegate: std::ptr::null::<AnyObject>()]
+        };
     }
 }
 
@@ -682,7 +1284,8 @@ fn pill_color(view: &NSView) -> Retained<NSColor> {
         .bestMatchFromAppearancesWithNames(&names)
         .is_some_and(|name| &*name == unsafe { NSAppearanceNameDarkAqua });
     if dark {
-        NSColor::colorWithWhite_alpha(1.0, 0.2)
+        // The menu bar's own capsule on a dark bar, measured on macOS 27.
+        NSColor::colorWithWhite_alpha(1.0, 0.14)
     } else {
         NSColor::colorWithWhite_alpha(0.0, 0.12)
     }
@@ -775,13 +1378,13 @@ fn separator(color: &NSColor) -> Retained<NSAttributedString> {
     }
 }
 
-/// Dracula's yellow and red on a dark menu bar; darker tones on a light one,
-/// where Dracula's pastels would not read. Green keeps the menu bar's text
-/// color, so only a quota running out draws the eye.
+/// Warning values share the active-account star's native yellow. Red uses
+/// Dracula's tone on a dark menu bar and a darker tone on a light one.
+/// Green keeps the menu bar's text color.
 fn level_color(level: Level) -> Option<Retained<NSColor>> {
     let (dark, light) = match level {
         Level::Green => return None,
-        Level::Yellow => ((0xf1, 0xfa, 0x8c), (0x9a, 0x74, 0x00)),
+        Level::Yellow => return Some(NSColor::systemYellowColor()),
         Level::Red => ((0xff, 0x55, 0x55), (0xc4, 0x1e, 0x1e)),
     };
     let srgb = |(r, g, b): (u8, u8, u8)| {

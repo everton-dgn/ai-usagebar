@@ -2,7 +2,7 @@
 //!
 //! Vendor responses and cached diagnostics are data, not terminal programs.
 //! Keep ordinary Unicode and line breaks, but remove terminal control bytes
-//! before the text is persisted or handed to Pango/ratatui/ANSI renderers.
+//! before the text is persisted or handed to the app's presentation layer.
 
 /// Generous bound for one remote label or diagnostic field. Legitimate values
 /// are normally a few dozen characters; the cap prevents a valid-but-hostile
@@ -106,7 +106,7 @@ mod tests {
 /// where one glyph occupies two cells, and for combining marks, which occupy
 /// none.
 ///
-/// This is deliberately separate from [`crate::pango::visible_width`], which
+/// Plain text only: the removed Pango renderer had a markup-aware width that
 /// additionally strips `<span>` markup. Feeding plain text to that function
 /// would treat a literal `<` as the start of a tag and silently undercount the
 /// rest of the line; feeding markup to this one would count the tags.

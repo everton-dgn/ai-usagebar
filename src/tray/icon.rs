@@ -1,9 +1,9 @@
-//! Multi-size RGBA NotifyIcon.
+//! Multi-size RGBA tray icon.
 //!
 //! The glyph is a linear gauge mark (dial arc, needle and hub) supplied by the
 //! user (Solar Icons style, CC BY 4.0). It is rasterized from
-//! `windows/tray-icon.svg` into one anti-aliased `windows/tray-icon-<size>.rgba`
-//! per NotifyIcon size (black ink, alpha as rendered).
+//! `macos/icons/tray-icon.svg` into one anti-aliased
+//! `macos/icons/tray-icon-<size>.rgba` per size (black ink, alpha as rendered).
 
 /// One Dark bar colors, same thresholds the widget already uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,19 +35,17 @@ impl Severity {
     }
 }
 
-/// NotifyIcon sizes we ship, smallest first. The shell asks for
-/// `SM_CXSMICON` (16 px at 100 % DPI, 24 px at 150 %, 32 px at 200 %); handing
-/// it a raster of exactly that size avoids a second resample that turned the
-/// glyph jagged. Each raster is anti-aliased (alpha as rendered, RGB black).
+/// Icon sizes we ship, smallest first. Handing the host a raster of exactly
+/// the size it asks for avoids a second resample that turned the glyph jagged. Each raster is anti-aliased (alpha as rendered, RGB black).
 pub const ICON_SIZES: [u32; 6] = [16, 20, 24, 32, 40, 48];
 
 const RASTERS: [&[u8]; 6] = [
-    include_bytes!("../../windows/tray-icon-16.rgba"),
-    include_bytes!("../../windows/tray-icon-20.rgba"),
-    include_bytes!("../../windows/tray-icon-24.rgba"),
-    include_bytes!("../../windows/tray-icon-32.rgba"),
-    include_bytes!("../../windows/tray-icon-40.rgba"),
-    include_bytes!("../../windows/tray-icon-48.rgba"),
+    include_bytes!("../../macos/icons/tray-icon-16.rgba"),
+    include_bytes!("../../macos/icons/tray-icon-20.rgba"),
+    include_bytes!("../../macos/icons/tray-icon-24.rgba"),
+    include_bytes!("../../macos/icons/tray-icon-32.rgba"),
+    include_bytes!("../../macos/icons/tray-icon-40.rgba"),
+    include_bytes!("../../macos/icons/tray-icon-48.rgba"),
 ];
 
 /// The shipped size that serves a request for `wanted` pixels: the exact size
@@ -117,7 +115,7 @@ mod tests {
             for pixel in bytes.as_chunks::<4>().0 {
                 if pixel[3] > 0 {
                     inked += 1;
-                    assert_eq!(&pixel[..3], &[0, 0, 0], "NotifyIcon strokes are black");
+                    assert_eq!(&pixel[..3], &[0, 0, 0], "tray icon strokes are black");
                 }
                 if pixel[3] > 0 && pixel[3] < 255 {
                     soft += 1;

@@ -1,0 +1,335 @@
+{
+  "entries": [
+    {
+      "brand": "anthropic",
+      "display_name": "Claude",
+      "error": null,
+      "fetched_at": "2026-09-27T11:45:00Z",
+      "icon": "󰚩",
+      "id": "anthropic",
+      "metrics": [
+        {
+          "detail": "Resets in 0h 50m · 83% elapsed · 54pts under",
+          "headline": "percent",
+          "label": "Session (5h)",
+          "percent": 29,
+          "reset_at": "2026-09-27T12:50:00Z",
+          "severity": "low",
+          "value": "29%",
+          "window_secs": 18000
+        },
+        {
+          "detail": "Resets in 4d 2h · 41% elapsed · 9pts under",
+          "headline": "percent",
+          "label": "Weekly (7d)",
+          "percent": 32,
+          "reset_at": "2026-10-01T14:00:00Z",
+          "severity": "low",
+          "value": "32%",
+          "window_secs": 604800
+        }
+      ],
+      "name": "anthropic",
+      "plan": "Claude Max 20x",
+      "reset_credits": null,
+      "sections": [
+        {
+          "type": "spacer"
+        },
+        {
+          "detail": "Resets in 0h 50m · 83% elapsed · 54pts under",
+          "headline": "percent",
+          "label": "Session (5h)",
+          "percent": 29,
+          "reset_at": "2026-09-27T12:50:00Z",
+          "severity": "low",
+          "type": "metric",
+          "value": "29%",
+          "window_secs": 18000
+        },
+        {
+          "type": "spacer"
+        },
+        {
+          "detail": "Resets in 4d 2h · 41% elapsed · 9pts under",
+          "headline": "percent",
+          "label": "Weekly (7d)",
+          "percent": 32,
+          "reset_at": "2026-10-01T14:00:00Z",
+          "severity": "low",
+          "type": "metric",
+          "value": "32%",
+          "window_secs": 604800
+        },
+        {
+          "type": "spacer"
+        },
+        {
+          "label": "HTTP 429",
+          "type": "text",
+          "value": "rate limited"
+        }
+      ],
+      "short_name": "cld",
+      "stale": true,
+      "status": "ready"
+    },
+    {
+      "brand": "anthropic",
+      "display_name": "Claude · work",
+      "error": "HTTP 401: authentication rejected",
+      "fetched_at": null,
+      "icon": "󰚩",
+      "id": "anthropic@work",
+      "metrics": [],
+      "name": "anthropic · work",
+      "plan": "Claude Max 5x",
+      "reset_credits": null,
+      "sections": [],
+      "short_name": "cld",
+      "stale": false,
+      "status": "error"
+    },
+    {
+      "brand": "openai",
+      "display_name": "Codex",
+      "error": null,
+      "fetched_at": null,
+      "icon": "󱢆",
+      "id": "openai",
+      "metrics": [
+        {
+          "detail": "Resets in 3h 00m · 40% elapsed · 28pts under",
+          "headline": "percent",
+          "label": "Codex 5h",
+          "percent": 12,
+          "reset_at": "2026-09-27T15:00:00Z",
+          "severity": "low",
+          "value": "12%",
+          "window_secs": 18000
+        }
+      ],
+      "name": "openai",
+      "plan": "ChatGPT Pro",
+      "reset_credits": {
+        "available": 1,
+        "credits": [
+          {
+            "title": "Full reset"
+          }
+        ]
+      },
+      "sections": [
+        {
+          "type": "spacer"
+        },
+        {
+          "detail": "Resets in 3h 00m · 40% elapsed · 28pts under",
+          "headline": "percent",
+          "label": "Codex 5h",
+          "percent": 12,
+          "reset_at": "2026-09-27T15:00:00Z",
+          "severity": "low",
+          "type": "metric",
+          "value": "12%",
+          "window_secs": 18000
+        },
+        {
+          "type": "spacer"
+        },
+        {
+          "body": [
+            "Full reset · no expiry reported"
+          ],
+          "label": "Reset credits",
+          "type": "block"
+        }
+      ],
+      "short_name": "gpt",
+      "stale": false,
+      "status": "ready"
+    },
+    {
+      "brand": "openrouter",
+      "display_name": "OpenRouter",
+      "error": null,
+      "fetched_at": null,
+      "icon": "󱙺",
+      "id": "openrouter",
+      "metrics": [
+        {
+          "detail": "$25.00 of $100.00 used (25%)",
+          "headline": "percent",
+          "label": "Credit balance",
+          "percent": 25,
+          "reset_at": null,
+          "severity": "low",
+          "value": "$75.00"
+        }
+      ],
+      "name": "openrouter",
+      "plan": "prod",
+      "reset_credits": null,
+      "sections": [
+        {
+          "type": "spacer"
+        },
+        {
+          "detail": "$25.00 of $100.00 used (25%)",
+          "headline": "percent",
+          "label": "Credit balance",
+          "percent": 25,
+          "reset_at": null,
+          "severity": "low",
+          "type": "metric",
+          "value": "$75.00"
+        },
+        {
+          "type": "spacer"
+        },
+        {
+          "body": [
+            "today $1.00 · week $5.00 · month $25.00"
+          ],
+          "label": "Usage by period",
+          "type": "block"
+        },
+        {
+          "type": "spacer"
+        },
+        {
+          "body": [
+            "$24.50 of $50.00 remaining"
+          ],
+          "label": "Per-key limit",
+          "type": "block"
+        },
+        {
+          "type": "spacer"
+        },
+        {
+          "body": [
+            "paid tier"
+          ],
+          "label": "Tier",
+          "type": "block"
+        }
+      ],
+      "short_name": "opr",
+      "stale": false,
+      "status": "ready"
+    },
+    {
+      "brand": "openrouter",
+      "display_name": "OpenRouter · team",
+      "error": null,
+      "fetched_at": null,
+      "icon": "󱙺",
+      "id": "openrouter@team",
+      "metrics": [
+        {
+          "detail": "$0.00 of $0.00 used (0%)",
+          "headline": "value",
+          "label": "Credit balance",
+          "percent": 0,
+          "reset_at": null,
+          "severity": "low",
+          "value": "$0.00"
+        }
+      ],
+      "name": "openrouter · team",
+      "plan": "team-key",
+      "reset_credits": null,
+      "sections": [
+        {
+          "type": "spacer"
+        },
+        {
+          "detail": "$0.00 of $0.00 used (0%)",
+          "headline": "value",
+          "label": "Credit balance",
+          "percent": 0,
+          "reset_at": null,
+          "severity": "low",
+          "type": "metric",
+          "value": "$0.00"
+        },
+        {
+          "type": "spacer"
+        },
+        {
+          "body": [
+            "today $0.00 · week $0.00 · month $0.00"
+          ],
+          "label": "Usage by period",
+          "type": "block"
+        },
+        {
+          "type": "spacer"
+        },
+        {
+          "body": [
+            "free tier"
+          ],
+          "label": "Tier",
+          "type": "block"
+        }
+      ],
+      "short_name": "opr",
+      "stale": false,
+      "status": "ready"
+    },
+    {
+      "brand": "opencode-go",
+      "display_name": "My Tool",
+      "error": null,
+      "fetched_at": null,
+      "icon": "myt",
+      "id": "custom:mytool",
+      "metrics": [
+        {
+          "detail": "40 of 100",
+          "headline": "percent",
+          "label": "Session",
+          "percent": 40,
+          "reset_at": "2026-09-27T14:00:00Z",
+          "severity": "low",
+          "value": "40%",
+          "window_secs": 18000
+        }
+      ],
+      "name": "My Tool",
+      "plan": "",
+      "reset_credits": null,
+      "sections": [
+        {
+          "type": "spacer"
+        },
+        {
+          "detail": "40 of 100",
+          "headline": "percent",
+          "label": "Session",
+          "percent": 40,
+          "reset_at": "2026-09-27T14:00:00Z",
+          "severity": "low",
+          "type": "metric",
+          "value": "40%",
+          "window_secs": 18000
+        },
+        {
+          "type": "spacer"
+        },
+        {
+          "label": "Region",
+          "type": "text",
+          "value": "eu"
+        }
+      ],
+      "short_name": "myt",
+      "stale": false,
+      "status": "ready"
+    }
+  ],
+  "primary": "anthropic",
+  "schema_version": 1
+}

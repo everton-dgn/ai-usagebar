@@ -246,7 +246,6 @@ fn write_persisted_oauth(cache: &Cache, persisted: &PersistedOAuth) -> Result<()
     let path = oauth_cache_path(cache);
     let bytes = serde_json::to_vec_pretty(persisted)?;
     atomic_write(&path, &bytes)?;
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
@@ -572,7 +571,6 @@ mod tests {
             persisted["fingerprint"],
             super::super::creds::fingerprint_of("rt-rotated")
         );
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(oauth_cache_path(&cache))

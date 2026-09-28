@@ -8,7 +8,6 @@ pub mod cli_account;
 pub mod creds;
 pub mod desktop_creds;
 pub mod fetch;
-#[cfg(target_os = "macos")]
 pub mod keychain;
 pub mod oauth;
 pub mod types;

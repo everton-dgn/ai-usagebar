@@ -1,7 +1,7 @@
 name: CI
 
-# Cross-platform test signal for PRs and main. Linux carries the strict quality
-# gate, macOS also compiles the native menu app, and Windows runs natively.
+# Validação do aplicativo visual para macOS com Apple Silicon. Não publica
+# versões nem artefatos.
 on:
   push:
     branches: [main]
@@ -15,20 +15,24 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Também nomeado em build.rs (FRONTEND_DIR) e Makefile.
+  FRONTEND_DIR: frontend
+
 jobs:
-  # The platform the widget actually ships on. Until this existed, Linux was
-  # only exercised *after* a tag was pushed — by which point the tag is
-  # immutable and a failure costs a new patch release.
-  linux:
-    name: test (ubuntu-latest)
-    runs-on: ubuntu-latest
+  macos:
+    name: test (macos arm64)
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Published changelog sections and versions are intact
+      - name: Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+
+      - name: Published changelog sections and the Cargo version are intact
         shell: bash
         run: |
           if [ "$(git rev-parse --is-shallow-repository)" != "false" ]; then
@@ -41,151 +45,45 @@ jobs:
           fi
           make changelog-check
 
+      # Instalada antes da estável, que continua como padrão da job.
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # 1.90.0
+        with:
+          toolchain: 1.90.0
+
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
 
+      - name: Set up Node for the frontend
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ env.FRONTEND_DIR }}/package-lock.json
+
+      - name: Install locked frontend dependencies
+        run: make frontend-deps
+
       - name: Format
-        run: cargo fmt --all -- --check
+        run: make fmt-check
 
       - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: make lint
 
       - name: Test
-        run: cargo test --all-targets --locked
+        run: make test
 
-      - name: Test desktop integration models
-        run: make desktop-test
+      - name: Check declared minimum Rust version
+        run: cargo +1.90.0 check --all-targets --locked
 
-      # The MacDashboard SSR contract test needs vite, so it runs here (npm is
-      # guaranteed on ubuntu) rather than in the bare-node desktop-test gate.
-      - name: Test the popover SSR screens
-        run: make popover-ssr-test
-
-      # The Omarchy model contract was only ever run by `make test` locally,
-      # so changes to omarchy/Model.js reached main unverified. Node-only,
-      # like desktop-test.
-      - name: Test Omarchy plugin model
-        run: make plugin-test
+      # Ad hoc explícito: o runner não tem certificado. Valida montagem,
+      # arquitetura, Info.plist e assinatura do artefato local.
+      - name: Build the app bundle
+        env:
+          CODESIGN_IDENTITY: "-"
+        run: make bundle
 
       - name: Unused dependencies
         uses: bnjbvr/cargo-machete@ac30a525c0a8d163a92d727b3ff079ee3f6ecb08 # v0.9.2
-
-  msrv:
-    name: test (rust 1.90)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # 1.90.0
-        with:
-          toolchain: 1.90.0
-
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          key: msrv-1.90.0
-
-      - name: Check declared minimum Rust version
-        run: cargo check --all-targets --locked
-
-  nix:
-    name: nix (${{ matrix.system }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - system: x86_64-linux
-            runner: ubuntu-24.04
-          - system: aarch64-linux
-            runner: ubuntu-24.04-arm
-          - system: x86_64-darwin
-            runner: macos-15-intel
-          - system: aarch64-darwin
-            runner: macos-15
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
-
-      - name: Build and test the flake
-        run: nix flake check --print-build-logs
-
-      - name: Smoke-test app outputs
-        env:
-          NIX_SYSTEM: ${{ matrix.system }}
-        run: |
-          nix run .#default -- --version
-          tui_program="$(nix eval --raw ".#apps.${NIX_SYSTEM}.tui.program")"
-          test -x "$tui_program"
-
-  macos:
-    name: test (macos-latest)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          components: clippy
-
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-
-      # Ships with `-D warnings` like Linux. Each platform compiles a different
-      # slice of this crate — the macOS Keychain fallback, the Windows process
-      # and TCP-table walk — and a lint on the slice the Linux job never sees
-      # is a lint nobody sees.
-      - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
-
-      - name: Test
-        run: cargo test --all-targets --locked
-
-      # Legacy Swift menu (NSMenu). The product UI is `ai-usagebar-tray`
-      # (WKWebView popover), compiled by clippy --all-targets above.
-      - name: Build the menu bar app
-        run: swiftc -O -parse-as-library -o /tmp/ai-usagebar-menubar macos/ai-usagebar-menubar.swift
-
-      - name: Run the menu bar test harness
-        run: ./macos/run-tests.sh
-
-  windows:
-    name: test (windows-latest)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          components: clippy
-
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-
-      # ring assembles its primitives on x86_64 and needs nasm; the runner does
-      # not ship it on PATH. No-op if a future image already provides it.
-      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
-
-      - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
-
-      - name: Test
-        run: cargo test --all-targets --locked
-
-      # Same guard as the release workflow: a debug tray embedding the
-      # no-npm stub here means the npm probe or the Vite build broke (#229).
-      - name: "Guard: tray must embed the dashboard, not the stub"
-        shell: pwsh
-        run: |
-          $exe = 'target/debug/ai-usagebar-tray.exe'
-          if (Select-String -Path $exe -Pattern 'popover dist missing' -Quiet) {
-            Write-Host "::error::$exe embeds the placeholder popover — build.rs took the no-npm stub path (#229)"
-            exit 1
-          }
-
-      - name: Test KDE plasmoid logic
-        run: node kde-plasmoid/plasmoid-logic.test.mjs
-
-      - name: Test Windows popover model
-        run: node windows/popover/popover.test.mjs

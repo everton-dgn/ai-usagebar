@@ -389,7 +389,6 @@ pub fn read_persisted(path: &Path, fingerprint: &str) -> Option<PersistedOAuth> 
 pub fn write_persisted(path: &Path, value: &PersistedOAuth) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value)?;
     atomic_write(path, &bytes)?;
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
@@ -816,7 +815,6 @@ mod tests {
         assert_eq!(read_persisted(&path, "abcd"), Some(value.clone()));
         assert_eq!(read_persisted(&path, "other"), None);
 
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();

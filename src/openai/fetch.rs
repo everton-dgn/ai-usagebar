@@ -255,7 +255,7 @@ fn handle_auth_failure(
     let original = if transient {
         AppError::Transport("openai: no cache and refresh failed transiently".into())
     } else {
-        AppError::Credentials("openai: token refresh failed; run `codex login` to re-auth".into())
+        AppError::Credentials("openai: token refresh failed; sign in to Codex again".into())
     };
     crate::outcome::fallback(cache, None, original, |bytes| {
         parse_payload(bytes, plan_hint)

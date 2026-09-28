@@ -9,6 +9,8 @@ use std::fmt;
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
+use crate::identity::AccountEmail;
+
 const DEVICE_CODE: &str = "device_code";
 const USER_CODE: &str = "user_code";
 const VERIFICATION_URI: &str = "verification_uri";
@@ -70,9 +72,13 @@ impl fmt::Debug for TokenResponse {
 /// Display-safe subset of the Nous account response.
 ///
 /// The account response may include internal user/organization IDs and future
-/// fields.  Those values are intentionally not represented here.
+/// fields.  Those values are intentionally not represented here.  The display
+/// email is the one exception; its `Debug` output is redacted.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccountSnapshot {
+    /// `user.email` of the same authenticated response, when it holds a
+    /// valid address.
+    pub email: Option<AccountEmail>,
     pub plan: Option<String>,
     pub tier: Option<i64>,
     pub monthly_credits: Option<f64>,
@@ -249,6 +255,7 @@ pub fn parse_account(value: &Value) -> Result<AccountSnapshot, String> {
     }
 
     Ok(AccountSnapshot {
+        email: account_email(object),
         plan,
         tier,
         monthly_credits,
@@ -258,6 +265,17 @@ pub fn parse_account(value: &Value) -> Result<AccountSnapshot, String> {
         rollover_credits,
         current_period_end,
     })
+}
+
+/// `user.email`, read the way the official Hermes client reads it: a missing,
+/// non-string or invalid value yields no email and never fails the account.
+fn account_email(object: &Map<String, Value>) -> Option<AccountEmail> {
+    object
+        .get("user")?
+        .as_object()?
+        .get("email")?
+        .as_str()
+        .and_then(AccountEmail::parse)
 }
 
 fn object<'a>(value: &'a Value, name: &str) -> Result<&'a Map<String, Value>, String> {
@@ -444,6 +462,57 @@ mod tests {
         assert!(debug.contains("Pro"));
         assert!(!debug.contains("test-user-id"));
         assert!(!debug.contains("test-org-id"));
+    }
+
+    #[test]
+    fn account_email_comes_only_from_the_nested_user_object() {
+        let value = serde_json::json!({
+            "user": {"email": " person@example.test ", "privy_did": "test-did"},
+            "subscription": {"plan": "Plus"}
+        });
+        let snapshot = parse_account(&value).unwrap();
+        assert_eq!(
+            snapshot.email.as_ref().map(AccountEmail::as_str),
+            Some("person@example.test")
+        );
+        let debug = format!("{snapshot:?}");
+        assert!(!debug.contains("person@example.test"));
+        assert!(!debug.contains("test-did"));
+
+        // Top-level or organisation addresses are not the account's email.
+        let value = serde_json::json!({
+            "email": "top@example.test",
+            "organisation": {"email": "org@example.test"},
+            "plan": "Pro"
+        });
+        assert_eq!(parse_account(&value).unwrap().email, None);
+    }
+
+    #[test]
+    fn unusable_account_email_is_dropped_without_failing_the_account() {
+        for user in [
+            serde_json::json!(null),
+            serde_json::json!("person@example.test"),
+            serde_json::json!({}),
+            serde_json::json!({"email": null}),
+            serde_json::json!({"email": 42}),
+            serde_json::json!({"email": ""}),
+            serde_json::json!({"email": "no-at-sign"}),
+            serde_json::json!({"email": "a@b\nc"}),
+            serde_json::json!({"email": "<a@b>"}),
+        ] {
+            let value =
+                serde_json::json!({"user": user.clone(), "plan": "Pro", "monthly_credits": 10.0});
+            let snapshot = parse_account(&value).unwrap_or_else(|error| panic!("{user}: {error}"));
+            assert_eq!(snapshot.email, None, "{user}");
+            assert_eq!(snapshot.plan.as_deref(), Some("Pro"));
+        }
+    }
+
+    #[test]
+    fn an_email_alone_is_not_an_account_contract() {
+        let value = serde_json::json!({"user": {"email": "person@example.test"}});
+        assert!(parse_account(&value).is_err());
     }
 
     #[test]

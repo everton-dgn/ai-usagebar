@@ -403,7 +403,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, AppError::Credentials(_)), "{err:?}");
-        assert!(err.to_string().contains("bl auth login --console"), "{err}");
+        assert!(err.to_string().contains("console sign-in"), "{err}");
     }
 
     /// A failed re-auth with a warm cache: stale figures plus the redacted
@@ -445,7 +445,7 @@ mod tests {
         let (code, body) = out.last_error.unwrap();
         assert_eq!(code, 0);
         assert!(!body.contains("tok-test"), "{body}");
-        assert!(body.contains("bl auth login --console"), "{body}");
+        assert!(body.contains("console sign-in"), "{body}");
     }
 
     /// Any other `success:false` code is a schema failure carrying its own

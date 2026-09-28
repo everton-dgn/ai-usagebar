@@ -1,6 +1,6 @@
 //! Wrap `usage --json` for the popover and derive the tray icon severity.
 //!
-//! Pure JSON in, JSON out — no HWND, no `$HOME`, no clock. The host supplies
+//! Pure JSON in, JSON out — no window handle, no `$HOME`, no clock. The host supplies
 //! `now_ms` so tests pin the countdown.
 
 use serde_json::{Value, json};
@@ -14,8 +14,7 @@ use crate::display::sanitize_untrusted_field;
 pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Everything the host knows that is not part of the usage report: its own
-/// version, the Run-key state, the registered shortcut and the update
-/// machinery. One struct so a new fact does not grow `wrap_report`'s arity.
+/// version, the login-item state and the registered shortcut. One struct so a new fact does not grow `wrap_report`'s arity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostFacts {
     /// Seconds between full reports; `[tray] refresh_minutes` × 60.
@@ -25,12 +24,6 @@ pub struct HostFacts {
     /// Why the last `set-shortcut` was refused (already taken, unparsable), or empty.
     pub shortcut_error: String,
     pub startup_enabled: bool,
-    /// Latest known release when it is newer than `version`.
-    pub update: Option<UpdateFact>,
-    /// Wall-clock ms of the last successful or failed release check, 0 = never.
-    pub update_checked_at: i64,
-    /// "auto" | "notify" | "off".
-    pub updates: String,
     pub version: String,
     /// Vendors whose active login the popover can switch. Only the macOS host
     /// fills this; an empty list hides the control everywhere else.
@@ -59,27 +52,19 @@ pub struct AccountSwitchFact {
     pub error: String,
 }
 
-/// State of a newer release as the popover renders it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct UpdateFact {
-    /// Human-readable reason when `state` is "failed", or empty.
-    pub error: String,
-    /// "checking" | "available" | "downloading" | "installing" | "failed".
-    pub state: String,
-    /// Release page for the human; never opened by the host itself.
-    pub url: String,
-    /// Bare "X.Y.Z".
-    pub version: String,
-}
-
 impl HostFacts {
     pub fn new(version: &str, startup_enabled: bool) -> Self {
         Self {
             startup_enabled,
-            updates: "notify".into(),
             version: version.into(),
             ..Self::default()
         }
+    }
+
+    /// Keep only local identities unchanged over the associated usage fetch.
+    pub(crate) fn retain_stable_emails(&mut self, current: &Self) {
+        self.account_emails
+            .retain(|id, email| current.account_emails.get(id) == Some(email));
     }
 }
 
@@ -90,9 +75,6 @@ impl Default for HostFacts {
             shortcut: String::new(),
             shortcut_error: String::new(),
             startup_enabled: false,
-            update: None,
-            update_checked_at: 0,
-            updates: String::new(),
             version: String::new(),
             accounts: Vec::new(),
             account_emails: Default::default(),
@@ -100,51 +82,9 @@ impl Default for HostFacts {
     }
 }
 
-/// GitHub page this binary was built from (`Cargo.toml` `repository`), or
-/// empty when that field is not a GitHub URL. The About screen opens it.
-fn repository_page() -> String {
-    let raw = crate::update::SOURCE_REPOSITORY
-        .trim()
-        .trim_end_matches('/');
-    let raw = raw.strip_suffix(".git").unwrap_or(raw);
-    if raw.starts_with("https://github.com/") {
-        raw.to_string()
-    } else {
-        String::new()
-    }
-}
-
-/// Map a manual release check onto the fact the popover already renders.
-/// `Ok(None)` is "up to date" and clears any previous fact.
-///
-/// macOS-only: the macOS host's manual check maps through here, while the
-/// Windows host builds its facts inline around its pending/snooze state.
-#[cfg(target_os = "macos")]
-pub fn fact_after_check(
-    outcome: Result<Option<crate::update::Release>, String>,
-) -> Option<UpdateFact> {
-    match outcome {
-        Ok(Some(release)) => Some(UpdateFact {
-            error: String::new(),
-            state: "available".into(),
-            url: release.html_url,
-            version: release.version,
-        }),
-        Ok(None) => None,
-        Err(error) => Some(UpdateFact {
-            error,
-            state: "failed".into(),
-            url: String::new(),
-            version: String::new(),
-        }),
-    }
-}
-
 fn host_os() -> &'static str {
     if cfg!(target_os = "macos") {
         "macos"
-    } else if cfg!(windows) {
-        "windows"
     } else {
         "linux"
     }
@@ -160,14 +100,6 @@ pub fn wrap_report(
     let poll_ms = i64::try_from(facts.refresh_secs)
         .unwrap_or(i64::MAX / 1_000)
         .saturating_mul(1_000);
-    let update = facts.update.as_ref().map(|u| {
-        json!({
-            "version": sanitize_untrusted_field(&u.version),
-            "url": sanitize_untrusted_field(&u.url),
-            "state": u.state,
-            "error": sanitize_untrusted_field(&u.error),
-        })
-    });
     let accounts: serde_json::Map<String, Value> = facts
         .accounts
         .iter()
@@ -197,10 +129,6 @@ pub fn wrap_report(
         "os": host_os(),
         "shortcut": facts.shortcut,
         "shortcut_error": sanitize_untrusted_field(&facts.shortcut_error),
-        "updates": facts.updates,
-        "update": update,
-        "update_checked_at": facts.update_checked_at,
-        "repository": repository_page(),
         "accounts": accounts,
         "host_error": host_error.map(sanitize_untrusted_field),
         "primary": Value::Null,
@@ -238,12 +166,25 @@ pub fn wrap_report(
 
 /// Enrich full and targeted reports with the identity of the matching account.
 pub(crate) fn attach_account_email(entry: &mut Value, facts: &HostFacts) {
+    // Authenticated response identity belongs to this exact refresh and wins
+    // over a local marker captured before a concurrent account switch.
+    if entry
+        .get("email")
+        .and_then(Value::as_str)
+        .and_then(crate::identity::AccountEmail::parse)
+        .is_some()
+    {
+        return;
+    }
     let email = entry
         .get("id")
         .and_then(Value::as_str)
         .and_then(|id| facts.account_emails.get(id));
-    if let Some(email) = email {
-        entry["email"] = json!(sanitize_untrusted_field(email));
+    if let Some(email) = email
+        .map(|email| sanitize_untrusted_field(email))
+        .and_then(|email| crate::identity::AccountEmail::parse(&email))
+    {
+        entry["email"] = json!(email.as_str());
     }
 }
 
@@ -445,39 +386,22 @@ mod tests {
         assert_eq!(payload["refresh_minutes"], 5);
         assert_eq!(payload["startup_enabled"], true);
         let os = payload["os"].as_str().unwrap_or("");
-        assert!(
-            os == "macos" || os == "windows" || os == "linux",
-            "unexpected os {os}"
-        );
+        assert!(os == "macos" || os == "linux", "unexpected os {os}");
         assert_eq!(payload["shortcut"], "");
         assert_eq!(payload["shortcut_error"], "");
-        assert_eq!(payload["updates"], "notify");
-        assert!(payload["update"].is_null());
-        assert_eq!(payload["update_checked_at"], 0);
-        assert!(
-            payload["repository"]
-                .as_str()
-                .unwrap_or("")
-                .starts_with("https://github.com/")
-        );
+        for retired in ["updates", "update", "update_checked_at", "repository"] {
+            assert!(payload.get(retired).is_none(), "{retired}");
+        }
         assert!(payload["host_error"].is_null());
         assert_eq!(payload["primary"], "anthropic");
         assert_eq!(payload["entries"][0]["short_name"], "cld");
     }
 
     #[test]
-    fn wrap_carries_shortcut_and_update_facts_sanitized() {
+    fn wrap_carries_shortcut_facts_sanitized() {
         let mut host = facts("1.10.0", false);
         host.shortcut = "Ctrl+Shift+U".into();
         host.shortcut_error = "already taken\u{1b}[31m".into();
-        host.updates = "auto".into();
-        host.update_checked_at = 42;
-        host.update = Some(UpdateFact {
-            error: String::new(),
-            state: "available".into(),
-            url: "https://github.com/akitaonrails/ai-usagebar/releases/tag/v1.11.0".into(),
-            version: "1.11.0".into(),
-        });
         let payload = wrap_report(&sample_report(), &host, 0, None);
         assert_eq!(payload["shortcut"], "Ctrl+Shift+U");
         assert!(
@@ -486,30 +410,6 @@ mod tests {
                 .unwrap()
                 .contains('\u{1b}')
         );
-        assert_eq!(payload["updates"], "auto");
-        assert_eq!(payload["update_checked_at"], 42);
-        assert_eq!(payload["update"]["version"], "1.11.0");
-        assert_eq!(payload["update"]["state"], "available");
-        assert_eq!(payload["update"]["error"], "");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn fact_after_check_maps_newer_current_and_failure() {
-        use crate::update::Release;
-
-        let newer = super::fact_after_check(Ok(Some(Release {
-            assets: Vec::new(),
-            html_url: "https://github.com/akitaonrails/ai-usagebar/releases/tag/v9.0.0".into(),
-            version: "9.0.0".into(),
-        })))
-        .expect("a newer release is a fact");
-        assert_eq!(newer.state, "available");
-        assert_eq!(newer.version, "9.0.0");
-        assert!(super::fact_after_check(Ok(None)).is_none());
-        let failed = super::fact_after_check(Err("offline".into())).expect("a failure is a fact");
-        assert_eq!(failed.state, "failed");
-        assert_eq!(failed.error, "offline");
     }
 
     #[test]
@@ -633,5 +533,44 @@ mod tests {
         let mut other = json!({"id": "openai@home", "status": "ready"});
         attach_account_email(&mut other, &host);
         assert!(other.get("email").is_none());
+    }
+
+    #[test]
+    fn authenticated_identity_survives_full_and_targeted_reports() {
+        let mut host = facts("1", false);
+        host.account_emails
+            .insert("kimi".into(), "older@example.test".into());
+        let report =
+            r#"{"entries":[{"id":"kimi","email":"current@example.test"},{"id":"minimax"}]}"#;
+        let payload = wrap_report(report, &host, 0, None);
+        assert_eq!(payload["entries"][0]["email"], "current@example.test");
+        assert!(payload["entries"][1].get("email").is_none());
+        let mut entry = json!({"id":"kimi","email":"current@example.test"});
+        attach_account_email(&mut entry, &host);
+        assert_eq!(entry["email"], "current@example.test");
+    }
+
+    #[test]
+    fn local_identity_must_be_valid_and_stable_over_the_fetch() {
+        let mut before = facts("1", false);
+        before
+            .account_emails
+            .insert("openai".into(), "before@example.test".into());
+        before
+            .account_emails
+            .insert("anthropic".into(), "stable@example.test".into());
+        let mut after = before.clone();
+        after
+            .account_emails
+            .insert("openai".into(), "after@example.test".into());
+        before.retain_stable_emails(&after);
+        assert!(!before.account_emails.contains_key("openai"));
+        assert!(before.account_emails.contains_key("anthropic"));
+        before
+            .account_emails
+            .insert("kimi".into(), "not an email".into());
+        let mut entry = json!({"id":"kimi"});
+        attach_account_email(&mut entry, &before);
+        assert!(entry.get("email").is_none());
     }
 }

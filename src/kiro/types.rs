@@ -24,11 +24,17 @@
 //! public API reference (AWS's own docs say as much). Community reference
 //! implementations exist (`Finesssee/ProxyPilot`, `HsnSaboor/CLIProxyAPIPlus`)
 //! confirming the same request/response shape against `codewhisperer.*.amazonaws.com`.
+//!
+//! The optional top-level `userInfo` object (`userId`, `email`) is part of the
+//! public Smithy client AWS ships in `aws/amazon-q-developer-cli`
+//! (`crates/amzn-codewhisperer-client`, `shape_get_usage_limits.rs` and
+//! `shape_user_info.rs`). Only its email is read, as display identity.
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::error::{AppError, Result};
+use crate::identity::AccountEmail;
 use crate::usage::KiroSnapshot;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -40,6 +46,24 @@ pub struct UsageLimitsResponse {
     pub usage_breakdown_list: Vec<UsageBreakdown>,
     #[serde(default)]
     pub next_date_reset: Option<f64>,
+    /// `userInfo.email` of this response, when it holds a valid address.
+    /// Anything else in `userInfo`, such as `userId`, is not retained.
+    #[serde(default, rename = "userInfo", deserialize_with = "user_info_email")]
+    pub email: Option<AccountEmail>,
+}
+
+/// Identity is best-effort: a missing, null, malformed or invalid `userInfo`
+/// yields no email and never fails the usage response.
+fn user_info_email<'de, D>(deserializer: D) -> std::result::Result<Option<AccountEmail>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value
+        .as_ref()
+        .and_then(|info| info.get("email"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(AccountEmail::parse))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -259,6 +283,74 @@ mod tests {
         let mut resp = sample();
         resp.usage_breakdown_list[0].current_usage_with_precision = Some(f64::NAN);
         assert!(matches!(to_snapshot(resp), Err(AppError::Schema(_))));
+    }
+
+    #[test]
+    fn user_info_email_is_read_without_the_user_id() {
+        let resp: UsageLimitsResponse = serde_json::from_str(
+            r#"{
+                "subscriptionInfo": { "subscriptionTitle": "KIRO POWER" },
+                "usageBreakdownList": [{
+                    "resourceType": "CREDIT",
+                    "currentUsageWithPrecision": 1.0,
+                    "usageLimitWithPrecision": 2.0
+                }],
+                "userInfo": { "userId": "test-user-id", "email": "person@example.test" }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resp.email.as_ref().map(AccountEmail::as_str),
+            Some("person@example.test")
+        );
+        let debug = format!("{resp:?}");
+        assert!(!debug.contains("person@example.test"));
+        assert!(!debug.contains("test-user-id"));
+        assert_eq!(to_snapshot(resp).unwrap().plan, "KIRO POWER");
+    }
+
+    #[test]
+    fn unusable_user_info_never_fails_the_usage_response() {
+        for info in [
+            "null",
+            "\"person@example.test\"",
+            "[]",
+            "{}",
+            r#"{"email": null}"#,
+            r#"{"email": 7}"#,
+            r#"{"email": ""}"#,
+            r#"{"email": "not-an-address"}"#,
+            r#"{"userId": "test-user-id"}"#,
+        ] {
+            let body = format!(
+                r#"{{"subscriptionInfo": {{"subscriptionTitle": "KIRO POWER"}},
+                    "usageBreakdownList": [{{"resourceType": "CREDIT",
+                        "currentUsageWithPrecision": 1.0, "usageLimitWithPrecision": 2.0}}],
+                    "userInfo": {info}}}"#
+            );
+            let resp: UsageLimitsResponse = serde_json::from_str(&body).unwrap();
+            assert_eq!(resp.email, None, "{info}");
+            assert_eq!(to_snapshot(resp).unwrap().used, 1.0, "{info}");
+        }
+        // Absent entirely, as in the verified live shape.
+        assert_eq!(sample().email, None);
+    }
+
+    #[test]
+    fn email_is_not_inferred_from_a_top_level_or_nested_lookalike() {
+        let resp: UsageLimitsResponse = serde_json::from_str(
+            r#"{
+                "email": "top@example.test",
+                "subscriptionInfo": { "subscriptionTitle": "KIRO POWER", "email": "sub@example.test" },
+                "usageBreakdownList": [{
+                    "resourceType": "CREDIT",
+                    "currentUsageWithPrecision": 1.0,
+                    "usageLimitWithPrecision": 2.0
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(resp.email, None);
     }
 
     #[test]

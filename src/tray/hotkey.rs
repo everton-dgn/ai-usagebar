@@ -4,16 +4,32 @@
 //! turns whatever the user typed ("shift + ctrl + u") into the one canonical
 //! spelling the Settings page echoes back ("Ctrl+Shift+U") and the dialect
 //! `global_hotkey::hotkey::HotKey::from_str` parses ("control+shift+KeyU").
-//! [`HotkeyBinding`] is the Windows-only registration on top of it.
+//! The persisted spelling keeps the historical `Win` token for the Command
+//! key so existing configs stay valid; [`display_label`] renames it to
+//! `Command` for everything the user reads. [`HotkeyBinding`] is the macOS
+//! registration on top of it.
 
 use std::fmt::Write as _;
 
-/// Canonical spelling shown to the user ("Ctrl+Shift+U") plus the dialect
-/// `global_hotkey::hotkey::HotKey::from_str` parses ("control+shift+KeyU").
+/// Canonical spelling persisted in the config ("Ctrl+Shift+Win+U"), the
+/// dialect `global_hotkey::hotkey::HotKey::from_str` parses
+/// ("control+shift+super+KeyU") and the label shown on macOS
+/// ("Ctrl+Shift+Command+U").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Normalized {
     pub canonical: String,
     pub crate_form: String,
+    pub display: String,
+}
+
+/// The macOS label for a canonical shortcut: only the `Win` token becomes
+/// `Command`, so keys and the stored spelling are untouched.
+pub fn display_label(canonical: &str) -> String {
+    canonical
+        .split('+')
+        .map(|token| if token == "Win" { "Command" } else { token })
+        .collect::<Vec<_>>()
+        .join("+")
 }
 
 /// Longest slice of an unrecognised token echoed back in an error. The text
@@ -23,7 +39,7 @@ const MAX_ECHOED_TOKEN_CHARS: usize = 16;
 /// Parse a user-typed shortcut into its canonical and crate spellings.
 ///
 /// Tokens are split on `+`, trimmed, and matched case-insensitively. At least
-/// one of Ctrl/Alt/Win is required (Shift alone would shadow typing) and
+/// one of Ctrl/Alt/Command is required (Shift alone would shadow typing) and
 /// exactly one non-modifier key. Escape is refused because it already closes
 /// the popover. Errors are user-facing sentences.
 pub fn normalize(text: &str) -> Result<Normalized, String> {
@@ -60,7 +76,7 @@ pub fn normalize(text: &str) -> Result<Normalized, String> {
         return Err("Add a key, for example Ctrl+Shift+U".to_string());
     };
     if !(ctrl || alt || win) {
-        return Err("Add Ctrl, Alt or Win".to_string());
+        return Err("Add Ctrl, Alt or Command".to_string());
     }
 
     let mut canonical = String::new();
@@ -80,6 +96,7 @@ pub fn normalize(text: &str) -> Result<Normalized, String> {
     crate_form.push_str(&key.crate_form);
 
     Ok(Normalized {
+        display: display_label(&canonical),
         canonical,
         crate_form,
     })
@@ -183,14 +200,14 @@ fn echo_token(token: &str) -> String {
     }
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 mod binding {
     use global_hotkey::hotkey::HotKey;
     use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
     use crate::display::sanitize_untrusted_line;
 
-    use super::normalize;
+    use super::{display_label, normalize};
 
     /// The one registered global shortcut, or none.
     ///
@@ -220,7 +237,8 @@ mod binding {
 
         /// Replace the registered shortcut. `None` unregisters. On failure
         /// nothing stays registered and the error is a user-facing sentence
-        /// ("Ctrl+Shift+U is already used by another app").
+        /// ("Ctrl+Shift+U is already used by another app"), with Command
+        /// named as macOS does.
         pub fn apply(&mut self, canonical: Option<&str>) -> Result<(), String> {
             let wanted = match canonical {
                 None => None,
@@ -229,7 +247,7 @@ mod binding {
                     let hotkey: HotKey = normalized.crate_form.parse().map_err(|err| {
                         format!(
                             "{} is not a shortcut this build can register: {}",
-                            normalized.canonical,
+                            normalized.display,
                             sanitize_untrusted_line(&format!("{err}"))
                         )
                     })?;
@@ -270,12 +288,13 @@ mod binding {
 
     /// Turn a registration failure into the sentence the Settings page shows.
     fn register_failure(canonical: &str, err: &global_hotkey::Error) -> String {
+        let shown = display_label(canonical);
         match err {
             global_hotkey::Error::AlreadyRegistered(_) => {
-                format!("{canonical} is already used by another app")
+                format!("{shown} is already used by another app")
             }
             other => format!(
-                "Could not register {canonical}: {}",
+                "Could not register {shown}: {}",
                 sanitize_untrusted_line(&other.to_string())
             ),
         }
@@ -325,6 +344,19 @@ mod binding {
         }
 
         #[test]
+        fn failures_name_command_instead_of_win() {
+            let hotkey = HotKey::new(Some(Modifiers::SUPER), Code::KeyU);
+            let message =
+                register_failure("Win+U", &global_hotkey::Error::AlreadyRegistered(hotkey));
+            assert_eq!(message, "Command+U is already used by another app");
+            let err = global_hotkey::Error::FailedToRegister("busy".to_string());
+            assert_eq!(
+                register_failure("Ctrl+Win+U", &err),
+                "Could not register Ctrl+Command+U: Unable to register hotkey: busy"
+            );
+        }
+
+        #[test]
         fn already_registered_becomes_a_friendly_sentence() {
             let hotkey = HotKey::new(Some(Modifiers::CONTROL), Code::KeyU);
             let message =
@@ -345,7 +377,7 @@ mod binding {
     }
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 pub use binding::{HotkeyBinding, install_press_handler};
 
 #[cfg(test)]
@@ -389,6 +421,33 @@ mod tests {
         for win in ["win", "super", "meta", "cmd", "command"] {
             assert_eq!(canonical(&format!("{win}+u")), "Win+U", "{win}");
         }
+    }
+
+    #[test]
+    fn command_is_stored_as_win_and_shown_as_command() {
+        for text in [
+            "cmd+shift+u",
+            "command+shift+u",
+            "win+shift+u",
+            "super+shift+u",
+        ] {
+            let normalized = normalize(text).unwrap_or_else(|err| panic!("{text}: {err}"));
+            assert_eq!(normalized.canonical, "Shift+Win+U", "{text}");
+            assert_eq!(normalized.display, "Shift+Command+U", "{text}");
+            assert_eq!(normalized.crate_form, "shift+super+KeyU", "{text}");
+        }
+        assert_eq!(
+            normalize("ctrl+alt+u").expect("valid").display,
+            "Ctrl+Alt+U"
+        );
+    }
+
+    #[test]
+    fn display_label_only_renames_the_win_token() {
+        assert_eq!(display_label("Ctrl+Win+Left"), "Ctrl+Command+Left");
+        assert_eq!(display_label("Win+W"), "Command+W");
+        assert_eq!(display_label("Ctrl+Alt+U"), "Ctrl+Alt+U");
+        assert_eq!(display_label(""), "");
     }
 
     #[test]
@@ -443,12 +502,12 @@ mod tests {
 
     #[test]
     fn shift_alone_is_not_enough() {
-        assert_eq!(refusal("Shift+U"), "Add Ctrl, Alt or Win");
+        assert_eq!(refusal("Shift+U"), "Add Ctrl, Alt or Command");
     }
 
     #[test]
     fn a_bare_key_is_refused() {
-        assert_eq!(refusal("u"), "Add Ctrl, Alt or Win");
+        assert_eq!(refusal("u"), "Add Ctrl, Alt or Command");
     }
 
     #[test]

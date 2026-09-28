@@ -17,21 +17,12 @@ pub fn http_url(raw: &str) -> Option<&str> {
     }
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 pub fn open(raw: &str) {
     let Some(url) = http_url(raw) else {
         return;
     };
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(url).spawn();
-    }
+    let _ = std::process::Command::new("open").arg(url).spawn();
 }
 
 #[cfg(test)]

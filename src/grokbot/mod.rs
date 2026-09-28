@@ -25,8 +25,6 @@ pub mod vendor;
 use std::path::{Path, PathBuf};
 
 use crate::config::GrokbotConfig;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-use crate::error::AppError;
 use crate::error::Result;
 
 /// The app's XDG config subdirectory name — note the space.
@@ -38,15 +36,9 @@ pub const SECRETS_FILE_NAME: &str = "sand-secrets.json";
 /// so no test resolves a real `$HOME`.
 pub fn secrets_path_in(cfg: &GrokbotConfig, home: &Path) -> PathBuf {
     cfg.secrets_path.clone().unwrap_or_else(|| {
-        if cfg!(target_os = "macos") {
-            home.join("Library/Application Support")
-                .join(APP_CONFIG_DIR)
-                .join(SECRETS_FILE_NAME)
-        } else {
-            home.join(".config")
-                .join(APP_CONFIG_DIR)
-                .join(SECRETS_FILE_NAME)
-        }
+        home.join("Library/Application Support")
+            .join(APP_CONFIG_DIR)
+            .join(SECRETS_FILE_NAME)
     })
 }
 
@@ -60,20 +52,9 @@ pub fn secrets_path(cfg: &GrokbotConfig) -> Result<PathBuf> {
 /// Linux and macOS: decrypt `sand-secrets.json` with the platform OSCrypt
 /// key. Elsewhere this fails closed with a `Credentials` error that says so,
 /// rather than pretending the file was missing.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn resolve_credentials(cfg: &GrokbotConfig) -> Result<creds::GrokbotCredentials> {
     let path = secrets_path(cfg)?;
     creds::read_at(&path, &creds::oscrypt_key()?)
-}
-
-/// Windows (and anywhere else) has no supported credential store to read.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn resolve_credentials(_cfg: &GrokbotConfig) -> Result<creds::GrokbotCredentials> {
-    Err(AppError::Credentials(
-        "Grok Bot usage is supported on Linux and macOS — the desktop app's credential \
-         store is not read on this platform"
-            .into(),
-    ))
 }
 
 #[cfg(test)]
@@ -81,18 +62,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(not(target_os = "macos"))]
-    fn the_default_path_lives_under_the_apps_xdg_config_dir() {
-        let cfg = GrokbotConfig::default();
-        let path = secrets_path_in(&cfg, Path::new("/home/u"));
-        assert_eq!(
-            path,
-            PathBuf::from("/home/u/.config/Grok Bot/sand-secrets.json")
-        );
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
     fn the_default_path_lives_under_application_support() {
         let cfg = GrokbotConfig::default();
         let path = secrets_path_in(&cfg, Path::new("/Users/u"));
@@ -111,17 +80,6 @@ mod tests {
         assert_eq!(
             secrets_path_in(&cfg, Path::new("/home/u")),
             PathBuf::from("/elsewhere/secrets.json")
-        );
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    #[test]
-    fn unsupported_platforms_fail_closed_with_a_credentials_error() {
-        let err = resolve_credentials(&GrokbotConfig::default()).unwrap_err();
-        assert!(matches!(err, AppError::Credentials(_)), "{err:?}");
-        assert!(
-            err.to_string().contains("not read on this platform"),
-            "{err}"
         );
     }
 }

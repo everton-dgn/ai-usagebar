@@ -104,23 +104,23 @@ pub async fn fetch_plan_display_with(auth_path: &Path, base_url: &str) -> Result
 /// or oversized file cannot stall or exhaust the fetch.
 pub(crate) fn read_billing_key(auth_path: &Path) -> Result<String> {
     let metadata = std::fs::metadata(auth_path).map_err(|_| {
-        AppError::Credentials("Grok Build login file not found; run `grok login`".into())
+        AppError::Credentials("Grok Build login file not found; a new Grok Build sign-in is needed, which this app cannot do".into())
     })?;
     if !metadata.is_file() || metadata.len() > MAX_AUTH_FILE_BYTES {
         return Err(AppError::Credentials(
-            "Grok Build login file is not a readable auth.json; run `grok login`".into(),
+            "Grok Build login file is not a readable auth.json; a new Grok Build sign-in is needed, which this app cannot do".into(),
         ));
     }
     let bytes = std::fs::read(auth_path).map_err(|_| {
-        AppError::Credentials("Grok Build login file could not be read; run `grok login`".into())
+        AppError::Credentials("Grok Build login file could not be read; a new Grok Build sign-in is needed, which this app cannot do".into())
     })?;
     let parsed: Value = serde_json::from_slice(&bytes).map_err(|_| {
-        AppError::Credentials("Grok Build login file is not valid JSON; run `grok login`".into())
+        AppError::Credentials("Grok Build login file is not valid JSON; a new Grok Build sign-in is needed, which this app cannot do".into())
     })?;
 
     let Some(entries) = parsed.as_object() else {
         return Err(AppError::Credentials(
-            "Grok Build login file has an unexpected shape; run `grok login`".into(),
+            "Grok Build login file has an unexpected shape; a new Grok Build sign-in is needed, which this app cannot do".into(),
         ));
     };
     for entry in entries.values() {
@@ -132,7 +132,7 @@ pub(crate) fn read_billing_key(auth_path: &Path) -> Result<String> {
         }
     }
     Err(AppError::Credentials(
-        "Grok Build login file has no billing key; run `grok login`".into(),
+        "Grok Build login file has no billing key; a new Grok Build sign-in is needed, which this app cannot do".into(),
     ))
 }
 
@@ -197,7 +197,7 @@ mod tests {
             let file = auth_file(contents);
             let error = read_billing_key(file.path()).unwrap_err();
             assert!(matches!(error, AppError::Credentials(_)));
-            assert!(error.to_string().contains("grok login"));
+            assert!(error.to_string().contains("Grok Build sign-in"));
         }
     }
 

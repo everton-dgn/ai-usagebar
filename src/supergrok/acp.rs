@@ -45,8 +45,6 @@ async fn fetch_billing_inner(grok_binary: &Path) -> Result<BillingResponse> {
     }
     // The tray is a GUI process: a console child would open its own window,
     // take the foreground and close the popover on every refresh.
-    #[cfg(windows)]
-    command.creation_flags(crate::process::CREATE_NO_WINDOW);
 
     let mut child = command.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -183,7 +181,7 @@ fn map_rpc_error(error: &Value, stage: RpcStage) -> AppError {
                 .into(),
         ),
         (RpcStage::Billing, _) => AppError::Credentials(
-            "Grok Build could not return billing data; run `grok login` and verify the selected account"
+            "Grok Build could not return billing data; check the account saved by Grok Build"
                 .into(),
         ),
     }
@@ -293,7 +291,7 @@ mod tests {
         let rendered = map_rpc_error(&error, RpcStage::Billing).to_string();
         assert!(!rendered.contains("secret"));
         assert!(!rendered.contains("person@example.test"));
-        assert!(rendered.contains("grok login"));
+        assert!(rendered.contains("Grok Build"));
     }
 
     #[tokio::test]

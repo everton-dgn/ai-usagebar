@@ -35,13 +35,6 @@ pub fn hosts_path_with(
     if let Some(dir) = environment("XDG_CONFIG_HOME") {
         return Ok(std::path::PathBuf::from(dir).join("gh").join("hosts.yml"));
     }
-    if cfg!(windows)
-        && let Some(dir) = environment("AppData")
-    {
-        return Ok(std::path::PathBuf::from(dir)
-            .join("GitHub CLI")
-            .join("hosts.yml"));
-    }
     Ok(home.join(".config").join("gh").join("hosts.yml"))
 }
 
@@ -98,11 +91,6 @@ impl GhAuthTokenRunner for SystemGhAuthTokenRunner {
         }
         // Same reason as the SuperGrok ACP child: no console window from the
         // tray, or the popover loses focus and closes.
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            process.creation_flags(crate::process::CREATE_NO_WINDOW);
-        }
         let output = process.output()?;
         Ok(GhAuthTokenOutput {
             success: output.status.success(),
@@ -119,26 +107,24 @@ pub fn resolve_with(
     let output = match runner.run(&command) {
         Ok(output) => output,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(login_error(
-                "GitHub CLI (`gh`) is not installed. Install it, then run",
-            ));
+            return Err(login_error("GitHub CLI is not installed."));
         }
-        Err(_) => return Err(login_error("GitHub CLI could not be started. Run")),
+        Err(_) => return Err(login_error("GitHub CLI could not be started.")),
     };
     if !output.success {
-        return Err(login_error("GitHub CLI is not logged in. Run"));
+        return Err(login_error("GitHub CLI is not signed in."));
     }
     let token = String::from_utf8(output.stdout)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| login_error("GitHub CLI returned no OAuth token. Run"))?;
+        .ok_or_else(|| login_error("GitHub CLI returned no OAuth token."))?;
     Ok(token)
 }
 
 fn login_error(prefix: &str) -> AppError {
     AppError::Credentials(format!(
-        "GitHub Copilot: {prefix} `gh auth login --web`, then select GitHub Copilot as the primary provider in Settings."
+        "GitHub Copilot: {prefix} A GitHub CLI sign-in with Copilot access is needed, which this app cannot do."
     ))
 }
 
@@ -227,18 +213,11 @@ mod tests {
             PathBuf::from("/cfg/gh/hosts.yml")
         );
 
-        // `AppData` is Windows-only and ranks below XDG, so it must not
-        // capture a Linux or macOS machine that happens to have it set.
+        // `AppData` is a Windows location, so it must not capture a Mac that
+        // happens to have it set.
         let appdata =
             hosts_path_with(only("AppData", "C:/Users/u/AppData/Roaming"), home.clone()).unwrap();
-        if cfg!(windows) {
-            assert_eq!(
-                appdata,
-                PathBuf::from("C:/Users/u/AppData/Roaming/GitHub CLI/hosts.yml")
-            );
-        } else {
-            assert_eq!(appdata, home.join(".config").join("gh").join("hosts.yml"));
-        }
+        assert_eq!(appdata, home.join(".config").join("gh").join("hosts.yml"));
     }
 
     #[test]
@@ -275,7 +254,7 @@ mod tests {
         };
 
         let error = resolve_with(&runner, None).unwrap_err().to_string();
-        assert!(error.contains("gh auth login --web"));
+        assert!(error.contains("cannot do"));
         assert!(!error.contains("private-token-or-error"));
     }
 }

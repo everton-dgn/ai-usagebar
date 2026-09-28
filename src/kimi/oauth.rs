@@ -37,7 +37,7 @@ pub const HOME_DIR_NAME: &str = ".kimi-code";
 /// kimi-code's own storage name for this provider; it names both the
 /// credential file and the lock target.
 const PROVIDER_NAME: &str = "kimi-code";
-const RE_LOGIN_HINT: &str = "run `kimi` and log in again";
+const RE_LOGIN_HINT: &str = "a new Kimi Code sign-in is needed, which this app cannot do";
 
 /// The two Kimi Code deployments. The OAuth client id is shared; the hosts are
 /// not, and a token minted by one is meaningless to the other.
@@ -166,7 +166,6 @@ pub fn write_to(path: &Path, creds: &Credentials) -> Result<()> {
     let mut bytes = serde_json::to_vec_pretty(creds)?;
     bytes.push(b'\n');
     crate::cache::atomic_write(path, &bytes)?;
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
@@ -358,7 +357,7 @@ mod tests {
         let missing = td.path().join("nope.json");
         assert!(!is_logged_in(&missing));
         let err = read_from(&missing).unwrap_err().to_string();
-        assert!(err.contains("kimi"), "{err}");
+        assert!(err.contains("Kimi Code sign-in"), "{err}");
 
         let path = sample_file(&td, "{ not json");
         let err = read_from(&path).unwrap_err().to_string();
@@ -383,7 +382,6 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(reread["access_token"], "at2");
         assert_eq!(reread["future_field"]["kept"], true);
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();

@@ -65,11 +65,9 @@ pub fn resolve_auth_in(
     // the CLI" is useless advice if the user logged in somewhere this build
     // never looked. Sanitized because the path can carry a configured value.
     Err(AppError::Credentials(format!(
-        "Kimi: no credentials. Either log in with the Kimi Code CLI (`kimi`) — its login is \
-         read from {} — or set an API key in {} or `api_key` under [kimi] in {}.",
-        crate::display::sanitize_untrusted_path(&kimi_code.credentials_path),
-        cfg.api_key_env,
-        crate::config::config_path_hint()
+        "Kimi: no saved Kimi Code sign-in at {} and no API key. Signing in is not \
+         available in this app.",
+        crate::display::sanitize_untrusted_path(&kimi_code.credentials_path)
     )))
 }
 
@@ -124,10 +122,10 @@ mod tests {
         let err = resolve_auth_in(&KimiConfig::default(), td.path(), None).unwrap_err();
         let message = err.to_string();
         assert!(matches!(err, AppError::Credentials(_)), "{err:?}");
-        assert!(message.contains("Kimi Code CLI"), "{message}");
-        assert!(message.contains("KIMI_API_KEY"), "{message}");
-        // The file that was actually consulted, so "log in with the CLI" can be
-        // acted on when the home is not the default one.
+        assert!(message.contains("Kimi Code sign-in"), "{message}");
+        assert!(message.contains("API key"), "{message}");
+        // The file that was actually consulted, so the missing sign-in can be
+        // traced when the home is not the default one.
         assert!(message.contains("kimi-code.json"), "{message}");
     }
 

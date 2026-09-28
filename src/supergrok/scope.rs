@@ -250,7 +250,6 @@ mod tests {
         assert!(fingerprint_without_env(&paths).is_none());
     }
 
-    #[cfg(unix)]
     #[test]
     fn symlinked_scope_files_fail_closed() {
         use std::os::unix::fs::symlink;

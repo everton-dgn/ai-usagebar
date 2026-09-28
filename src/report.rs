@@ -1,32 +1,26 @@
-//! `ai-usagebar usage` — quota and time-to-reset for everything in the config,
-//! in one pass.
+//! The usage report the menu bar app renders: quota and time-to-reset for
+//! everything in the config, in one pass.
 //!
-//! The widget answers "how is *this* vendor doing" one process at a time, which
-//! is what a status bar needs and what a person checking on four Claude
-//! accounts does not. This walks the same tab set the TUI builds — every
-//! enabled vendor, plus one entry per named Claude account — and prints what
-//! each one has left.
-//!
-//! Deliberately thin: [`crate::tui::app::tabs_from_config`] already decides
-//! what is configured, [`crate::tui::app::refresh_one`] already fetches and
-//! parses it, and [`crate::tui::panels::sections_for`] already projects any
-//! vendor's snapshot into labelled sections carrying every reported value.
-//! So this file only enumerates, projects, and formats — no vendor
-//! ever needs to know it exists.
+//! This walks every enabled vendor, plus one entry per named account, and
+//! projects what each one has left into the JSON document the popover reads.
+//! Entry enumeration, refresh and section projection live in the shared core,
+//! so this file only enumerates, projects, and serializes; no vendor ever
+//! needs to know it exists.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::json;
 
 use crate::config::Config;
-use crate::tui::app::{TabId, TabSource, TabState, refresh_one, tabs_with_desktop};
-use crate::tui::panels::{Section, sections_with_metadata_for};
+use crate::core::entries::{TabId, TabSource, TabState, tabs_with_desktop};
+use crate::core::refresh::refresh_one;
+use crate::core::sections::{Section, sections_with_metadata_for};
 
-/// Matches the widget's `--pace-tolerance` default; only affects the pacing
-/// note appended to a metric's detail line.
+/// Pacing tolerance in percentage points; only affects the pacing note
+/// appended to a metric's detail line.
 const PACE_TOLERANCE: u32 = 5;
 
-/// Version of the tolerant, machine-readable `usage --json` contract.
+/// Version of the tolerant, machine-readable report contract.
 /// Increment only when an incompatible change cannot be represented by adding
 /// or omitting fields.
 const USAGE_SCHEMA_VERSION: u8 = 1;
@@ -34,6 +28,7 @@ const USAGE_SCHEMA_VERSION: u8 = 1;
 /// One configured vendor or account.
 struct Entry {
     id: String,
+    email: Option<crate::identity::AccountEmail>,
     name: String,
     display_name: String,
     /// The vendor's `{vendor_short}` code. Frontends that want a Waybar-style
@@ -56,7 +51,7 @@ struct Entry {
     reset_credits: Option<crate::usage::ResetCredits>,
 }
 
-/// Lossless machine-readable projection of a TUI panel row. `metrics` remains
+/// Lossless machine-readable projection of a panel row. `metrics` remains
 /// available in JSON as a convenience view over only the gauge rows; callers
 /// that need every reported value should consume this ordered list.
 #[derive(Debug, Serialize)]
@@ -100,22 +95,8 @@ enum ReportSection {
     Spacer,
 }
 
-impl ReportSection {
-    fn label(&self) -> Option<&str> {
-        match self {
-            Self::Metric { label, .. } | Self::Text { label, .. } | Self::Block { label, .. } => {
-                Some(label)
-            }
-            Self::Spacer => None,
-        }
-    }
-}
-
-/// Snapshot every configured vendor as the JSON `usage --json` prints.
-///
-/// A frontend hosted in the same process calls this instead of spawning a
-/// console subprocess. Errors are the same user-facing strings `usage` would
-/// print.
+/// Snapshot every configured vendor as the report JSON. Errors are
+/// user-facing strings.
 pub async fn collect_json() -> std::result::Result<String, String> {
     let (entries, primary) = collect_entries().await?;
     Ok(render_json_for_primary(&entries, primary))
@@ -129,7 +110,7 @@ pub async fn collect_json() -> std::result::Result<String, String> {
 /// which entry it asked for.
 pub async fn collect_entry_json(entry_id: &str) -> std::result::Result<String, String> {
     let config = Config::load().map_err(|error| error.user_message())?;
-    let client = crate::widget::run::http_client().map_err(|error| error.user_message())?;
+    let client = crate::core::http::http_client().map_err(|error| error.user_message())?;
     let tabs = tabs_matching(&tabs_with_desktop(&config), entry_id);
     if tabs.is_empty() {
         return Err(format!("no enabled provider matches {entry_id}"));
@@ -150,7 +131,7 @@ fn tabs_matching(tabs: &[TabId], entry_id: &str) -> Vec<TabId> {
 
 async fn collect_entries() -> std::result::Result<(Vec<Entry>, Option<&'static str>), String> {
     let config = Config::load().map_err(|error| error.user_message())?;
-    let client = crate::widget::run::http_client().map_err(|error| error.user_message())?;
+    let client = crate::core::http::http_client().map_err(|error| error.user_message())?;
     let tabs = tabs_with_desktop(&config);
     if tabs.is_empty() {
         return Err(format!(
@@ -177,23 +158,6 @@ async fn collect_entries_for(
     entries
 }
 
-pub async fn run(json: bool) -> i32 {
-    let (entries, primary) = match collect_entries().await {
-        Ok(pair) => pair,
-        Err(message) => {
-            eprintln!("ai-usagebar usage: {message}");
-            return 1;
-        }
-    };
-
-    if json {
-        println!("{}", render_json_for_primary(&entries, primary));
-    } else {
-        print!("{}", render_text(&entries));
-    }
-    report_exit_code(&entries)
-}
-
 async fn entry_for(client: &reqwest::Client, config: &Config, tab: &TabId) -> Entry {
     let state = refresh_one(client, config, tab).await;
     entry_from_state_with_config(config, tab, &state, Utc::now())
@@ -217,6 +181,10 @@ fn entry_from_state_with_config(
 fn entry_from_state(tab: &TabId, state: &TabState, now: chrono::DateTime<Utc>) -> Entry {
     let mut entry = Entry {
         id: tab_id(tab),
+        email: match state {
+            TabState::Ready(ready) => ready.email.clone(),
+            _ => None,
+        },
         name: tab_name(tab),
         display_name: tab_display_name(tab),
         // #164's naming (a custom tab has no VendorId) with #162's plan
@@ -246,7 +214,7 @@ fn entry_from_state(tab: &TabId, state: &TabState, now: chrono::DateTime<Utc>) -
         reset_credits: reset_credits_for(state),
     };
     // The error is already a first-class entry field. Do not duplicate the
-    // TUI's interactive retry instructions as report data.
+    // projection's retry rows as report data.
     if entry.error.is_some() {
         return entry;
     }
@@ -297,15 +265,6 @@ fn reset_credits_for(state: &TabState) -> Option<crate::usage::ResetCredits> {
         _ => return None,
     };
     (!credits.is_empty()).then(|| credits.clone())
-}
-
-/// Process status after a complete document has been printed.
-///
-/// Per-entry fetch/auth failures are data inside the document, not a command
-/// failure. Empty is not a document — [`collect_entries`] already fails before
-/// this when nothing is enabled.
-fn report_exit_code(entries: &[Entry]) -> i32 {
-    i32::from(entries.is_empty())
 }
 
 /// Stable machine id shared by aggregate views and the macOS menu bar:
@@ -481,96 +440,22 @@ fn json_rows(entries: &[Entry]) -> Vec<serde_json::Value> {
             if let Some(brand) = &entry.brand {
                 row["brand"] = json!(brand);
             }
+            if let Some(email) = &entry.email {
+                row["email"] = json!(email.as_str());
+            }
             row
         })
         .collect()
 }
 
-fn render_text(entries: &[Entry]) -> String {
-    // Widest label across every entry, so the value column lines up down the
-    // whole report rather than per-section.
-    let width = entries
-        .iter()
-        .flat_map(|entry| entry.sections.iter())
-        .filter_map(ReportSection::label)
-        .map(crate::display::text_width)
-        .max()
-        .unwrap_or(0);
-
-    let mut out = String::new();
-    for entry in entries {
-        out.push_str(&entry.name);
-        if let Some(plan) = &entry.plan {
-            out.push_str(&format!("   {plan}"));
-        }
-        out.push('\n');
-        if let Some(error) = &entry.error {
-            out.push_str(&format!("  ! {error}\n\n"));
-            continue;
-        }
-        if !entry
-            .sections
-            .iter()
-            .any(|section| !matches!(section, ReportSection::Spacer))
-        {
-            out.push_str("  (nothing reported)\n\n");
-            continue;
-        }
-        let mut body = String::new();
-        let mut pending_spacer = false;
-        for section in &entry.sections {
-            if matches!(section, ReportSection::Spacer) {
-                pending_spacer |= !body.is_empty();
-                continue;
-            }
-            if pending_spacer {
-                body.push('\n');
-                pending_spacer = false;
-            }
-            match section {
-                ReportSection::Metric {
-                    label,
-                    value,
-                    detail,
-                    ..
-                } => {
-                    let label = crate::display::pad_end(label, width);
-                    let value = format!("{value:>9}");
-                    if detail.is_empty() {
-                        body.push_str(&format!("  {label}  {value}\n"));
-                    } else {
-                        body.push_str(&format!("  {label}  {value}   {detail}\n"));
-                    }
-                }
-                ReportSection::Text { label, value } => {
-                    if label.is_empty() {
-                        body.push_str(&format!("  {}\n", value.trim_start()));
-                    } else if value.is_empty() {
-                        body.push_str(&format!("  {label}\n"));
-                    } else {
-                        let label = crate::display::pad_end(label, width);
-                        body.push_str(&format!("  {label}  {value}\n"));
-                    }
-                }
-                ReportSection::Block { label, body: lines } => {
-                    body.push_str(&format!("  {label}\n"));
-                    for line in lines {
-                        body.push_str(&format!("    {line}\n"));
-                    }
-                }
-                ReportSection::Spacer => unreachable!(),
-            }
-        }
-        out.push_str(&body);
-        out.push('\n');
-    }
-    out
-}
+#[cfg(test)]
+#[path = "report_characterization_tests.rs"]
+mod characterization_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::app::ReadyTab;
+    use crate::core::entries::ReadyTab;
     use crate::usage::{
         DeepseekSnapshot, KimiSnapshot, KiroSnapshot, OpenAiSnapshot, OpenAiSource,
         OpenRouterSnapshot, ResetCredit, ResetCredits, SuperGrokPeriod, SuperGrokSnapshot,
@@ -580,6 +465,7 @@ mod tests {
 
     fn entry(name: &str, sections: Vec<ReportSection>) -> Entry {
         Entry {
+            email: None,
             id: name.into(),
             name: name.into(),
             display_name: name.into(),
@@ -653,80 +539,6 @@ mod tests {
         assert_eq!(value["entries"][0]["short_name"], "cur");
         assert_eq!(value["entries"][0]["icon"], VendorId::Cursor.bar_icon());
         assert_eq!(value["entries"][0]["brand"], VendorId::Cursor.slug());
-    }
-
-    #[test]
-    fn every_metric_reports_its_quota_and_its_reset() {
-        let text = render_text(&[entry(
-            "anthropic · gmail",
-            vec![
-                metric("Session (5h)", 29, "29%", "Resets in 0h 50m"),
-                metric("Weekly (7d)", 32, "32%", "Resets in 4d 2h"),
-            ],
-        )]);
-
-        assert!(
-            text.contains("anthropic · gmail   Claude Max 20x"),
-            "{text}"
-        );
-        assert!(text.contains("29%   Resets in 0h 50m"), "{text}");
-        assert!(text.contains("32%   Resets in 4d 2h"), "{text}");
-    }
-
-    /// Labels are padded to one width across the whole report, so the columns
-    /// still line up when a later entry has a longer label than the first.
-    #[test]
-    fn value_columns_align_across_entries() {
-        let text = render_text(&[
-            entry("a", vec![metric("S", 1, "1%", "")]),
-            entry("b", vec![metric("A very long label", 2, "2%", "")]),
-        ]);
-        let columns: Vec<usize> = text
-            .lines()
-            .filter(|line| line.starts_with("  ") && line.contains('%'))
-            .map(|line| line.find('%').unwrap())
-            .collect();
-        assert_eq!(columns.len(), 2);
-        assert_eq!(columns[0], columns[1], "{text}");
-    }
-
-    /// The same alignment, but with a label whose glyphs are two columns wide.
-    /// `format!("{label:width$}")` pads by character count, so a CJK label used
-    /// to leave the value column short by one space per ideograph. Note the
-    /// column is measured in display width, not byte or char offset — `find`
-    /// returns a byte index, which is itself three per ideograph here.
-    #[test]
-    fn value_columns_align_when_a_label_is_double_width() {
-        let text = render_text(&[
-            entry("a", vec![metric("セッション", 1, "1%", "")]),
-            entry("b", vec![metric("Weekly", 2, "2%", "")]),
-        ]);
-        let columns: Vec<usize> = text
-            .lines()
-            .filter(|line| line.starts_with("  ") && line.contains('%'))
-            .map(|line| {
-                let byte = line.find('%').unwrap();
-                crate::display::text_width(&line[..byte])
-            })
-            .collect();
-        assert_eq!(columns.len(), 2);
-        assert_eq!(columns[0], columns[1], "{text}");
-    }
-
-    /// One dead vendor must not hide the others — it reports inline and the
-    /// rest still print.
-    #[test]
-    fn a_failing_entry_is_reported_without_dropping_the_rest() {
-        let mut broken = entry("openai", Vec::new());
-        broken.error = Some("credentials error: not signed in".into());
-        let text = render_text(&[broken, entry("cursor", vec![metric("Auto", 5, "5%", "")])]);
-
-        assert!(
-            text.contains("! credentials error: not signed in"),
-            "{text}"
-        );
-        assert!(text.contains("cursor"), "{text}");
-        assert!(text.contains("5%"), "{text}");
     }
 
     #[test]
@@ -868,6 +680,7 @@ mod tests {
         let fetched_at = Utc::now() - chrono::Duration::minutes(3);
         let reset_at = Utc::now() + chrono::Duration::days(1);
         let state = TabState::Ready(Box::new(ReadyTab {
+            email: None,
             snapshot: VendorSnapshot::Kiro(KiroSnapshot {
                 plan: "KIRO POWER".into(),
                 used: 4_000.0,
@@ -906,6 +719,7 @@ mod tests {
         use crate::usage::{ResetCredits, SuperGrokPeriod, SuperGrokProduct, SuperGrokSnapshot};
 
         let state = TabState::Ready(Box::new(ReadyTab {
+            email: None,
             snapshot: VendorSnapshot::SuperGrok(SuperGrokSnapshot {
                 plan: "SuperGrok Heavy".into(),
                 account: "scope".into(),
@@ -941,6 +755,7 @@ mod tests {
     fn json_exposes_banked_reset_expiries_without_removing_the_text_block() {
         let expiry: DateTime<Utc> = "2026-09-20T23:58:00Z".parse().unwrap();
         let state = TabState::Ready(Box::new(ReadyTab {
+            email: None,
             snapshot: VendorSnapshot::Openai(OpenAiSnapshot {
                 plan: "ChatGPT Pro".into(),
                 session: None,
@@ -985,6 +800,7 @@ mod tests {
     fn json_exposes_supergrok_reset_credit_expiries() {
         let expiry: DateTime<Utc> = "2026-10-03T23:00:00Z".parse().unwrap();
         let state = TabState::Ready(Box::new(ReadyTab {
+            email: None,
             snapshot: VendorSnapshot::SuperGrok(SuperGrokSnapshot {
                 plan: "SuperGrok".into(),
                 account: "test-account".into(),
@@ -1027,6 +843,7 @@ mod tests {
 
         let now = Utc::now();
         let state = TabState::Ready(Box::new(ReadyTab {
+            email: None,
             snapshot: VendorSnapshot::Anthropic(AnthropicSnapshot {
                 plan: "Claude Max 20x".into(),
                 session: UsageWindow {
@@ -1100,7 +917,7 @@ mod tests {
     /// than a fallback to the whole report.
     #[test]
     fn tabs_matching_selects_exactly_the_entry_with_that_id() {
-        use crate::tui::app::tabs_from_config;
+        use crate::core::entries::tabs_from_config;
 
         // Flip the flags both ways rather than trusting any vendor's default,
         // so the match below is this test's doing and the miss is a real one.
@@ -1151,6 +968,7 @@ mod tests {
         let weekly_reset = Utc::now() + chrono::Duration::days(3);
         let window_reset = Utc::now() + chrono::Duration::hours(2);
         let state = TabState::Ready(Box::new(ReadyTab {
+            email: None,
             snapshot: VendorSnapshot::Kimi(KimiSnapshot {
                 plan: Some("Kimi Code".into()),
                 weekly_limit: 1_000,
@@ -1230,6 +1048,7 @@ mod tests {
     #[test]
     fn real_panel_projection_keeps_openrouter_blocks() {
         let state = TabState::Ready(Box::new(ReadyTab {
+            email: None,
             snapshot: VendorSnapshot::Openrouter(OpenRouterSnapshot {
                 label: "OR".into(),
                 total_credits: 100.0,
@@ -1255,17 +1074,12 @@ mod tests {
             section,
             ReportSection::Block { label, .. } if label == "Tier"
         )));
-        let text = render_text(&[projected]);
-        assert!(text.contains("Usage by period"), "{text}");
-        assert!(
-            text.contains("today $1.00 · week $5.00 · month $25.00"),
-            "{text}"
-        );
     }
 
     #[test]
     fn real_balance_text_is_not_exposed_as_a_percentage_metric() {
         let state = TabState::Ready(Box::new(ReadyTab {
+            email: None,
             snapshot: VendorSnapshot::Deepseek(DeepseekSnapshot {
                 is_available: true,
                 balance: 12.5,
@@ -1298,6 +1112,7 @@ mod tests {
     fn json_metrics_name_their_headline() {
         let deepseek = |display: crate::balance::DisplayPrefs| {
             let state = TabState::Ready(Box::new(ReadyTab {
+                email: None,
                 snapshot: VendorSnapshot::Deepseek(DeepseekSnapshot {
                     is_available: true,
                     balance: 50.0,
@@ -1349,6 +1164,7 @@ mod tests {
         let anthropic_api = entry_from_state(
             &TabId::vendor(VendorId::Openrouter),
             &TabState::Ready(Box::new(ReadyTab {
+                email: None,
                 snapshot: VendorSnapshot::Openrouter(crate::usage::OpenRouterSnapshot {
                     label: "OpenRouter".into(),
                     total_credits: 100.0,
@@ -1400,22 +1216,6 @@ mod tests {
         assert_eq!(value["entries"][0]["sections"].as_array().unwrap().len(), 0);
     }
 
-    #[test]
-    fn produced_document_exits_zero_even_when_every_entry_failed() {
-        let mut failed = entry("openai", Vec::new());
-        failed.error = Some("not signed in".into());
-        assert_eq!(report_exit_code(&[failed]), 0);
-
-        let mut failed = entry("openai", Vec::new());
-        failed.error = Some("not signed in".into());
-        assert_eq!(report_exit_code(&[failed, entry("cursor", Vec::new())]), 0);
-
-        assert_eq!(report_exit_code(&[entry("cursor", Vec::new())]), 0);
-        // Empty is not a produced document — collect_entries already fails
-        // before this helper when nothing is enabled.
-        assert_ne!(report_exit_code(&[]), 0);
-    }
-
     fn custom_spec(id: &str, enabled: bool) -> crate::config::CustomProviderConfig {
         crate::config::CustomProviderConfig {
             id: id.into(),
@@ -1454,7 +1254,7 @@ mod tests {
     /// addressed as `custom:<id>`; a disabled one is absent.
     #[test]
     fn enabled_custom_providers_are_listed_after_builtins_by_custom_id() {
-        use crate::tui::app::tabs_from_config;
+        use crate::core::entries::tabs_from_config;
 
         let mut config = Config {
             custom: vec![custom_spec("mytool", true)],
@@ -1491,6 +1291,7 @@ mod tests {
 
         let session_reset = now + chrono::Duration::hours(2);
         let state = TabState::Ready(Box::new(ReadyTab {
+            email: None,
             snapshot: VendorSnapshot::Custom(CustomSnapshot {
                 plan: Some("Team".into()),
                 metrics: vec![

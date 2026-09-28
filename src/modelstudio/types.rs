@@ -211,7 +211,7 @@ pub fn parse_response(bytes: &[u8]) -> Result<UsageFields> {
 /// own fix, naming its own command.
 pub fn reauth_error() -> AppError {
     AppError::Credentials(
-        "Model Studio: console session expired; run `bl auth login --console` to re-auth".into(),
+        "Model Studio: console session expired; a new Model Studio console sign-in is needed, which this app cannot do".into(),
     )
 }
 
@@ -610,10 +610,7 @@ mod tests {
             let body = format!(r#"{{"success":false,"errorCode":"{code}"}}"#);
             let err = parse_response(body.as_bytes()).unwrap_err();
             assert!(matches!(err, AppError::Credentials(_)), "{code}: {err:?}");
-            assert!(
-                err.to_string().contains("bl auth login --console"),
-                "{code}: {err}"
-            );
+            assert!(err.to_string().contains("console sign-in"), "{code}: {err}");
         }
     }
 

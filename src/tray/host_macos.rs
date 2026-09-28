@@ -34,12 +34,14 @@ use tao::platform::macos::{
 };
 use tao::window::{Window, WindowBuilder};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use wry::http::{Request, Response, StatusCode, header::CONTENT_TYPE};
-use wry::{WebView, WebViewBuilder, WebViewBuilderExtDarwin};
+use wry::http::{Request, Response};
+use wry::{NewWindowResponse, WebView, WebViewBuilder, WebViewBuilderExtDarwin};
 
+use super::assets;
 use super::browse;
 use super::hotkey::{self, HotkeyBinding};
 use super::icon::{Severity, tray_icon_rgba};
+use super::ipc::{self, Command, ItemSetting, Measurement};
 use super::menu_bar::{self, UsageWindow};
 use super::menu_space;
 use super::panel::{
@@ -48,38 +50,37 @@ use super::panel::{
     close_on_outside_click, cocoa_popover_frame, fit_popover_height, fit_provider_popover_height,
     menu_bar_bottom_y,
 };
-use super::payload::{
-    AccountSwitchFact, HostFacts, UpdateFact, fact_after_check, host_payload, wrap_report,
-};
+use super::payload::{AccountSwitchFact, HostFacts, host_payload, wrap_report};
+use super::startup;
 use super::status_items::{self, ItemAction, MenuLine, ProviderItems};
 use super::strip::{
     BARS_PIXEL_SIDE, BARS_POINT_SIDE, Stars, StripStyle, bar_fill, bars_layout, bars_rgba,
-    content_from_payload, parse_strip_ipc, parse_strip_names, parse_strip_thresholds,
+    content_from_payload,
 };
-use super::update_flow;
-use super::{startup, tui_launch};
 use crate::config::{Config, MenuBarItemConfig};
-
-const INDEX_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/popover/index.html"));
-const POPOVER_CSS: &str = include_str!(concat!(env!("OUT_DIR"), "/popover/popover.css"));
-const POPOVER_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/popover/popover.js"));
 
 enum UserEvent {
     Tray(TrayIconEvent),
-    Ipc(String),
+    Chart(status_items::ChartAction),
+    /// The menu bar began (`true`) or ended the chart item's expanded
+    /// session: its left click on macOS 27.
+    ChartSession(bool),
+    /// A popover message that already passed `ipc::accept`.
+    Ipc(Command),
     Report(Value),
     Entry(Value),
     FocusPopover,
     Hotkey,
     Facts,
+    AccessibilityChanged,
     /// Final native geometry, captured before AppKit exits its resize loop.
     UserResized {
         frame: CocoaRect,
         previous_height: f64,
     },
     /// A mouse press in another app, the menu bar or the desktop, at this
-    /// Cocoa screen point.
-    OutsideClick(f64, f64),
+    /// Cocoa screen point and `NSEvent` timestamp.
+    OutsideClick(f64, f64, f64),
     /// A click on a provider's own menu-bar item, or a pick in its menu.
     ProviderItem(ItemAction),
 }
@@ -88,7 +89,6 @@ enum WorkerCmd {
     Refresh,
     RefreshEntry(String),
     Detect,
-    CheckUpdate,
     Shutdown,
 }
 
@@ -110,12 +110,11 @@ enum Theme {
     Dark,
 }
 
-impl Theme {
-    fn parse(name: &str) -> Option<Self> {
-        match name {
-            "light" => Some(Self::Light),
-            "dark" => Some(Self::Dark),
-            _ => None,
+impl From<ipc::Theme> for Theme {
+    fn from(theme: ipc::Theme) -> Self {
+        match theme {
+            ipc::Theme::Light => Self::Light,
+            ipc::Theme::Dark => Self::Dark,
         }
     }
 }
@@ -172,6 +171,8 @@ struct TrayState {
     color_thresholds: (f64, f64),
     /// The providers' own menu-bar items, left of the chart glyph.
     provider_items: ProviderItems,
+    /// The chart item's menu-bar session, where the OS has the API.
+    chart_session: Option<status_items::ExpandedSession>,
     /// The provider whose item opened the popover, if one did.
     focused_provider: Option<String>,
     /// The popover's language, for the native provider menus.
@@ -256,6 +257,12 @@ fn run_loop() -> Result<(), String> {
     install_glass_background(&window);
 
     let resize_observer = install_resize_observer(&window, proxy.clone());
+    let chart_session = tray.ns_status_item().and_then(|item| {
+        let proxy = proxy.clone();
+        status_items::ExpandedSession::attach(&item, move |began| {
+            let _ = proxy.send_event(UserEvent::ChartSession(began));
+        })
+    });
     let mut state = TrayState {
         _resize_observer: resize_observer,
         window,
@@ -303,6 +310,7 @@ fn run_loop() -> Result<(), String> {
                 let _ = proxy.send_event(UserEvent::ProviderItem(action));
             })
         },
+        chart_session,
         focused_provider: None,
         compact_popover: false,
         language: "en".into(),
@@ -319,19 +327,41 @@ fn run_loop() -> Result<(), String> {
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(UserEvent::Tray(tray_event)) => handle_tray(&mut state, tray_event),
-            Event::UserEvent(UserEvent::ProviderItem(ItemAction::Menu { tag }))
-                if chart_menu_command(tag).is_some() =>
-            {
-                let command = json!({"cmd": chart_menu_command(tag).unwrap()}).to_string();
-                handle_ipc(&mut state, &command, control_flow);
+            Event::UserEvent(UserEvent::Chart(action)) => match action {
+                status_items::ChartAction::Pressed => {
+                    state.status_item_pressed_at = Some(Instant::now())
+                }
+                status_items::ChartAction::Cancelled => state.status_item_pressed_at = None,
+                status_items::ChartAction::Released(button) => {
+                    handle_chart_click(&mut state, button);
+                    if let Some(button) = MainThreadMarker::new()
+                        .and_then(|mtm| state.tray.ns_status_item()?.button(mtm))
+                    {
+                        status_items::acknowledge_chart_click(&button);
+                    }
+                    mark_open_item(&state);
+                }
+            },
+            Event::UserEvent(UserEvent::ChartSession(began)) => {
+                handle_chart_session(&mut state, began)
             }
             Event::UserEvent(UserEvent::ProviderItem(action)) => {
-                handle_provider_item(&mut state, action);
+                let chart = match action {
+                    ItemAction::Menu { tag } => chart_menu_command(tag),
+                    _ => None,
+                };
+                match chart {
+                    Some(command) => handle_command(&mut state, command, control_flow),
+                    None => handle_provider_item(&mut state, action),
+                }
             }
-            Event::UserEvent(UserEvent::Ipc(body)) => handle_ipc(&mut state, &body, control_flow),
+            Event::UserEvent(UserEvent::Ipc(command)) => {
+                handle_command(&mut state, command, control_flow);
+            }
             Event::UserEvent(UserEvent::Report(payload)) => apply_payload(&mut state, payload),
             Event::UserEvent(UserEvent::Entry(entry)) => apply_entry(&mut state, entry),
             Event::UserEvent(UserEvent::Facts) => apply_facts(&mut state),
+            Event::UserEvent(UserEvent::AccessibilityChanged) => apply_strip_icon(&mut state),
             Event::UserEvent(UserEvent::Hotkey) => toggle_popover_from_keyboard(&mut state),
             Event::UserEvent(UserEvent::UserResized {
                 frame,
@@ -339,7 +369,14 @@ fn run_loop() -> Result<(), String> {
             }) => {
                 note_user_resize(&mut state, frame, previous_height);
             }
-            Event::UserEvent(UserEvent::OutsideClick(x, y)) => {
+            Event::UserEvent(UserEvent::OutsideClick(x, y, timestamp)) => {
+                if press_on_open_session_item(&state, x, y, timestamp) {
+                    hide_popover(&mut state);
+                    return;
+                }
+                if !status_item_frame(&state.tray).is_some_and(|frame| frame.contains(x, y)) {
+                    cancel_chart_press(&state);
+                }
                 let on_status_item = status_item_frames(&state)
                     .iter()
                     .any(|frame| frame.contains(x, y));
@@ -401,6 +438,12 @@ fn spawn_worker(
             let Ok(rt) = rt else {
                 return;
             };
+            // Reconcile enabled legacy login items without blocking the window.
+            // A missing item stays disabled. Refusals preserve its original file.
+            let _ = startup::reconcile();
+            if let Ok(mut current) = facts.lock() {
+                current.startup_enabled = startup::is_enabled();
+            }
             run_detection(false);
             loop {
                 rt.block_on(push_report(&proxy, &facts));
@@ -416,9 +459,6 @@ fn spawn_worker(
                         }
                         Ok(WorkerCmd::RefreshEntry(id)) => {
                             rt.block_on(push_entry(&proxy, &facts, &id));
-                        }
-                        Ok(WorkerCmd::CheckUpdate) => {
-                            rt.block_on(check_release(&proxy, &facts));
                         }
                         Ok(WorkerCmd::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                             return;
@@ -567,17 +607,15 @@ fn refresh_account_facts(facts: &SharedFacts) {
     });
 }
 
-/// Run `account switch` out of process, through this binary's `account` mode,
-/// as a terminal would, and its errors
-/// arrive on stderr, which becomes the card's message. Runs on its own thread,
-/// so a slow switch never holds up the refresh worker; the switch is a
-/// transaction with its own rollback, so it is left to finish rather than
-/// killed on a timer.
+/// Keep credential mutations isolated from the UI and refresh worker. Only a
+/// typed, bounded result crosses back into the card; no stderr text is shown.
 fn run_account_switch(facts: &SharedFacts, vendor: &str, label: &str) {
-    let error = match std::env::current_exe() {
-        Ok(tray) => switch_with(&tray, vendor, label),
-        Err(error) => format!("could not locate the running tray binary: {error}"),
-    };
+    let result = std::env::current_exe()
+        .map_err(|_| crate::core::accounts::Failure::WorkerUnavailable)
+        .and_then(|tray| super::account_worker::switch_with(&tray, vendor, label));
+    let error = result
+        .err()
+        .map_or_else(String::new, |error| error.message().to_owned());
     with_facts(facts, |f| {
         for fact in f.accounts.iter_mut().filter(|fact| fact.vendor == vendor) {
             fact.switching = false;
@@ -586,71 +624,19 @@ fn run_account_switch(facts: &SharedFacts, vendor: &str, label: &str) {
     });
 }
 
-/// The switch itself, run by this tray binary in its `account` mode (see
-/// `src/bin/ai-usagebar-tray.rs`); returns the error to show, or empty on
-/// success.
-fn switch_with(tray: &std::path::Path, vendor: &str, label: &str) -> String {
-    let mut command = std::process::Command::new(tray);
-    command.args(["account", "switch", "--yes"]);
-    if vendor == "openai" {
-        command.arg("--codex");
-    } else {
-        // Only the `claude` login. Switching Claude Desktop quits and reopens
-        // it, and a saved Desktop profile whose claude.ai web session was
-        // revoked reopens signed out; `account switch --desktop` still does it.
-        command.arg("--cli");
-    }
-    command.arg("--").arg(label);
-    match command.stdin(std::process::Stdio::null()).output() {
-        Ok(output) if output.status.success() => String::new(),
-        Ok(output) => String::from_utf8_lossy(&output.stderr)
-            .lines()
-            .map(str::trim)
-            .rfind(|line| !line.is_empty())
-            .map(|line| {
-                line.trim_start_matches("ai-usagebar account switch: ")
-                    .to_string()
-            })
-            .unwrap_or_else(|| format!("account switch exited with {}", output.status)),
-        Err(error) => format!("could not run the account switch: {error}"),
-    }
-}
-
 async fn push_report(proxy: &EventLoopProxy<UserEvent>, facts: &SharedFacts) {
     refresh_account_facts(facts);
     let mut snapshot = facts_snapshot(facts);
     snapshot.startup_enabled = startup::is_enabled();
     let now = now_ms();
-    let payload = match crate::report::collect_json().await {
+    let report = crate::report::collect_json().await;
+    refresh_account_facts(facts);
+    snapshot.retain_stable_emails(&facts_snapshot(facts));
+    let payload = match report {
         Ok(json) => wrap_report(&json, &snapshot, now, None),
         Err(error) => wrap_report("{}", &snapshot, now, Some(&error)),
     };
     let _ = proxy.send_event(UserEvent::Report(payload));
-}
-
-/// Manual GitHub release check. No install on macOS — the About screen opens
-/// the release page when a newer tag exists.
-async fn check_release(proxy: &EventLoopProxy<UserEvent>, facts: &SharedFacts) {
-    with_facts(facts, |f| {
-        f.update = Some(UpdateFact {
-            error: String::new(),
-            state: "checking".into(),
-            url: String::new(),
-            version: String::new(),
-        });
-    });
-    let _ = proxy.send_event(UserEvent::Facts);
-    let outcome = match update_flow::http_client() {
-        Ok(client) => update_flow::check(&client, env!("CARGO_PKG_VERSION")).await,
-        Err(error) => Err(error),
-    };
-    let checked_at = now_ms();
-    let fact = fact_after_check(outcome);
-    with_facts(facts, |f| {
-        f.update_checked_at = checked_at;
-        f.update = fact;
-    });
-    let _ = proxy.send_event(UserEvent::Facts);
 }
 
 async fn push_entry(proxy: &EventLoopProxy<UserEvent>, facts: &SharedFacts, id: &str) {
@@ -668,14 +654,13 @@ async fn push_entry(proxy: &EventLoopProxy<UserEvent>, facts: &SharedFacts, id: 
     }
 }
 
-/// Reload identity before fetching usage, then carry that snapshot with the
-/// entry. Applying the event must not substitute older or unrelated UI facts.
+/// Attach only local identities unchanged across the usage request.
 async fn refreshed_entry_with(
     id: &str,
-    refresh_facts: impl FnOnce() -> HostFacts,
+    mut refresh_facts: impl FnMut() -> HostFacts,
     report: impl std::future::Future<Output = Result<String, String>>,
 ) -> Option<Value> {
-    let facts = refresh_facts();
+    let mut facts = refresh_facts();
     let mut entry = match report.await {
         Ok(json) => serde_json::from_str::<Value>(&json)
             .ok()
@@ -687,6 +672,7 @@ async fn refreshed_entry_with(
             "sections": [],
         })),
     }?;
+    facts.retain_stable_emails(&refresh_facts());
     super::payload::attach_account_email(&mut entry, &facts);
     Some(entry)
 }
@@ -710,10 +696,6 @@ fn stamp_facts(state: &mut TrayState) {
         "shortcut",
         "shortcut_error",
         "refresh_minutes",
-        "updates",
-        "update",
-        "update_checked_at",
-        "repository",
         "version",
         "accounts",
     ] {
@@ -795,7 +777,14 @@ fn apply_strip_icon(state: &mut TrayState) {
             state
                 .provider_items
                 .sync(&chips, &tips, state.menu_bar_centered, chart_left);
-            if let Some(image) = template_bars_image(&fractions) {
+            let image = if state.menu_bar_chart {
+                template_bars_image(&fractions)
+            } else {
+                Some(status_items::template_main_image(f64::from(
+                    BARS_POINT_SIDE,
+                )))
+            };
+            if let Some(image) = image {
                 set_status_button_image(&state.tray, &image);
             }
         }
@@ -948,22 +937,71 @@ fn handle_tray(state: &mut TrayState, event: TrayIconEvent) {
         ..
     } = event
     {
-        match button {
-            MouseButton::Left => {
-                // The press this click ends has been handled; a later blur
-                // is not part of it.
-                state.status_item_pressed_at = None;
-                if state.popover_open && state.focused_provider.is_none() {
-                    hide_popover(state);
-                } else {
-                    // The chart opens the popover as it was, not on a provider.
-                    state.last_anchor = Some(cocoa_mouse());
-                    prepare_popover(state, None);
-                }
+        handle_chart_click(state, button);
+    }
+}
+
+fn handle_chart_click(state: &mut TrayState, button: MouseButton) {
+    match button {
+        MouseButton::Left => {
+            // The press this click ends has been handled; a later blur
+            // is not part of it.
+            state.status_item_pressed_at = None;
+            if state.popover_open && state.focused_provider.is_none() {
+                hide_popover(state);
+            } else {
+                // The chart opens the popover as it was, not on a provider.
+                state.last_anchor = Some(cocoa_mouse());
+                prepare_popover(state, None);
             }
-            MouseButton::Right => show_chart_menu(state),
-            MouseButton::Middle => next_menu_bar_provider(state),
         }
+        MouseButton::Right => show_chart_menu(state),
+        MouseButton::Middle => next_menu_bar_provider(state),
+    }
+}
+
+/// The chart item's left click on macOS 27: the menu bar opens a session on
+/// the press and ends it on a long press released, a drag out or a cancel.
+fn handle_chart_session(state: &mut TrayState, began: bool) {
+    let chart_open = (state.popover_open || state.show_pending) && state.focused_provider.is_none();
+    if began {
+        state.status_item_pressed_at = None;
+        if !chart_open {
+            state.last_anchor = Some(cocoa_mouse());
+            prepare_popover(state, None);
+        }
+        if let Some(session) = &state.chart_session {
+            session.acknowledge();
+        }
+    } else if chart_open {
+        hide_popover(state);
+    }
+    mark_open_item(state);
+}
+
+/// A press on the item whose session is open. The menu bar tracks that item
+/// and sends it nothing, so this global press is the only sign of the click
+/// that closes it, as it would a native menu.
+fn press_on_open_session_item(state: &TrayState, x: f64, y: f64, timestamp: f64) -> bool {
+    if !state.popover_open {
+        return false;
+    }
+    match state.focused_provider.as_deref() {
+        None => {
+            state
+                .chart_session
+                .as_ref()
+                .is_some_and(|session| session.open_before(timestamp))
+                && status_item_frame(&state.tray).is_some_and(|frame| frame.contains(x, y))
+        }
+        Some(id) => state.provider_items.index_of(id).is_some_and(|index| {
+            state.provider_items.session_open_before(index, timestamp)
+                && state
+                    .provider_items
+                    .frames()
+                    .into_iter()
+                    .any(|(item, frame)| item == id && ns_rect_to_cocoa(frame).contains(x, y))
+        }),
     }
 }
 
@@ -971,11 +1009,11 @@ const MENU_CHART_REFRESH: isize = 100;
 const MENU_CHART_SETTINGS: isize = 101;
 const MENU_CHART_QUIT: isize = 102;
 
-fn chart_menu_command(tag: isize) -> Option<&'static str> {
+fn chart_menu_command(tag: isize) -> Option<Command> {
     match tag {
-        MENU_CHART_REFRESH => Some("refresh"),
-        MENU_CHART_SETTINGS => Some("open-settings"),
-        MENU_CHART_QUIT => Some("quit"),
+        MENU_CHART_REFRESH => Some(Command::Refresh {}),
+        MENU_CHART_SETTINGS => Some(Command::OpenSettings {}),
+        MENU_CHART_QUIT => Some(Command::Quit {}),
         _ => None,
     }
 }
@@ -1011,7 +1049,17 @@ fn show_chart_menu(state: &mut TrayState) {
     ];
     state.last_anchor = status_item_frame(&state.tray)
         .map(|frame| (frame.x + frame.w / 2.0, frame.y + frame.h / 2.0));
-    state.provider_items.show_menu_on_button(&button, &lines);
+    if state.chart_session.is_some() {
+        state
+            .provider_items
+            .show_menu_on_button(&button, &lines, state.chart_session.as_ref());
+        return;
+    }
+    status_items::mark_open(&button, true);
+    state
+        .provider_items
+        .show_menu_on_button(&button, &lines, None);
+    status_items::mark_open(&button, false);
 }
 
 /// A provider item's click opens the popover under it on that provider's tab
@@ -1046,6 +1094,29 @@ fn handle_provider_item(state: &mut TrayState, action: ItemAction) {
             prepare_popover(state, Some(id));
         }
         ItemAction::Menu { tag } => apply_provider_menu_pick(state, tag),
+        ItemAction::Expanded { index } => {
+            let open_here = (state.popover_open || state.show_pending)
+                && state.focused_provider.as_deref() == state.provider_items.id_at(index);
+            if !open_here {
+                handle_provider_item(
+                    state,
+                    ItemAction::Click {
+                        index,
+                        right: false,
+                    },
+                );
+            }
+            state.provider_items.acknowledge(index);
+            mark_open_item(state);
+        }
+        ItemAction::Collapsed { index } => {
+            if (state.popover_open || state.show_pending)
+                && state.focused_provider.is_some()
+                && state.focused_provider.as_deref() == state.provider_items.id_at(index)
+            {
+                hide_popover(state);
+            }
+        }
     }
 }
 
@@ -1100,6 +1171,7 @@ const MENU_ACTIVE_ACCOUNT_ONLY: isize = 12;
 const MENU_OPEN: isize = 13;
 const MENU_TOGGLE_COLOR: isize = 14;
 const MENU_CENTERED: isize = 15;
+const MENU_ACCESSIBILITY: isize = 16;
 
 fn provider_menu(state: &mut TrayState, id: &str) -> Vec<MenuLine> {
     state.menu_provider = Some(id.to_owned());
@@ -1170,6 +1242,13 @@ fn provider_menu(state: &mut TrayState, id: &str) -> Vec<MenuLine> {
         tag: MENU_CENTERED,
         checked: state.menu_bar_centered,
     });
+    if state.menu_bar_centered && !menu_space::trusted() {
+        lines.push(MenuLine::Pick {
+            title: label("Authorize centering…", "Autorizar centralização…"),
+            tag: MENU_ACCESSIBILITY,
+            checked: false,
+        });
+    }
     lines.push(MenuLine::Separator);
     lines.push(MenuLine::Pick {
         title: label("Hide from the menu bar", "Ocultar do menu bar"),
@@ -1180,6 +1259,13 @@ fn provider_menu(state: &mut TrayState, id: &str) -> Vec<MenuLine> {
 }
 
 fn apply_provider_menu_pick(state: &mut TrayState, tag: isize) {
+    if tag == MENU_ACCESSIBILITY {
+        let proxy = state.proxy.clone();
+        menu_space::request_access(move || {
+            let _ = proxy.send_event(UserEvent::AccessibilityChanged);
+        });
+        return;
+    }
     let Some(id) = state.menu_provider.clone() else {
         return;
     };
@@ -1198,7 +1284,10 @@ fn apply_provider_menu_pick(state: &mut TrayState, tag: isize) {
     if tag == MENU_CENTERED {
         state.menu_bar_centered = !state.menu_bar_centered;
         if state.menu_bar_centered {
-            menu_space::request_access();
+            let proxy = state.proxy.clone();
+            menu_space::request_access(move || {
+                let _ = proxy.send_event(UserEvent::AccessibilityChanged);
+            });
         }
         persist_menu_bar_value("menu_bar_centered", state.menu_bar_centered.into());
     } else if tag == MENU_ACTIVE_ACCOUNT_ONLY {
@@ -1293,9 +1382,7 @@ fn set_menu_bar_window(state: &mut TrayState, window: UsageWindow) {
 
 /// Start a switch the popover asked for. Only a vendor and label the host
 /// itself reported are accepted, and never while one is already running.
-fn request_account_switch(state: &mut TrayState, value: &Value) {
-    let vendor = value.get("vendor").and_then(Value::as_str).unwrap_or("");
-    let label = value.get("label").and_then(Value::as_str).unwrap_or("");
+fn request_account_switch(state: &mut TrayState, vendor: &str, label: &str) {
     let allowed = facts_snapshot(&state.facts).accounts.iter().any(|fact| {
         fact.vendor == vendor
             && !fact.switching
@@ -1340,13 +1427,12 @@ fn request_account_switch(state: &mut TrayState, value: &Value) {
     }
 }
 
-fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow) {
-    let Ok(value) = serde_json::from_str::<Value>(body) else {
-        return;
-    };
-    let cmd = value.get("cmd").and_then(Value::as_str).unwrap_or("");
-    match cmd {
-        "ready" => {
+/// Act on a validated popover command. The boundary already checked shape,
+/// enums and bounds; what needs live state (is this entry still in the report,
+/// is this account one the host reported) is checked here.
+fn handle_command(state: &mut TrayState, command: Command, control_flow: &mut ControlFlow) {
+    match command {
+        Command::Ready {} => {
             state.js_ready = true;
             push_to_webview(state);
             // A first click can precede WebKit's handlers. Replay the native
@@ -1356,212 +1442,195 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
                 focus_provider(state, state.focused_provider.clone());
             }
         }
-        "detect" => {
+        Command::Detect {} => {
             let _ = state.worker.send(WorkerCmd::Detect);
         }
-        "refresh" => {
+        Command::Refresh {} => {
             let _ = state.worker.send(WorkerCmd::Refresh);
         }
-        "open-tui" => tui_launch::open(),
-        "open-settings" => prepare_popover_screen(state, None, "settings"),
-        "close" => hide_popover(state),
-        "quit" => *control_flow = ControlFlow::Exit,
-        "toggle-startup" => toggle_startup(state),
-        "switch-account" => request_account_switch(state, &value),
-        "resize" => handle_resize(state, &value),
-        "reset-panel-size" => reset_panel_size(state),
-        "set-pinned" => state.pinned = value.get("value").and_then(Value::as_bool) == Some(true),
-        "refresh-entry" => {
-            if let Some(id) = value.get("id").and_then(Value::as_str) {
-                let _ = state.worker.send(WorkerCmd::RefreshEntry(id.to_owned()));
+        Command::OpenSettings {} => prepare_popover_screen(state, None, "settings"),
+        Command::Close {} => hide_popover(state),
+        Command::Quit {} => *control_flow = ControlFlow::Exit,
+        Command::ToggleStartup {} => toggle_startup(state),
+        Command::SwitchAccount { vendor, label } => {
+            request_account_switch(state, &vendor.0, &label.0);
+        }
+        Command::Resize(measurement) => handle_resize(state, &measurement),
+        Command::ResetPanelSize {} => reset_panel_size(state),
+        Command::SetPinned { value } => state.pinned = value,
+        Command::RefreshEntry { id } => {
+            // An unknown id would come back as an error entry and be appended
+            // to the report.
+            if report_has_entry(&state.payload, id.as_str()) {
+                let _ = state
+                    .worker
+                    .send(WorkerCmd::RefreshEntry(id.as_str().to_owned()));
             }
         }
-        "set-shortcut" => {
-            let text = value.get("value").and_then(Value::as_str).unwrap_or("");
-            set_shortcut(state, text);
-        }
-        "set-refresh" => {
-            if let Some(minutes) = value.get("minutes").and_then(Value::as_u64) {
-                set_refresh(state, minutes);
-            }
-        }
-        "set-notifications-enabled" => {
-            if let Some(enabled) = value.get("value").and_then(Value::as_bool)
-                && let Some(path) = config_path()
+        Command::SetShortcut { value } => set_shortcut(state, &value.0),
+        Command::SetRefresh { minutes } => set_refresh(state, minutes.0),
+        Command::SetNotificationsEnabled { value: enabled } => {
+            if let Some(path) = config_path()
                 && crate::config::set_notification_value(&path, "enabled", enabled.into()).is_ok()
             {
                 state.notifications_enabled = enabled;
                 push_to_webview(state);
             }
         }
-        "set-notifications-threshold" => {
-            if let Some(threshold) = value.get("value").and_then(Value::as_u64)
-                && (1..=100).contains(&threshold)
-                && let Some(path) = config_path()
+        Command::SetNotificationsThreshold { value } => {
+            let threshold = value.0;
+            if let Some(path) = config_path()
                 && crate::config::set_notification_value(
                     &path,
                     "threshold",
-                    (threshold as i64).into(),
+                    i64::from(threshold).into(),
                 )
                 .is_ok()
             {
-                state.notifications_threshold = threshold as u8;
+                state.notifications_threshold = threshold;
                 push_to_webview(state);
             }
         }
-        "next-menu-bar-provider" => {
+        Command::NextMenuBarProvider {} => {
             next_menu_bar_provider(state);
             push_to_webview(state);
         }
-        "set-menu-bar-provider" => {
-            if let Some(id) = value.get("value").and_then(Value::as_str) {
-                let eligible = id == menu_bar::HIGHEST_PROVIDER
-                    || state
-                        .payload
-                        .get("entries")
-                        .and_then(Value::as_array)
-                        .is_some_and(|entries| {
-                            entries
-                                .iter()
-                                .any(|entry| entry.get("id").and_then(Value::as_str) == Some(id))
-                        })
-                        && (!state.strip_order_known
-                            || state.strip_order.iter().any(|shown| shown == id));
-                if eligible {
-                    state.menu_bar_provider = id.to_owned();
-                    persist_menu_bar_value("menu_bar_provider", id.into());
-                    if state.menu_bar_show_all {
-                        state.menu_bar_show_all = false;
-                        persist_menu_bar_value("menu_bar_show_all", false.into());
-                    }
-                    apply_strip_icon(state);
-                    push_to_webview(state);
+        Command::SetMenuBarProvider { value } => {
+            let id = value.as_str();
+            let visible = state
+                .strip_order_known
+                .then_some(state.strip_order.as_slice());
+            if menu_bar_provider_eligible(&state.payload, visible, id) {
+                state.menu_bar_provider = id.to_owned();
+                persist_menu_bar_value("menu_bar_provider", id.into());
+                if state.menu_bar_show_all {
+                    state.menu_bar_show_all = false;
+                    persist_menu_bar_value("menu_bar_show_all", false.into());
                 }
-            }
-        }
-        "set-menu-bar-show-all" => {
-            if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
-                state.menu_bar_show_all = enabled;
-                persist_menu_bar_value("menu_bar_show_all", enabled.into());
                 apply_strip_icon(state);
                 push_to_webview(state);
             }
         }
-        "set-menu-bar-hide-value" => {
-            if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
-                state.menu_bar_hide_value = enabled;
-                persist_menu_bar_value("menu_bar_hide_value", enabled.into());
-                apply_strip_icon(state);
-                push_to_webview(state);
-            }
-        }
-        "set-menu-bar-window" => {
-            if let Some(window) = value.get("value").and_then(Value::as_str) {
-                set_menu_bar_window(state, UsageWindow::parse(window));
-                push_to_webview(state);
-            }
-        }
-        "set-menu-bar-chart" => {
-            if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
-                state.menu_bar_chart = enabled;
-                persist_menu_bar_value(
-                    "menu_bar_style",
-                    (if enabled { "bars" } else { "provider" }).into(),
-                );
-                apply_strip_icon(state);
-                push_to_webview(state);
-            }
-        }
-        "set-menu-bar-item" => {
-            let id = value.get("id").and_then(Value::as_str).unwrap_or("").trim();
-            let key = value.get("key").and_then(Value::as_str).unwrap_or("");
-            if id.is_empty() || !matches!(key, "window" | "hide_value" | "hidden" | "color_value") {
-                return;
-            }
-            let setting = match value.get("value") {
-                Some(Value::Bool(flag)) => Some(toml_edit::Value::from(*flag)),
-                Some(Value::String(window)) if key == "window" && window != "auto" => {
-                    Some(UsageWindow::parse(window).as_str().into())
-                }
-                _ => None,
-            };
-            set_menu_bar_item(state, id, key, setting);
+        Command::SetMenuBarShowAll { value: enabled } => {
+            state.menu_bar_show_all = enabled;
+            persist_menu_bar_value("menu_bar_show_all", enabled.into());
             apply_strip_icon(state);
             push_to_webview(state);
         }
-        "set-menu-bar-color-value" => {
-            if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
-                state.menu_bar_color_value = enabled;
-                persist_menu_bar_value("menu_bar_color_value", enabled.into());
-                apply_strip_icon(state);
-                push_to_webview(state);
-            }
+        Command::SetMenuBarHideValue { value: enabled } => {
+            state.menu_bar_hide_value = enabled;
+            persist_menu_bar_value("menu_bar_hide_value", enabled.into());
+            apply_strip_icon(state);
+            push_to_webview(state);
         }
-        "set-menu-bar-centered" => {
-            if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
-                state.menu_bar_centered = enabled;
-                if enabled {
-                    menu_space::request_access();
-                }
-                persist_menu_bar_value("menu_bar_centered", enabled.into());
-                apply_strip_icon(state);
-                push_to_webview(state);
-            }
+        Command::SetMenuBarWindow { value } => {
+            set_menu_bar_window(state, value.usage_window());
+            push_to_webview(state);
         }
-        "set-menu-bar-active-account-only" => {
-            if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
-                state.menu_bar_active_account_only = enabled;
-                persist_menu_bar_value("menu_bar_active_account_only", enabled.into());
-                apply_strip_icon(state);
-                push_to_webview(state);
-            }
+        Command::SetMenuBarChart { value: enabled } => {
+            state.menu_bar_chart = enabled;
+            persist_menu_bar_value(
+                "menu_bar_style",
+                (if enabled { "bars" } else { "provider" }).into(),
+            );
+            apply_strip_icon(state);
+            push_to_webview(state);
         }
-        "strip" => {
-            let (style, stars, order) = parse_strip_ipc(&value);
-            state.strip_style = style;
-            state.stars = stars;
-            state.strip_order = order;
+        Command::SetMenuBarItem(change) => {
+            // Settings lists one row per report entry; nothing else is written.
+            if !report_has_entry(&state.payload, change.id.as_str()) {
+                return;
+            }
+            set_menu_bar_item(
+                state,
+                change.id.as_str(),
+                change.setting.key(),
+                menu_bar_item_value(change.setting),
+            );
+            apply_strip_icon(state);
+            push_to_webview(state);
+        }
+        Command::SetMenuBarColorValue { value: enabled } => {
+            state.menu_bar_color_value = enabled;
+            persist_menu_bar_value("menu_bar_color_value", enabled.into());
+            apply_strip_icon(state);
+            push_to_webview(state);
+        }
+        Command::SetMenuBarCentered { value: enabled } => {
+            state.menu_bar_centered = enabled;
+            if enabled {
+                let proxy = state.proxy.clone();
+                menu_space::request_access(move || {
+                    let _ = proxy.send_event(UserEvent::AccessibilityChanged);
+                });
+            }
+            persist_menu_bar_value("menu_bar_centered", enabled.into());
+            apply_strip_icon(state);
+            push_to_webview(state);
+        }
+        Command::SetMenuBarActiveAccountOnly { value: enabled } => {
+            state.menu_bar_active_account_only = enabled;
+            persist_menu_bar_value("menu_bar_active_account_only", enabled.into());
+            apply_strip_icon(state);
+            push_to_webview(state);
+        }
+        Command::Strip(layout) => {
+            state.strip_style = StripStyle::Bars;
+            state.stars = layout.stars;
+            state.strip_order = layout.order;
             state.strip_order_known = true;
-            state.strip_names = parse_strip_names(&value);
-            if let Some(thresholds) = parse_strip_thresholds(&value) {
-                state.color_thresholds = thresholds;
-            }
-            if let Some(language) = value.get("language").and_then(Value::as_str) {
-                state.language = language.to_owned();
-            }
+            state.strip_names = layout.names;
+            state.color_thresholds = layout.thresholds;
+            state.language = layout.language;
             apply_strip_icon(state);
         }
-        "open-url" => {
-            if let Some(url) = value.get("url").and_then(Value::as_str) {
-                browse::open(url);
-            }
-        }
-        "check-update" => {
-            let _ = state.worker.send(WorkerCmd::CheckUpdate);
-        }
-        _ => {}
+        Command::OpenUrl { url } => browse::open(&url.0),
+    }
+}
+
+fn report_has_entry(payload: &Value, id: &str) -> bool {
+    payload
+        .get("entries")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.get("id").and_then(Value::as_str) == Some(id))
+        })
+}
+
+/// `highest`, or a report entry the popover still shows.
+fn menu_bar_provider_eligible(payload: &Value, visible: Option<&[String]>, id: &str) -> bool {
+    id == menu_bar::HIGHEST_PROVIDER
+        || report_has_entry(payload, id)
+            && visible.is_none_or(|shown| shown.iter().any(|v| v == id))
+}
+
+/// The config value one menu-bar override writes; `None` clears it.
+fn menu_bar_item_value(setting: ItemSetting) -> Option<toml_edit::Value> {
+    match setting {
+        ItemSetting::Window(window) => window.map(|window| window.as_str().into()),
+        ItemSetting::HideValue(flag)
+        | ItemSetting::Hidden(flag)
+        | ItemSetting::ColorValue(flag) => Some(flag.into()),
     }
 }
 
 fn current_panel_measurement(
-    value: &Value,
+    measurement: &Measurement,
     revision: u64,
     provider: Option<&str>,
     pending: bool,
     screen: &str,
 ) -> bool {
-    value.get("revision").and_then(Value::as_u64) == Some(revision)
-        && value.get("provider").and_then(Value::as_str) == Some(provider.unwrap_or(""))
-        && (!pending || value.get("screen").and_then(Value::as_str) == Some(screen))
-        && value
-            .get("height")
-            .and_then(Value::as_f64)
-            .is_some_and(|height| height.is_finite() && height > 0.0)
+    measurement.revision == revision
+        && measurement.provider() == provider.unwrap_or("")
+        && (!pending || measurement.screen.as_str() == screen)
 }
 
-fn handle_resize(state: &mut TrayState, value: &Value) {
+fn handle_resize(state: &mut TrayState, measurement: &Measurement) {
     if !current_panel_measurement(
-        value,
+        measurement,
         state.presentation_revision,
         state.focused_provider.as_deref(),
         state.show_pending,
@@ -1569,22 +1638,10 @@ fn handle_resize(state: &mut TrayState, value: &Value) {
     ) {
         return;
     }
-    if let Some(theme) = value
-        .get("theme")
-        .and_then(Value::as_str)
-        .and_then(Theme::parse)
-    {
-        apply_theme(state, theme);
-    }
-    let Some(requested) = value.get("height").and_then(Value::as_f64) else {
-        return;
-    };
-    if !requested.is_finite() || requested <= 0.0 {
-        return;
-    }
+    apply_theme(state, measurement.theme.into());
     let visible_h = anchor_visible_height(state.last_anchor);
-    state.popover_height = requested;
-    state.compact_popover = value.get("compact").and_then(Value::as_bool) == Some(true);
+    state.popover_height = measurement.height.0;
+    state.compact_popover = measurement.compact;
     if state.show_pending {
         // The provider tab has its height: show it at that size.
         show_pending(state);
@@ -1846,9 +1903,11 @@ fn show_popover(state: &mut TrayState) {
 fn install_outside_click_monitor(proxy: EventLoopProxy<UserEvent>) -> Option<Retained<AnyObject>> {
     let mask =
         NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::OtherMouseDown;
-    let block = RcBlock::new(move |_event: NonNull<NSEvent>| {
+    let block = RcBlock::new(move |event: NonNull<NSEvent>| {
         let (x, y) = cocoa_mouse();
-        let _ = proxy.send_event(UserEvent::OutsideClick(x, y));
+        // SAFETY: AppKit passes a live event for the duration of the call.
+        let timestamp = unsafe { event.as_ref() }.timestamp();
+        let _ = proxy.send_event(UserEvent::OutsideClick(x, y, timestamp));
     });
     let monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &block);
     if monitor.is_none() {
@@ -1920,6 +1979,7 @@ fn guard_blur(state: &mut TrayState) {
 }
 
 fn hide_popover(state: &mut TrayState) {
+    cancel_chart_press(state);
     state.window.set_visible(false);
     state.popover_open = false;
     state.focused_provider = None;
@@ -2020,9 +2080,21 @@ fn build_webview(window: &Window, proxy: EventLoopProxy<UserEvent>) -> Result<We
         // `http://aiub.localhost/` instead).
         .with_url("aiub://localhost/index.html")
         .with_ipc_handler(move |request| {
-            let body = request.body().clone();
-            let _ = proxy.send_event(UserEvent::Ipc(body));
+            match ipc::accept(&request.uri().to_string(), request.body()) {
+                Ok(command) => {
+                    let _ = proxy.send_event(UserEvent::Ipc(command));
+                }
+                // A static reason only: the body can carry account labels.
+                Err(rejection) => eprintln!(
+                    "ai-usagebar-tray: ignored a popover message ({})",
+                    rejection.reason()
+                ),
+            }
         })
+        // This page drives privileged host commands, so it never leaves the
+        // embedded protocol; web links go through `open-url` to the browser.
+        .with_navigation_handler(|url| ipc::trusted_origin(&url))
+        .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
         .with_transparent(true)
         .with_background_color((0, 0, 0, 0))
         .with_accept_first_mouse(true)
@@ -2032,23 +2104,7 @@ fn build_webview(window: &Window, proxy: EventLoopProxy<UserEvent>) -> Result<We
 }
 
 fn protocol_response(request: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
-    let path = request.uri().path();
-    let (body, mime): (&'static [u8], &str) = match path {
-        "/" | "/index.html" => (INDEX_HTML.as_bytes(), "text/html; charset=utf-8"),
-        "/popover.css" => (POPOVER_CSS.as_bytes(), "text/css; charset=utf-8"),
-        "/popover.js" => (POPOVER_JS.as_bytes(), "text/javascript; charset=utf-8"),
-        _ => {
-            return Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Cow::Borrowed(b"" as &[u8]))
-                .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"" as &[u8])));
-        }
-    };
-    Response::builder()
-        .header(CONTENT_TYPE, mime)
-        .header("Access-Control-Allow-Origin", "*")
-        .body(Cow::Borrowed(body))
-        .unwrap_or_else(|_| Response::new(Cow::Borrowed(body)))
+    assets::response(request)
 }
 
 fn now_ms() -> i64 {
@@ -2236,6 +2292,7 @@ fn apply_contents_scale(view: &NSView, scale: f64) {
     view.setNeedsDisplay(true);
 }
 
+/// Optional usage chart, rasterized by AppKit at the display's native scale.
 fn template_bars_image(fractions: &[f64]) -> Option<Retained<NSImage>> {
     if fractions.is_empty() {
         return None;
@@ -2317,23 +2374,45 @@ fn fill_round_rect(x: f64, y: f64, w: f64, h: f64, radius: f64, alpha: f64) {
 /// Keep the item that opened the popover highlighted while it is open, like a
 /// native status item's menu: the provider's own item, or the chart glyph.
 fn mark_open_item(state: &TrayState) {
-    let provider = state
-        .popover_open
+    // A pending provider counts as open, as the chart does: a redraw before
+    // its tab is measured must not end the session its click began.
+    let provider = (state.popover_open || state.show_pending)
         .then_some(state.focused_provider.as_deref())
         .flatten();
-    let chart = state.popover_open && provider.is_none();
+    let chart = (state.popover_open || state.show_pending) && state.focused_provider.is_none();
     if let Some(button) = MainThreadMarker::new().and_then(|mtm| {
         state
             .tray
             .ns_status_item()
             .and_then(|item| item.button(mtm))
     }) {
+        let proxy = state.proxy.clone();
+        status_items::install_chart_button(&button, move |action| {
+            let _ = proxy.send_event(UserEvent::Chart(action));
+        });
         status_items::fit_chart_button(&button);
-        status_items::mark_open(&button, chart);
+        // With a session the menu bar draws the capsule; this app draws the
+        // same shape only when it opens without one (the keyboard shortcut).
+        let system = state.chart_session.as_ref().is_some_and(|session| {
+            status_items::use_system_highlight(&button);
+            session.active()
+        });
+        status_items::mark_open(&button, chart && !system);
+    }
+    if let Some(session) = &state.chart_session {
+        session.sync(chart);
     }
     state
         .provider_items
         .highlight(provider.and_then(|id| state.provider_items.index_of(id)));
+}
+
+fn cancel_chart_press(state: &TrayState) {
+    if let Some(button) =
+        MainThreadMarker::new().and_then(|mtm| state.tray.ns_status_item()?.button(mtm))
+    {
+        status_items::cancel_chart_press(&button);
+    }
 }
 
 fn set_status_button_image(tray: &TrayIcon, image: &NSImage) {
@@ -2373,19 +2452,23 @@ mod presentation_tests {
     use super::*;
 
     #[tokio::test]
-    async fn targeted_refresh_reloads_identity_before_collecting_usage() {
+    async fn targeted_refresh_omits_identity_changed_while_collecting_usage() {
         let facts = Arc::new(Mutex::new(HostFacts::default()));
         with_facts(&facts, |f| {
             f.account_emails
                 .insert("openai".into(), "old@example.test".into());
         });
+        let mut reads = 0;
         let entry = refreshed_entry_with(
             "openai",
             || {
-                with_facts(&facts, |f| {
-                    f.account_emails
-                        .insert("openai".into(), "new@example.test".into());
-                });
+                if reads == 0 {
+                    with_facts(&facts, |f| {
+                        f.account_emails
+                            .insert("openai".into(), "new@example.test".into());
+                    });
+                }
+                reads += 1;
                 facts_snapshot(&facts)
             },
             async {
@@ -2403,7 +2486,8 @@ mod presentation_tests {
         )
         .await
         .unwrap();
-        assert_eq!(entry["email"], "new@example.test");
+        assert!(entry.get("email").is_none());
+        assert_eq!(reads, 2);
     }
 
     #[tokio::test]
@@ -2418,8 +2502,15 @@ mod presentation_tests {
         assert!(entry.get("email").is_none());
     }
 
-    fn measurement(revision: u64, provider: &str, screen: &str) -> Value {
-        json!({"height": 317, "revision": revision, "provider": provider, "screen": screen})
+    fn measurement(revision: u64, provider: &str, screen: &str) -> Measurement {
+        let body = json!({
+            "cmd": "resize", "height": 317, "compact": false, "theme": "dark",
+            "revision": revision, "provider": provider, "screen": screen
+        });
+        match ipc::accept("aiub://localhost/index.html", &body.to_string()) {
+            Ok(Command::Resize(measurement)) => measurement,
+            other => panic!("resize fixture must parse: {other:?}"),
+        }
     }
 
     #[test]
@@ -2493,12 +2584,15 @@ mod presentation_tests {
             true,
             "settings"
         ));
-        assert_eq!(chart_menu_command(MENU_CHART_REFRESH), Some("refresh"));
+        assert_eq!(
+            chart_menu_command(MENU_CHART_REFRESH),
+            Some(Command::Refresh {})
+        );
         assert_eq!(
             chart_menu_command(MENU_CHART_SETTINGS),
-            Some("open-settings")
+            Some(Command::OpenSettings {})
         );
-        assert_eq!(chart_menu_command(MENU_CHART_QUIT), Some("quit"));
+        assert_eq!(chart_menu_command(MENU_CHART_QUIT), Some(Command::Quit {}));
         for tag in [1, 2, 3, 4, MENU_OPEN, MENU_CENTERED, MENU_HIDE] {
             assert_eq!(
                 chart_menu_command(tag),
@@ -2506,5 +2600,92 @@ mod presentation_tests {
                 "provider actions keep their routing"
             );
         }
+    }
+
+    fn report() -> Value {
+        json!({"entries": [
+            {"id": "anthropic", "status": "ready"},
+            {"id": "openai:work", "status": "error"}
+        ]})
+    }
+
+    #[test]
+    fn entry_commands_act_only_on_entries_in_the_report() {
+        let report = report();
+        assert!(report_has_entry(&report, "anthropic"));
+        assert!(report_has_entry(&report, "openai:work"));
+        for id in ["openai", "anthropic ", "zai", ""] {
+            assert!(!report_has_entry(&report, id), "{id}");
+        }
+        assert!(!report_has_entry(&json!({}), "anthropic"));
+        assert!(!report_has_entry(
+            &json!({"entries": "anthropic"}),
+            "anthropic"
+        ));
+    }
+
+    #[test]
+    fn menu_bar_provider_keeps_its_eligibility_rules() {
+        let report = report();
+        let shown = ["openai:work".to_string()];
+        assert!(menu_bar_provider_eligible(&report, None, "highest"));
+        assert!(menu_bar_provider_eligible(&report, Some(&[]), "highest"));
+        // Before the popover sends its layout, any report entry is eligible.
+        assert!(menu_bar_provider_eligible(&report, None, "anthropic"));
+        assert!(menu_bar_provider_eligible(
+            &report,
+            Some(&shown),
+            "openai:work"
+        ));
+        // A card hidden in the popover, or one missing from the report, is not.
+        assert!(!menu_bar_provider_eligible(
+            &report,
+            Some(&shown),
+            "anthropic"
+        ));
+        assert!(!menu_bar_provider_eligible(&report, None, "zai"));
+    }
+
+    #[test]
+    fn menu_bar_item_values_match_the_previous_config_writes() {
+        use menu_bar::UsageWindow;
+        assert!(menu_bar_item_value(ItemSetting::Window(None)).is_none());
+        assert_eq!(
+            menu_bar_item_value(ItemSetting::Window(Some(UsageWindow::Weekly)))
+                .and_then(|v| v.as_str().map(str::to_owned)),
+            Some("weekly".to_string())
+        );
+        for setting in [
+            ItemSetting::Hidden(false),
+            ItemSetting::HideValue(true),
+            ItemSetting::ColorValue(false),
+        ] {
+            let flag = match setting {
+                ItemSetting::Hidden(flag)
+                | ItemSetting::HideValue(flag)
+                | ItemSetting::ColorValue(flag) => flag,
+                ItemSetting::Window(_) => unreachable!(),
+            };
+            assert_eq!(
+                menu_bar_item_value(setting).and_then(|v| v.as_bool()),
+                Some(flag)
+            );
+        }
+    }
+
+    #[test]
+    fn ipc_request_uri_of_the_embedded_page_is_trusted() {
+        // wry hands the frame URL to the IPC handler through `http::Uri`; the
+        // round trip must keep the origin `ipc::accept` compares against.
+        let request = Request::builder()
+            .uri("aiub://localhost/index.html")
+            .body(String::new())
+            .unwrap();
+        assert!(ipc::trusted_origin(&request.uri().to_string()));
+        let foreign = Request::builder()
+            .uri("https://aiub.localhost/index.html")
+            .body(String::new())
+            .unwrap();
+        assert!(!ipc::trusted_origin(&foreign.uri().to_string()));
     }
 }

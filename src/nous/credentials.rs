@@ -11,7 +11,6 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
 use chrono::{DateTime, Utc};
@@ -133,7 +132,7 @@ impl CredentialDocument {
     /// Test seam for proving that writes preserve unrelated future entries.
     /// Gated like the `tests` module below, which is `unix`-only because every
     /// assertion in it turns on file modes.
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     fn insert_other(&mut self, key: impl Into<String>, value: serde_json::Value) {
         self.other.insert(key.into(), value);
     }
@@ -150,15 +149,10 @@ pub struct ProcessOwner;
 
 impl OwnerIdProvider for ProcessOwner {
     fn current_uid(&self) -> io::Result<u32> {
-        #[cfg(unix)]
         {
             // Unlike `/proc/self`, this is available on every supported Unix,
             // including macOS, without introducing an unsafe FFI call here.
             Ok(rustix::process::geteuid().as_raw())
-        }
-        #[cfg(not(unix))]
-        {
-            Ok(0)
         }
     }
 }
@@ -385,7 +379,6 @@ fn ensure_private_parent(path: &Path, owner: &Arc<dyn OwnerIdProvider>) -> Resul
         });
     }
     validate_owner(path, &metadata, owner)?;
-    #[cfg(unix)]
     {
         let mode = file_mode(&metadata);
         if created {
@@ -414,7 +407,6 @@ fn ensure_private_parent(path: &Path, owner: &Arc<dyn OwnerIdProvider>) -> Resul
 fn open_private_lock_file(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true);
-    #[cfg(unix)]
     options.mode(CREDENTIALS_FILE_MODE);
     options.open(path)
 }
@@ -437,7 +429,6 @@ fn validate_metadata(
         });
     }
     validate_owner(path, metadata, owner)?;
-    #[cfg(unix)]
     {
         if file_mode(metadata) != CREDENTIALS_FILE_MODE {
             return Err(CredentialError::Unsafe {
@@ -463,7 +454,6 @@ fn validate_owner(
     metadata: &fs::Metadata,
     owner: &Arc<dyn OwnerIdProvider>,
 ) -> Result<()> {
-    #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         let uid = owner.current_uid().map_err(|source| io_at(path, source))?;
@@ -474,8 +464,6 @@ fn validate_owner(
             });
         }
     }
-    #[cfg(not(unix))]
-    let _ = (path, metadata, owner);
     Ok(())
 }
 
@@ -498,45 +486,31 @@ fn reject_symlink(path: &Path) -> Result<()> {
 /// `unix`-only: a permission bit has no meaning elsewhere, and every caller is
 /// already inside a `#[cfg(unix)]` block, so a non-unix arm here would be a
 /// branch nothing can reach.
-#[cfg(unix)]
 fn file_mode(metadata: &fs::Metadata) -> u32 {
     use std::os::unix::fs::MetadataExt;
     metadata.mode() & 0o777
 }
 
 fn set_private_permissions(file: &File, mode: u32) -> io::Result<()> {
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         file.set_permissions(fs::Permissions::from_mode(mode))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (file, mode);
-        Ok(())
     }
 }
 
 /// `unix`-only for the same reason as [`file_mode`]. Its sibling
 /// [`set_private_permissions`] is *not* gated: that one is called
 /// unconditionally, so its non-unix no-op arm is live.
-#[cfg(unix)]
 fn set_private_permissions_path(path: &Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
 fn sync_parent(parent: &Path) -> Result<()> {
-    #[cfg(unix)]
     {
         File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|source| io_at(parent, source))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = parent;
-        Ok(())
     }
 }
 
@@ -547,7 +521,7 @@ fn io_at(path: impl Into<PathBuf>, source: io::Error) -> CredentialError {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -748,36 +722,5 @@ mod tests {
         let output = format!("{:?}", credential());
         assert!(!output.contains("test-access-token"));
         assert!(!output.contains("test-refresh-token"));
-    }
-}
-
-#[cfg(all(test, not(unix)))]
-mod non_unix_tests {
-    use chrono::{TimeZone, Utc};
-    use tempfile::TempDir;
-
-    use super::*;
-
-    fn document(access_token: &str) -> CredentialDocument {
-        CredentialDocument::new(Some(NousCredential {
-            client_id: "hermes-cli".into(),
-            access_token: access_token.into(),
-            refresh_token: "test-refresh-token".into(),
-            expires_at: Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap(),
-        }))
-    }
-
-    #[test]
-    fn credential_store_writes_replaces_reads_and_logs_out() {
-        let root = TempDir::new().unwrap();
-        let store = CredentialStore::at(root.path().join("config").join("credentials.json"));
-
-        store.write(&document("first-access-token")).unwrap();
-        store.write(&document("second-access-token")).unwrap();
-        let stored = store.read().unwrap().unwrap().nous.unwrap();
-        assert_eq!(stored.access_token, "second-access-token");
-
-        store.logout().unwrap();
-        assert!(store.read().unwrap().is_none());
     }
 }

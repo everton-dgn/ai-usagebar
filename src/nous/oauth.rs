@@ -1,37 +1,16 @@
-//! Nous OAuth device flow and refresh state machine.
-
-use std::fmt;
-use std::process::Command;
-use std::time::{Duration, Instant};
+//! Nous OAuth refresh for a sign-in saved earlier. The app has no Nous
+//! sign-in flow of its own.
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use thiserror::Error;
 
-use super::credentials::{CredentialDocument, CredentialStore, NousCredential};
-use super::types::{DeviceCode, TokenResponse, parse_device_code, parse_token};
+use super::credentials::{CredentialStore, NousCredential};
+use super::types::{TokenResponse, parse_token};
 
 pub const CLIENT_ID: &str = "hermes-cli";
-pub const SCOPE: &str = "inference:invoke";
-pub const DEVICE_CODE_URL: &str = "https://portal.nousresearch.com/api/oauth/device/code";
 pub const TOKEN_URL: &str = "https://portal.nousresearch.com/api/oauth/token";
 pub const REFRESH_SKEW_SECONDS: i64 = 120;
-pub const SLOW_DOWN_INCREMENT: Duration = Duration::from_secs(5);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Endpoints {
-    pub device_code: String,
-    pub token: String,
-}
-
-impl Default for Endpoints {
-    fn default() -> Self {
-        Self {
-            device_code: DEVICE_CODE_URL.into(),
-            token: TOKEN_URL.into(),
-        }
-    }
-}
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum OAuthError {
@@ -53,167 +32,6 @@ pub enum OAuthError {
     RefreshTokenRejected,
     #[error("credential store failure")]
     Credentials,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PollState {
-    AuthorizationPending,
-    SlowDown,
-    Success,
-    AccessDenied,
-    ExpiredToken,
-}
-
-/// A browser launcher is injected so login tests never spawn a real browser.
-pub trait BrowserOpener {
-    fn open(&self, url: &str) -> std::io::Result<()>;
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SystemBrowserOpener;
-
-impl BrowserOpener for SystemBrowserOpener {
-    fn open(&self, url: &str) -> std::io::Result<()> {
-        #[cfg(target_os = "linux")]
-        {
-            let _child = Command::new("xdg-open").arg(url).spawn()?;
-            Ok(())
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let _child = Command::new("open").arg(url).spawn()?;
-            Ok(())
-        }
-        #[cfg(target_os = "windows")]
-        {
-            // Keep the remotely supplied URL out of `cmd.exe`; metacharacters
-            // such as `&` and `%` are data to Explorer, not shell syntax.
-            let _child = Command::new("explorer.exe").arg(url).spawn()?;
-            Ok(())
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-        {
-            let _ = url;
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "browser opening is unsupported",
-            ))
-        }
-    }
-}
-
-/// Browser opening is intentionally best effort.  The CLI always prints the
-/// sanitized verification URL separately, so a missing desktop opener is not a
-/// failed authorization.
-pub fn open_verification_url(url: &str, opener: &dyn BrowserOpener) -> bool {
-    if !is_safe_portal_url(url) {
-        return false;
-    }
-    opener.open(url).is_ok()
-}
-
-pub async fn request_device_code(
-    client: &reqwest::Client,
-    endpoints: &Endpoints,
-) -> Result<DeviceCode, OAuthError> {
-    let response = client
-        .post(&endpoints.device_code)
-        .header("content-type", "application/x-www-form-urlencoded")
-        .form(&[("client_id", CLIENT_ID), ("scope", SCOPE)])
-        .send()
-        .await
-        .map_err(|_| OAuthError::Transport)?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(OAuthError::HttpStatus(status.as_u16()));
-    }
-    let body = crate::vendor::read_body_capped(response, crate::vendor::MAX_BODY_BYTES)
-        .await
-        .map_err(|_| OAuthError::Transport)?;
-    let value: Value = serde_json::from_slice(&body).map_err(|_| OAuthError::Schema)?;
-    parse_device_code(&value).map_err(|_| OAuthError::Schema)
-}
-
-pub fn classify_poll_response(status: u16, value: &Value) -> Result<PollState, OAuthError> {
-    if (200..300).contains(&status) {
-        parse_token(value).map_err(|_| OAuthError::Schema)?;
-        return Ok(PollState::Success);
-    }
-    let code = value
-        .get("error")
-        .and_then(Value::as_str)
-        .ok_or(OAuthError::UnknownOAuthError)?;
-    match code {
-        "authorization_pending" => Ok(PollState::AuthorizationPending),
-        "slow_down" => Ok(PollState::SlowDown),
-        "access_denied" => Ok(PollState::AccessDenied),
-        "expired_token" => Ok(PollState::ExpiredToken),
-        _ => Err(OAuthError::UnknownOAuthError),
-    }
-}
-
-pub fn next_poll_interval(current: Duration, state: PollState) -> Duration {
-    match state {
-        PollState::SlowDown => current.saturating_add(SLOW_DOWN_INCREMENT),
-        _ => current,
-    }
-}
-
-/// Poll the token endpoint no faster than the server-provided interval.
-pub async fn poll_for_token(
-    client: &reqwest::Client,
-    endpoint: &str,
-    device: &DeviceCode,
-) -> Result<TokenResponse, OAuthError> {
-    let deadline = Instant::now().checked_add(Duration::from_secs(device.expires_in));
-    let Some(deadline) = deadline else {
-        return Err(OAuthError::Deadline);
-    };
-    let mut interval = Duration::from_secs(device.interval);
-    loop {
-        if Instant::now()
-            .checked_add(interval)
-            .is_none_or(|at| at > deadline)
-        {
-            return Err(OAuthError::Deadline);
-        }
-        tokio::time::sleep(interval).await;
-        if Instant::now() > deadline {
-            return Err(OAuthError::Deadline);
-        }
-        let (status, value) = poll_request(client, endpoint, &device.device_code).await?;
-        match classify_poll_response(status, &value)? {
-            PollState::AuthorizationPending => {}
-            PollState::SlowDown => interval = next_poll_interval(interval, PollState::SlowDown),
-            PollState::Success => return parse_token(&value).map_err(|_| OAuthError::Schema),
-            PollState::AccessDenied => return Err(OAuthError::AccessDenied),
-            PollState::ExpiredToken => return Err(OAuthError::ExpiredToken),
-        }
-    }
-}
-
-async fn poll_request(
-    client: &reqwest::Client,
-    endpoint: &str,
-    device_code: &str,
-) -> Result<(u16, Value), OAuthError> {
-    let response = client
-        .post(endpoint)
-        .header("content-type", "application/x-www-form-urlencoded")
-        .form(&[
-            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-            ("client_id", CLIENT_ID),
-            ("device_code", device_code),
-        ])
-        .send()
-        .await
-        .map_err(|_| OAuthError::Transport)?;
-    let status = response.status().as_u16();
-    let body = crate::vendor::read_body_capped(response, crate::vendor::MAX_BODY_BYTES)
-        .await
-        .map_err(|_| OAuthError::Transport)?;
-    let value = serde_json::from_slice(&body).map_err(|_| OAuthError::Schema)?;
-    Ok((status, value))
 }
 
 pub async fn refresh_access_token(
@@ -297,145 +115,17 @@ pub async fn refresh_if_needed(
     Ok(replacement)
 }
 
-pub fn credential_from_token(
-    token: TokenResponse,
-    now: DateTime<Utc>,
-) -> Result<NousCredential, OAuthError> {
-    let credential = NousCredential {
-        client_id: CLIENT_ID.into(),
-        access_token: token.access_token,
-        refresh_token: token.refresh_token,
-        expires_at: token_expiration(now, token.expires_in)?,
-    };
-    credential.validate().map_err(|_| OAuthError::Schema)?;
-    Ok(credential)
-}
-
-pub fn persist_credential(
-    store: &CredentialStore,
-    credential: NousCredential,
-) -> Result<(), OAuthError> {
-    let lock = store.acquire_lock().map_err(|_| OAuthError::Credentials)?;
-    let mut document = store
-        .read_unlocked()
-        .map_err(|_| OAuthError::Credentials)?
-        .unwrap_or_else(|| CredentialDocument::new(None));
-    document.nous = Some(credential);
-    store
-        .write_locked(&lock, &document)
-        .map_err(|_| OAuthError::Credentials)
-}
-
 fn token_expiration(now: DateTime<Utc>, expires_in: u64) -> Result<DateTime<Utc>, OAuthError> {
     let seconds = i64::try_from(expires_in).map_err(|_| OAuthError::Schema)?;
     now.checked_add_signed(chrono::Duration::seconds(seconds))
         .ok_or(OAuthError::Schema)
 }
 
-fn is_safe_portal_url(url: &str) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return false;
-    };
-    parsed.scheme() == "https"
-        && parsed.host_str() == Some("portal.nousresearch.com")
-        && parsed.port_or_known_default() == Some(443)
-        && parsed.username().is_empty()
-        && parsed.password().is_none()
-}
-
-impl fmt::Display for PollState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::AuthorizationPending => "authorization_pending",
-            Self::SlowDown => "slow_down",
-            Self::Success => "success",
-            Self::AccessDenied => "access_denied",
-            Self::ExpiredToken => "expired_token",
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
-    use serde_json::json;
 
     use super::*;
-
-    #[tokio::test]
-    async fn device_request_uses_the_exact_portal_form_and_parses_response() {
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("POST", "/device")
-            .match_header(
-                "content-type",
-                mockito::Matcher::Regex("application/x-www-form-urlencoded.*".into()),
-            )
-            .match_body(mockito::Matcher::AllOf(vec![
-                mockito::Matcher::UrlEncoded("client_id".into(), "hermes-cli".into()),
-                mockito::Matcher::UrlEncoded("scope".into(), "inference:invoke".into()),
-            ]))
-            .with_status(200)
-            .with_body(r#"{"device_code":"test-device","user_code":"TEST","verification_uri":"https://portal.nousresearch.com/device","verification_uri_complete":"https://portal.nousresearch.com/device?user_code=TEST","expires_in":900,"interval":5}"#)
-            .create_async()
-            .await;
-        let endpoints = Endpoints {
-            device_code: format!("{}/device", server.url()),
-            token: format!("{}/token", server.url()),
-        };
-
-        let result = request_device_code(&reqwest::Client::new(), &endpoints)
-            .await
-            .unwrap();
-        assert_eq!(result.device_code, "test-device");
-        mock.assert_async().await;
-    }
-
-    #[test]
-    fn poll_state_classifies_pending_slowdown_success_denial_expiry_and_unknown_errors() {
-        assert_eq!(
-            classify_poll_response(400, &json!({"error":"authorization_pending"})).unwrap(),
-            PollState::AuthorizationPending
-        );
-        assert_eq!(
-            classify_poll_response(400, &json!({"error":"slow_down"})).unwrap(),
-            PollState::SlowDown
-        );
-        assert_eq!(
-            classify_poll_response(400, &json!({"error":"access_denied"})).unwrap(),
-            PollState::AccessDenied
-        );
-        assert_eq!(
-            classify_poll_response(400, &json!({"error":"expired_token"})).unwrap(),
-            PollState::ExpiredToken
-        );
-        assert_eq!(
-            classify_poll_response(
-                200,
-                &json!({"access_token":"test-a","refresh_token":"test-r","token_type":"Bearer","expires_in":3600})
-            )
-            .unwrap(),
-            PollState::Success
-        );
-        assert!(matches!(
-            classify_poll_response(400, &json!({"error":"made_up"})),
-            Err(OAuthError::UnknownOAuthError)
-        ));
-    }
-
-    #[test]
-    fn slow_down_adds_five_seconds_but_pending_keeps_the_authorized_interval() {
-        assert_eq!(
-            next_poll_interval(Duration::from_secs(5), PollState::AuthorizationPending),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            next_poll_interval(Duration::from_secs(5), PollState::SlowDown),
-            Duration::from_secs(10)
-        );
-    }
 
     #[test]
     fn refresh_threshold_is_exactly_120_seconds() {
@@ -477,50 +167,6 @@ mod tests {
         .unwrap();
         assert_eq!(token.access_token, "test-new-access");
         mock.assert_async().await;
-    }
-
-    #[test]
-    fn browser_open_failure_is_nonfatal_and_error_debug_is_redacted() {
-        struct FailingBrowser;
-        impl BrowserOpener for FailingBrowser {
-            fn open(&self, _url: &str) -> std::io::Result<()> {
-                Err(std::io::Error::other("test failure"))
-            }
-        }
-        assert!(!open_verification_url(
-            "https://portal.nousresearch.com/device",
-            &FailingBrowser
-        ));
-        let error = OAuthError::HttpStatus(401);
-        assert!(!format!("{error:?}").contains("test-access-token"));
-    }
-
-    #[test]
-    fn browser_opener_accepts_only_the_production_portal_origin() {
-        use std::cell::Cell;
-
-        struct RecordingBrowser(Cell<usize>);
-        impl BrowserOpener for RecordingBrowser {
-            fn open(&self, _url: &str) -> std::io::Result<()> {
-                self.0.set(self.0.get() + 1);
-                Ok(())
-            }
-        }
-
-        let browser = RecordingBrowser(Cell::new(0));
-        assert!(open_verification_url(
-            "https://portal.nousresearch.com/device?user_code=TEST",
-            &browser
-        ));
-        for unsafe_url in [
-            "https://portal.nousresearch.com.evil.test/device",
-            "https://evil.test/device&calc.exe",
-            "http://portal.nousresearch.com/device",
-            "https://user@portal.nousresearch.com/device",
-        ] {
-            assert!(!open_verification_url(unsafe_url, &browser));
-        }
-        assert_eq!(browser.0.get(), 1, "rejected URLs must never reach the OS");
     }
 
     #[test]

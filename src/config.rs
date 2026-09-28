@@ -21,7 +21,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use serde::{Deserialize, Serialize};
@@ -43,7 +42,10 @@ use crate::vendor::VendorId;
 pub struct Config {
     pub ui: UiConfig,
     pub tray: TrayConfig,
-    pub context: ContextConfig,
+    /// Retired terminal context monitor. Accepted and ignored so a config
+    /// written for an earlier release still loads.
+    #[serde(skip_serializing)]
+    pub context: Option<toml::Value>,
     pub anthropic: AnthropicConfig,
     pub anthropic_api: AnthropicApiConfig,
     pub openai: OpenAiConfig,
@@ -75,30 +77,18 @@ pub struct Config {
     pub custom: Vec<CustomProviderConfig>,
 }
 
-/// UI / dispatch preferences. Currently just `primary` — which vendor the
-/// widget shows when `--vendor` is omitted, and which TUI tab is selected
-/// at startup.
+/// UI preferences. Currently just `primary`: the report's primary entry.
+/// Keys from retired frontends (`overview_vendors`, `vendor_box`) are ignored.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct UiConfig {
     /// `None` → fall back to anthropic for backward compatibility.
     pub primary: Option<VendorId>,
-    /// Which vendors the Overview shows (the TUI's first tab and the macOS
-    /// menu-bar's top section), in this order. `None` → every enabled vendor,
-    /// in the canonical order.
-    pub overview_vendors: Option<Vec<VendorId>>,
-    /// Layout style for vendor navigation in the TUI: sidebar | navbar | none.
-    pub vendor_box: Option<VendorBoxStyle>,
-}
-
-impl UiConfig {
-    pub fn vendor_box(&self) -> VendorBoxStyle {
-        self.vendor_box.unwrap_or_default()
-    }
 }
 
 /// Tray preferences the host process needs before the WebView is up: shortcut,
-/// polling, updates, and the macOS menu-bar summary. Screen-only preferences
+/// polling, and the macOS menu-bar summary. The retired `updates` key is
+/// ignored. Screen-only preferences
 /// (theme, density, time format) live in the popover's own storage instead.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
@@ -109,8 +99,6 @@ pub struct TrayConfig {
     /// How often the tray re-reads every provider, in minutes: 1, 5 or 10.
     /// The footer's Refresh is always immediate. `None` → 5.
     pub refresh_minutes: Option<u64>,
-    /// What the tray does when a newer release is published.
-    pub updates: Option<UpdateMode>,
     /// macOS menu-bar presentation: `provider` (Omarchy-style) or `bars`.
     pub menu_bar_style: Option<String>,
     /// The last provider selected in the macOS menu bar. A missing entry falls
@@ -184,116 +172,6 @@ impl TrayConfig {
     pub fn refresh_minutes(&self) -> u64 {
         self.refresh_minutes.unwrap_or(DEFAULT_TRAY_REFRESH_MINUTES)
     }
-
-    pub fn updates(&self) -> UpdateMode {
-        self.updates.unwrap_or_default()
-    }
-}
-
-/// How the tray handles a newer release: install it unattended, show a
-/// banner with an Install button, or never check in the background.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum UpdateMode {
-    Auto,
-    #[default]
-    Notify,
-    Off,
-}
-
-impl UpdateMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Notify => "notify",
-            Self::Off => "off",
-        }
-    }
-
-    pub fn parse(text: &str) -> Option<Self> {
-        match text.trim().to_ascii_lowercase().as_str() {
-            "auto" => Some(Self::Auto),
-            "notify" => Some(Self::Notify),
-            "off" => Some(Self::Off),
-            _ => None,
-        }
-    }
-}
-
-/// Presentation style of the TUI vendor navigation box.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum VendorBoxStyle {
-    /// Vertical sidebar box on wide terminals; falls back to top navbar on narrow terminals.
-    #[default]
-    Sidebar,
-    /// Horizontal navbar strip above the dashboard detail panel.
-    Navbar,
-    /// Completely hide vendor navigation (dashboards expand to fill full width).
-    None,
-}
-
-/// Where the context view docks in the dashboard body. `v` cycles it while the
-/// overlay is open; the config value is what it opens with.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ContextLayout {
-    /// Takes the whole body, the way a vendor panel does.
-    #[default]
-    Full,
-    /// Beside the dashboard.
-    Split,
-    /// Below the dashboard.
-    Bottom,
-}
-
-impl ContextLayout {
-    pub fn next(self) -> Self {
-        match self {
-            ContextLayout::Full => ContextLayout::Split,
-            ContextLayout::Split => ContextLayout::Bottom,
-            ContextLayout::Bottom => ContextLayout::Full,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            ContextLayout::Full => "full",
-            ContextLayout::Split => "split",
-            ContextLayout::Bottom => "bottom",
-        }
-    }
-}
-
-/// Optional local Claude Code context-window monitor. This is deliberately
-/// separate from vendors: sessions are discovered from local transcripts and
-/// change while the TUI is running, whereas vendor tabs are config-declared
-/// account identities.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default)]
-pub struct ContextConfig {
-    /// Keep the filesystem scanner completely dormant unless explicitly
-    /// enabled. The `c` key and its footer hint are hidden while disabled.
-    pub enabled: bool,
-    /// Override Claude Code's normal `~/.claude/projects` transcript root.
-    pub projects_path: Option<PathBuf>,
-    /// Optional fallback denominator. When absent, sessions without an exact
-    /// model override show their input-token count without inventing a %.
-    pub context_window_tokens: Option<u64>,
-    /// Exact Claude model id -> context-window size. This takes precedence
-    /// over `context_window_tokens`, which keeps mixed 200K/1M histories safe.
-    pub model_context_window_tokens: BTreeMap<String, u64>,
-    /// Where the view opens: full | split | bottom.
-    pub layout: ContextLayout,
-}
-
-impl ContextConfig {
-    pub fn window_tokens_for(&self, model: Option<&str>) -> Option<u64> {
-        model
-            .and_then(|model| self.model_context_window_tokens.get(model).copied())
-            .filter(|tokens| *tokens > 0)
-            .or_else(|| self.context_window_tokens.filter(|tokens| *tokens > 0))
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -303,8 +181,8 @@ pub struct AnthropicConfig {
     /// Override the credentials file path (defaults to `~/.claude/.credentials.json`).
     /// This is the *default* account; extra subscriptions go in `accounts`.
     pub credentials_path: Option<PathBuf>,
-    /// Extra Anthropic accounts beyond the default, each selected on the CLI
-    /// with `--account <label>` (issue #14). Empty by default, so existing
+    /// Extra Anthropic accounts beyond the default, each its own report entry
+    /// (issue #14). Empty by default, so existing
     /// single-account configs are byte-for-byte unchanged.
     pub accounts: Vec<AnthropicAccount>,
     /// Directory to auto-discover extra accounts from, in Claude Code's own
@@ -344,7 +222,7 @@ impl Default for AnthropicConfig {
 
 /// One extra Anthropic account beyond the default (issue #14). The default
 /// account stays the singular `[anthropic] credentials_path`; each entry here
-/// is an additional subscription selected on the CLI with `--account <label>`.
+/// is an additional subscription with its own report entry.
 ///
 /// ```toml
 /// [[anthropic.accounts]]
@@ -353,8 +231,8 @@ impl Default for AnthropicConfig {
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AnthropicAccount {
-    /// Stable name used on the CLI (`--account <label>`) and as the cache
-    /// subdir (`~/.cache/ai-usagebar/anthropic/<label>`).
+    /// Stable account identity: the report entry id (`anthropic@<label>`) and
+    /// the cache subdir (`~/.cache/ai-usagebar/anthropic/<label>`).
     pub label: String,
     /// OAuth credentials file for this account (same JSON shape Claude Code
     /// writes). Token refreshes are written back here, so each account keeps
@@ -377,8 +255,8 @@ impl AnthropicAccount {
 impl AnthropicConfig {
     /// Every extra account: the explicit `[[anthropic.accounts]]` entries plus
     /// any auto-discovered under [`accounts_dir`](AnthropicConfig::accounts_dir).
-    /// Explicit entries take precedence on a label clash. This is what tabs and
-    /// `--account` enumerate, so a discovered account behaves exactly like a
+    /// Explicit entries take precedence on a label clash. This is what report
+    /// entries enumerate, so a discovered account behaves exactly like a
     /// hand-written one (own cache subdir, independent refresh).
     pub fn all_accounts(&self) -> Vec<AnthropicAccount> {
         let mut out = self.accounts.clone();
@@ -414,10 +292,8 @@ impl AnthropicConfig {
     /// `CLAUDE_CONFIG_DIR=<dir> claude` actually writes) and falls back to
     /// the file elsewhere — never a *different* account's item, since the
     /// hash is per-directory, so issue #15's cross-account concern doesn't
-    /// apply. Plus an `anthropic/<label>` cache subdir. Shared by the widget
-    /// (`--account`) and the TUI's per-account tab (#14, #17) so both resolve
-    /// accounts identically; the widget layers its `--cache-dir` override on
-    /// top of the cache returned here.
+    /// apply. Plus an `anthropic/<label>` cache subdir, so every consumer of an
+    /// account entry (#14, #17) resolves it identically.
     pub fn account_target(&self, label: &str) -> Result<(CredsTarget, Cache)> {
         let active = crate::anthropic::cli_account::home_claude_json()
             .ok()
@@ -542,128 +418,9 @@ fn discover_accounts(accounts_dir: &std::path::Path) -> Vec<AnthropicAccount> {
     found
 }
 
-/// Render a path with `$HOME` collapsed back to `~`, matching the style the docs
-/// and existing `[[anthropic.accounts]]` entries use. Pure so it's testable;
-/// paths outside home are returned verbatim.
-pub fn tildify(path: &Path, home: &Path) -> String {
-    path.strip_prefix(home)
-        .map(|rest| {
-            let rendered = rest.display().to_string();
-            // Config paths use the same portable `~/...` spelling on every
-            // platform. A Windows `~\...` would not be expanded by the loader.
-            #[cfg(windows)]
-            let rendered = rendered.replace('\\', "/");
-            format!("~/{rendered}")
-        })
-        .unwrap_or_else(|_| path.display().to_string())
-}
-
-/// Where a newly-registered account's credentials file lives by default: next
-/// to `config.toml`, under `accounts/<label>/.credentials.json`. Returns the
-/// absolute path (for `mkdir`) — tilde-render it with [`tildify`] for display
-/// and for the value written into config.
-pub fn default_account_credentials_path(config_path: &Path, label: &str) -> PathBuf {
-    let base = config_path.parent().unwrap_or_else(|| Path::new("."));
-    base.join("accounts").join(label).join(".credentials.json")
-}
-
-/// Append a `[[anthropic.accounts]]` entry to a parsed config document, in
-/// place. Pure over a `toml_edit` document so the validation, duplicate check,
-/// and formatting are testable without disk. Preserves the rest of the file
-/// (comments, key order, other sections) — only the new array-of-tables entry
-/// is added. Errors on an invalid label or a label that already exists.
-pub fn add_anthropic_account_to_doc(
-    doc: &mut toml_edit::DocumentMut,
-    label: &str,
-    credentials_path: &str,
-) -> Result<()> {
-    use toml_edit::{Item, Table, value};
-
-    validate_account_label(label)?;
-
-    let anthropic = doc
-        .entry("anthropic")
-        .or_insert_with(|| Item::Table(Table::new()));
-    let anthropic = anthropic
-        .as_table_mut()
-        .ok_or_else(|| AppError::Other("[anthropic] in config.toml is not a table".into()))?;
-
-    let accounts = anthropic
-        .entry("accounts")
-        .or_insert_with(|| Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
-    let accounts = accounts.as_array_of_tables_mut().ok_or_else(|| {
-        AppError::Other("[[anthropic.accounts]] in config.toml is not an array of tables".into())
-    })?;
-
-    let exists = accounts
-        .iter()
-        .any(|t| t.get("label").and_then(Item::as_str) == Some(label));
-    if exists {
-        return Err(AppError::Credentials(format!(
-            "anthropic account {label:?} already exists in config.toml"
-        )));
-    }
-
-    let mut table = Table::new();
-    table["label"] = value(label);
-    table["credentials_path"] = value(credentials_path);
-    accounts.push(table);
-    Ok(())
-}
-
-/// Where a newly-registered Codex account's `auth.json` lives by default:
-/// `~/.codex-<label>/auth.json`, the `CODEX_HOME` the docs have always
-/// suggested for a second login.
-pub fn default_codex_auth_path(home: &Path, label: &str) -> PathBuf {
-    home.join(format!(".codex-{label}")).join("auth.json")
-}
-
-/// Append a `[[openai.accounts]]` entry to a parsed config document, in place.
-/// The Codex counterpart of [`add_anthropic_account_to_doc`], with the same
-/// guarantees: only the new entry is added, and an invalid or duplicate label
-/// is an error.
-pub fn add_openai_account_to_doc(
-    doc: &mut toml_edit::DocumentMut,
-    label: &str,
-    codex_auth_path: &str,
-) -> Result<()> {
-    use toml_edit::{Item, Table, value};
-
-    validate_account_label_for("openai", label)?;
-
-    let openai = doc
-        .entry("openai")
-        .or_insert_with(|| Item::Table(Table::new()));
-    let openai = openai
-        .as_table_mut()
-        .ok_or_else(|| AppError::Other("[openai] in config.toml is not a table".into()))?;
-
-    let accounts = openai
-        .entry("accounts")
-        .or_insert_with(|| Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
-    let accounts = accounts.as_array_of_tables_mut().ok_or_else(|| {
-        AppError::Other("[[openai.accounts]] in config.toml is not an array of tables".into())
-    })?;
-
-    if accounts
-        .iter()
-        .any(|t| t.get("label").and_then(Item::as_str) == Some(label))
-    {
-        return Err(AppError::Credentials(format!(
-            "openai account {label:?} already exists in config.toml"
-        )));
-    }
-
-    let mut table = Table::new();
-    table["label"] = value(label);
-    table["codex_auth_path"] = value(codex_auth_path);
-    accounts.push(table);
-    Ok(())
-}
-
 /// Set or update a boolean field in a TOML section, preserving comments and
-/// formatting of unaffected nodes. Shared by the Settings overlay and
-/// [`enable_vendors_in`] so both writers shape `enabled = true` identically.
+/// formatting of unaffected nodes. Used by [`enable_vendors_in`] so every
+/// automatic enable shapes `enabled = true` identically.
 pub(crate) fn set_bool(
     doc: &mut toml_edit::DocumentMut,
     section: &str,
@@ -736,6 +493,7 @@ pub(crate) fn set_value(
 /// (`"notify"` stays a string, `5` stays an integer). The tray host is the
 /// only writer.
 pub fn set_tray_value(path: &Path, key: &str, value: Option<toml_edit::Value>) -> Result<()> {
+    let _edit = lock_config_document(path)?;
     let mut doc = read_config_document(path)?;
     let before = doc.to_string();
     set_value(&mut doc, "tray", key, value)?;
@@ -759,6 +517,7 @@ pub fn set_menu_bar_item_value(
             "invalid menu bar item setting: {key}"
         )));
     }
+    let _edit = lock_config_document(path)?;
     let mut doc = read_config_document(path)?;
     let before = doc.to_string();
     let tray = doc
@@ -811,6 +570,7 @@ pub fn set_notification_value(path: &Path, key: &str, value: toml_edit::Value) -
             )));
         }
     }
+    let _edit = lock_config_document(path)?;
     let mut doc = read_config_document(path)?;
     let before = doc.to_string();
     set_value(&mut doc, "notifications", key, Some(value))?;
@@ -818,6 +578,24 @@ pub fn set_notification_value(path: &Path, key: &str, value: toml_edit::Value) -
         return Ok(());
     }
     write_config_document(path, &doc)
+}
+
+/// Serialize the entire read/edit/write cycle across app processes. The lock
+/// lives beside the document: locking the config inode itself would stop
+/// protecting it after the atomic rename. Every config writer must hold this
+/// guard from before its first read until after its last write.
+pub(crate) fn lock_config_document(path: &Path) -> Result<crate::cache::LockGuard> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| AppError::Other("configuration path must name a file".into()))?;
+    let mut lock_name = std::ffi::OsString::from(".");
+    lock_name.push(file_name);
+    lock_name.push(".lock");
+    crate::cache::acquire_lock(
+        &path.with_file_name(lock_name),
+        std::time::Duration::from_secs(2),
+    )
+    .map_err(|_| AppError::Other("could not lock configuration for editing".into()))
 }
 
 /// Read `path` into a `toml_edit` document with comments intact. A missing
@@ -844,7 +622,6 @@ pub(crate) fn write_config_document(path: &Path, doc: &toml_edit::DocumentMut) -
     let bytes = doc.to_string();
     crate::cache::atomic_write(path, bytes.as_bytes())?;
 
-    #[cfg(unix)]
     {
         if let Ok(meta) = std::fs::metadata(path) {
             let mut perms = meta.permissions();
@@ -863,6 +640,7 @@ pub(crate) fn write_config_document(path: &Path, doc: &toml_edit::DocumentMut) -
 /// already enabled) is not rewritten, so an idempotent call doesn't touch the
 /// file's mtime or race a concurrent editor.
 pub fn enable_vendors_in(path: &Path, vendors: &[VendorId]) -> Result<Vec<VendorId>> {
+    let _edit = lock_config_document(path)?;
     let mut doc = read_config_document(path)?;
     let before = doc.to_string();
     let written: Vec<VendorId> = vendors
@@ -937,8 +715,8 @@ pub struct OpenAiConfig {
 /// `codex_auth_path` at the `auth.json` it writes.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct OpenAiAccount {
-    /// Stable name used on the CLI (`--account <label>`) and as the cache
-    /// subdir (`~/.cache/ai-usagebar/openai/<label>`).
+    /// Stable account identity: the report entry id (`openai@<label>`) and
+    /// the cache subdir (`~/.cache/ai-usagebar/openai/<label>`).
     pub label: String,
     /// Codex OAuth file for this account. Refreshed tokens are written back
     /// here, so each account keeps itself alive independently.
@@ -961,10 +739,7 @@ impl OpenAiConfig {
             .find(|account| account.label == label)
             .map(|account| account.codex_auth_path.clone())
             .ok_or_else(|| {
-                AppError::Credentials(format!(
-                    "no OpenAI account named {label:?}. Add it under \
-                     [[openai.accounts]], or drop --account to use the default login."
-                ))
+                AppError::Credentials(format!("no OpenAI account named {label:?} is configured"))
             })
     }
 
@@ -1069,8 +844,8 @@ pub struct OpenCodeGoConfig {
 /// Command Code reads the OAuth credential from the official CLI or pi, so it
 /// has no API key of its own. `auth_paths` overrides that search list for a
 /// non-standard install. It is enabled by default, like OpenAI/Codex; when no
-/// local credential exists the TUI reports that tab as unavailable instead of
-/// silently hiding the provider.
+/// local credential exists the report shows that entry as unavailable instead
+/// of silently hiding the provider.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CommandCodeConfig {
@@ -1527,7 +1302,7 @@ pub struct GrokbotConfig {
 }
 
 fn default_grok_binary() -> PathBuf {
-    let executable = if cfg!(windows) { "grok.exe" } else { "grok" };
+    let executable = "grok";
     let grok_home = std::env::var_os("GROK_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -1630,7 +1405,7 @@ impl Default for AnthropicApiConfig {
 /// type validates so much more than the others: a typo in `[deepseek]` hits a
 /// fixed endpoint and fails loudly, while a typo here quietly sends the user's
 /// key to the wrong host. The `id` doubles as the cache directory name and the
-/// `--vendor` selector, so it is held to the character class of the built-in
+/// report entry id, so it is held to the character class of the built-in
 /// slugs.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, remote = "Self")]
@@ -2033,7 +1808,6 @@ impl Config {
                 // silently pointed at a directory named `~`.
                 config.expand_paths();
                 config.validate()?;
-                #[cfg(unix)]
                 config.protect_inline_secrets(path)?;
                 // A custom provider's token variable is as secret as any
                 // built-in one; subprocesses (`gh`, `grok`, `claude`) must
@@ -2047,7 +1821,6 @@ impl Config {
     }
 
     fn expand_paths(&mut self) {
-        expand_tilde_opt(&mut self.context.projects_path);
         expand_tilde_opt(&mut self.anthropic.credentials_path);
         expand_tilde_opt(&mut self.anthropic.accounts_dir);
         expand_tilde_opt(&mut self.anthropic.desktop_profiles_dir);
@@ -2072,7 +1845,6 @@ impl Config {
     /// Explicitly enumerate every inline credential field. Adding a new
     /// credential vendor must add it here so its config receives the same
     /// protection.
-    #[cfg(unix)]
     fn has_inline_secrets(&self) -> bool {
         [
             self.zai.api_key.as_deref(),
@@ -2118,7 +1890,6 @@ impl Config {
         self.custom.iter().find(|c| c.id == id)
     }
 
-    #[cfg(unix)]
     fn protect_inline_secrets(&self, path: &Path) -> Result<()> {
         if !self.has_inline_secrets() {
             return Ok(());
@@ -2273,8 +2044,8 @@ impl Config {
     }
 
     /// Validate cross-entry constraints that serde cannot express. Account
-    /// labels are both CLI selectors and TUI tab identities, so duplicates
-    /// would make either destination ambiguous.
+    /// labels are report entry and cache identities, so duplicates would make
+    /// either ambiguous.
     pub fn validate(&self) -> Result<()> {
         if let Some(minutes) = self.tray.refresh_minutes
             && !TRAY_REFRESH_MINUTES.contains(&minutes)
@@ -2297,23 +2068,6 @@ impl Config {
                 "[notifications] threshold must be between 1 and 100, got {}",
                 self.notifications.threshold
             )));
-        }
-        if self.context.context_window_tokens == Some(0) {
-            return Err(AppError::Other(
-                "[context] context_window_tokens must be greater than zero".into(),
-            ));
-        }
-        for (model, tokens) in &self.context.model_context_window_tokens {
-            if model.trim().is_empty() {
-                return Err(AppError::Other(
-                    "[context] model_context_window_tokens keys must not be empty".into(),
-                ));
-            }
-            if *tokens == 0 {
-                return Err(AppError::Other(format!(
-                    "[context] model_context_window_tokens entry {model:?} must be greater than zero"
-                )));
-            }
         }
         if let Some(limit) = self.anthropic_api.monthly_limit
             && (!limit.is_finite() || limit <= 0.0)
@@ -2438,14 +2192,12 @@ impl Config {
     }
 }
 
-#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InlineKeyPermissionDecision {
     Ok,
     Tighten,
 }
 
-#[cfg(unix)]
 fn inline_key_permission_decision(mode: u32) -> InlineKeyPermissionDecision {
     if mode & 0o077 == 0 {
         InlineKeyPermissionDecision::Ok
@@ -2529,33 +2281,10 @@ fn override_path() -> Option<PathBuf> {
 /// argument is not in that form. Used by both binaries' argv pre-parsers.
 #[doc(hidden)]
 pub fn config_flag_value(arg: &std::ffi::OsStr) -> Option<PathBuf> {
-    #[cfg(unix)]
     {
         use std::os::unix::ffi::{OsStrExt, OsStringExt};
         let rest = arg.as_bytes().strip_prefix(b"--config=")?;
         Some(std::ffi::OsString::from_vec(rest.to_vec()).into())
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::{OsStrExt, OsStringExt};
-        const PREFIX: &[u16] = &[
-            b'-' as u16,
-            b'-' as u16,
-            b'c' as u16,
-            b'o' as u16,
-            b'n' as u16,
-            b'f' as u16,
-            b'i' as u16,
-            b'g' as u16,
-            b'=' as u16,
-        ];
-        let wide: Vec<u16> = arg.encode_wide().collect();
-        let rest = wide.strip_prefix(PREFIX)?;
-        Some(std::ffi::OsString::from_wide(rest).into())
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        Some(PathBuf::from(arg.to_str()?.strip_prefix("--config=")?))
     }
 }
 
@@ -2601,7 +2330,6 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    #[cfg(unix)]
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     fn write_toml(s: &str) -> NamedTempFile {
@@ -2675,7 +2403,8 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("nope"), "{err}");
-        assert!(err.contains("[[openai.accounts]]"), "{err}");
+        assert!(err.contains("no OpenAI account named"), "{err}");
+        assert!(!err.contains("--account"), "{err}");
     }
 
     fn two_codex_accounts() -> OpenAiConfig {
@@ -2724,21 +2453,6 @@ mod tests {
     }
 
     #[test]
-    fn adding_an_openai_account_keeps_the_rest_of_the_file() {
-        let mut doc: toml_edit::DocumentMut = "# mine\n[zai]\nenabled = true\n".parse().unwrap();
-        add_openai_account_to_doc(&mut doc, "work", "~/.codex-work/auth.json").unwrap();
-        let text = doc.to_string();
-        assert!(
-            text.starts_with("# mine\n[zai]\nenabled = true\n"),
-            "{text}"
-        );
-        let parsed: Config = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.openai.accounts[0].label, "work");
-        assert!(add_openai_account_to_doc(&mut doc, "work", "x").is_err());
-        assert!(add_openai_account_to_doc(&mut doc, "../x", "x").is_err());
-    }
-
-    #[test]
     fn defaults_enable_only_the_five_core_vendors() {
         let c = Config::default();
         assert!(c.is_enabled(VendorId::Anthropic));
@@ -2778,7 +2492,6 @@ mod tests {
         assert!(!config.is_enabled(VendorId::Copilot));
     }
 
-    #[cfg(unix)]
     #[test]
     fn inline_credentials_are_protected() {
         let mut config = Config::default();
@@ -2815,7 +2528,6 @@ enabled = true
         assert!(bare.antigravity.oauth_client_secret.is_none());
     }
 
-    #[cfg(unix)]
     #[test]
     fn antigravity_inline_oauth_secret_receives_config_file_protection() {
         let mut config = Config::default();
@@ -2825,7 +2537,6 @@ enabled = true
         assert!(config.has_inline_secrets());
     }
 
-    #[cfg(unix)]
     #[test]
     fn openrouter_named_inline_keys_receive_config_file_protection() {
         let mut config = Config::default();
@@ -2896,7 +2607,6 @@ enabled = false
         assert!(Config::load_from(f.path()).is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn load_from_tightens_world_readable_config_with_inline_api_key() {
         let file = write_toml("[zai]\napi_key = \"test-inline-key\"\n");
@@ -2910,7 +2620,6 @@ enabled = false
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn load_from_leaves_world_readable_config_without_inline_api_keys_unchanged() {
         let file = write_toml("[zai]\napi_key_env = \"TEST_ZAI_API_KEY\"\n");
@@ -2924,7 +2633,6 @@ enabled = false
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn inline_key_permission_decision_requires_tightening_for_group_or_other_bits() {
         assert_eq!(
@@ -3207,94 +2915,6 @@ enabled = false
         );
     }
 
-    #[test]
-    fn context_monitor_is_opt_in_and_window_sizes_are_explicit() {
-        let defaults = Config::default();
-        assert!(!defaults.context.enabled);
-        assert_eq!(
-            defaults.context.window_tokens_for(Some("claude-test")),
-            None
-        );
-
-        let file = write_toml(
-            r#"
-            [context]
-            enabled = true
-            context_window_tokens = 200000
-
-            [context.model_context_window_tokens]
-            claude-opus-1m = 1000000
-            "claude exact id" = 300000
-            "#,
-        );
-        let config = Config::load_from(file.path()).unwrap();
-        assert!(config.context.enabled);
-        assert_eq!(
-            config.context.window_tokens_for(Some("claude-opus-1m")),
-            Some(1_000_000)
-        );
-        assert_eq!(
-            config.context.window_tokens_for(Some("claude exact id")),
-            Some(300_000)
-        );
-        assert_eq!(
-            config.context.window_tokens_for(Some("another-model")),
-            Some(200_000)
-        );
-    }
-
-    #[test]
-    fn context_layout_defaults_to_full_and_parses_each_variant() {
-        assert_eq!(Config::default().context.layout, ContextLayout::Full);
-        for (text, want) in [
-            ("full", ContextLayout::Full),
-            ("split", ContextLayout::Split),
-            ("bottom", ContextLayout::Bottom),
-        ] {
-            let file = write_toml(&format!("[context]\nlayout = \"{text}\"\n"));
-            assert_eq!(Config::load_from(file.path()).unwrap().context.layout, want);
-        }
-        let file = write_toml("[context]\nlayout = \"floating\"\n");
-        assert!(
-            Config::load_from(file.path()).is_err(),
-            "an unknown layout must be rejected, not silently defaulted"
-        );
-    }
-
-    #[test]
-    fn vendor_box_defaults_to_sidebar_and_parses_each_variant() {
-        assert_eq!(Config::default().ui.vendor_box(), VendorBoxStyle::Sidebar);
-        for (text, want) in [
-            ("sidebar", VendorBoxStyle::Sidebar),
-            ("navbar", VendorBoxStyle::Navbar),
-            ("none", VendorBoxStyle::None),
-        ] {
-            let file = write_toml(&format!("[ui]\nvendor_box = \"{text}\"\n"));
-            assert_eq!(
-                Config::load_from(file.path()).unwrap().ui.vendor_box(),
-                want
-            );
-        }
-        let file = write_toml("[ui]\nvendor_box = \"floating\"\n");
-        assert!(
-            Config::load_from(file.path()).is_err(),
-            "an unknown vendor_box style must be rejected, not silently defaulted"
-        );
-    }
-
-    #[test]
-    fn context_window_sizes_must_be_nonzero_and_model_ids_nonempty() {
-        for source in [
-            "[context]\ncontext_window_tokens = 0\n",
-            "[context.model_context_window_tokens]\nclaude = 0\n",
-            "[context.model_context_window_tokens]\n\" \" = 200000\n",
-        ] {
-            let file = write_toml(source);
-            let error = Config::load_from(file.path()).unwrap_err().to_string();
-            assert!(error.contains("context"), "{error}");
-        }
-    }
-
     // serial guard for env-var manipulation tests so they don't race
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         static M: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -3361,7 +2981,7 @@ enabled = false
             .resolve_token_with(|_| None, &FailedGh)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("gh auth login --web"));
+        assert!(error.contains("cannot do"));
         assert!(!error.contains("never-echo-gh-output"));
     }
 
@@ -3485,7 +3105,6 @@ enabled = false
     /// The `--config=PATH` form must preserve a path the platform can store
     /// but UTF-8 cannot represent — `to_string_lossy` would replace the bad
     /// bytes with U+FFFD and produce a false "config file not found".
-    #[cfg(unix)]
     #[test]
     fn config_flag_value_keeps_undecodable_bytes_intact() {
         use std::ffi::OsString;
@@ -3493,24 +3112,6 @@ enabled = false
         let raw = OsString::from_vec(b"--config=caf\xe9.toml".to_vec());
         let value = config_flag_value(&raw).expect("prefix matches");
         assert_eq!(value.as_os_str().as_bytes(), b"caf\xe9.toml");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn config_flag_value_keeps_lone_surrogates_intact() {
-        use std::ffi::OsString;
-        use std::os::windows::ffi::{OsStrExt, OsStringExt};
-        let mut wide: Vec<u16> = "--config=".encode_utf16().collect();
-        wide.push(0xDC00); // lone low surrogate: not valid Unicode
-        wide.extend("x.toml".encode_utf16());
-        let raw = OsString::from_wide(&wide);
-        let value = config_flag_value(&raw).expect("prefix matches");
-        let mut expected = vec![0xDC00u16];
-        expected.extend("x.toml".encode_utf16());
-        assert_eq!(
-            value.as_os_str().encode_wide().collect::<Vec<_>>(),
-            expected
-        );
     }
 
     #[test]
@@ -3743,9 +3344,6 @@ enabled = false
         // `~` relative to the process's cwd.
         let f = write_toml(
             r#"
-            [context]
-            projects_path = "~/.claude/projects"
-
             [anthropic]
             credentials_path = "~/.claude/.credentials.json"
 
@@ -3757,7 +3355,6 @@ enabled = false
         let c = Config::load_from(f.path()).unwrap();
         let home = crate::cache::home_dir().unwrap();
 
-        assert_eq!(c.context.projects_path, Some(home.join(".claude/projects")));
         let got = c.anthropic.credentials_path.unwrap();
         assert_eq!(got, home.join(".claude/.credentials.json"));
         assert!(!got.to_string_lossy().contains('~'));
@@ -4194,7 +3791,6 @@ enabled = false
         // unnoticed, and `deny_unknown_fields` would reject the copy on the
         // user's machine instead of in CI.
         let c = Config::load_from(&config_example()).unwrap();
-        assert!(!c.context.enabled);
         assert!(c.is_enabled(VendorId::Anthropic));
         assert!(c.is_enabled(VendorId::Openai));
         assert!(!c.is_enabled(VendorId::AnthropicApi));
@@ -4280,7 +3876,7 @@ enabled = false
                 .grok_binary
                 .file_name()
                 .and_then(|p| p.to_str()),
-            Some(if cfg!(windows) { "grok.exe" } else { "grok" })
+            Some("grok")
         );
         assert!(cfg.supergrok.auth_path.is_none());
         assert!(cfg.supergrok.config_path.is_none());
@@ -4392,86 +3988,6 @@ enabled = false
         assert!(c.enabled_vendors().contains(&VendorId::Cursor));
     }
 
-    #[test]
-    fn add_account_appends_and_preserves_existing() {
-        let mut doc: toml_edit::DocumentMut = r#"
-# keep me
-[anthropic]
-enabled = true
-
-[[anthropic.accounts]]
-label = "personal"
-credentials_path = "~/.config/ai-usagebar/accounts/personal/.credentials.json"
-"#
-        .parse()
-        .unwrap();
-        add_anthropic_account_to_doc(
-            &mut doc,
-            "work",
-            "~/.config/ai-usagebar/accounts/work/.credentials.json",
-        )
-        .unwrap();
-        let rendered = doc.to_string();
-        assert!(rendered.contains("# keep me"), "comment must survive");
-        // Round-trips through the real loader with both accounts intact and ordered.
-        let f = write_toml(&rendered);
-        let c = Config::load_from(f.path()).unwrap();
-        let labels: Vec<&str> = c
-            .anthropic
-            .accounts
-            .iter()
-            .map(|a| a.label.as_str())
-            .collect();
-        assert_eq!(labels, vec!["personal", "work"]);
-    }
-
-    #[test]
-    fn add_account_to_empty_doc_is_loadable() {
-        let mut doc = toml_edit::DocumentMut::new();
-        add_anthropic_account_to_doc(&mut doc, "solo", "~/x/.credentials.json").unwrap();
-        let f = write_toml(&doc.to_string());
-        let c = Config::load_from(f.path()).unwrap();
-        assert_eq!(c.anthropic.accounts.len(), 1);
-        assert_eq!(c.anthropic.accounts[0].label, "solo");
-    }
-
-    #[test]
-    fn add_account_rejects_duplicate_label() {
-        let mut doc: toml_edit::DocumentMut = r#"
-[[anthropic.accounts]]
-label = "work"
-credentials_path = "~/w/.credentials.json"
-"#
-        .parse()
-        .unwrap();
-        assert!(
-            add_anthropic_account_to_doc(&mut doc, "work", "~/other/.credentials.json").is_err(),
-            "a duplicate label must be rejected, not appended"
-        );
-    }
-
-    #[test]
-    fn add_account_rejects_bad_label() {
-        let mut doc = toml_edit::DocumentMut::new();
-        assert!(add_anthropic_account_to_doc(&mut doc, "a/b", "~/x/.credentials.json").is_err());
-        assert!(add_anthropic_account_to_doc(&mut doc, "", "~/x/.credentials.json").is_err());
-    }
-
-    #[test]
-    fn tildify_collapses_home_only() {
-        let home = Path::new("/Users/me");
-        assert_eq!(tildify(&home.join("a/b"), home), "~/a/b");
-        assert_eq!(tildify(Path::new("/etc/hosts"), home), "/etc/hosts");
-    }
-
-    #[test]
-    fn default_account_credentials_path_nests_under_config_dir() {
-        let cfg = Path::new("/home/u/.config/ai-usagebar/config.toml");
-        assert_eq!(
-            default_account_credentials_path(cfg, "work"),
-            Path::new("/home/u/.config/ai-usagebar/accounts/work/.credentials.json"),
-        );
-    }
     // ----- [[custom]] providers -----
 
     const CUSTOM_BLOCK: &str = r#"
@@ -4884,7 +4400,6 @@ url = "https://example.test/u"
         assert!(config.custom_by_id("nope").is_none());
     }
 
-    #[cfg(unix)]
     #[test]
     fn has_inline_secrets_sees_a_custom_inline_key() {
         let without: Config = toml::from_str(CUSTOM_BLOCK).unwrap();
@@ -4969,24 +4484,39 @@ enabled = true
     }
 
     #[test]
-    fn tray_section_parses_and_defaults_to_notify() {
-        let file = write_toml("[tray]\nshortcut = \"Ctrl+Shift+U\"\nupdates = \"auto\"\n");
+    fn tray_section_parses_and_defaults_to_empty() {
+        let file = write_toml("[tray]\nshortcut = \"Ctrl+Shift+U\"\n");
         let config = Config::load_from(file.path()).unwrap();
         assert_eq!(config.tray.shortcut.as_deref(), Some("Ctrl+Shift+U"));
-        assert_eq!(config.tray.updates(), UpdateMode::Auto);
 
         let empty = Config::load_from(write_toml("[ui]\n").path()).unwrap();
         assert_eq!(empty.tray, TrayConfig::default());
-        assert_eq!(empty.tray.updates(), UpdateMode::Notify);
-        assert_eq!(UpdateMode::parse(" Off "), Some(UpdateMode::Off));
-        assert_eq!(UpdateMode::parse("weekly"), None);
-        assert_eq!(UpdateMode::Auto.as_str(), "auto");
     }
 
+    /// Keys and sections written by retired frontends (the release updater,
+    /// the terminal UI and its context monitor) must not stop an existing
+    /// config from loading, whatever value they hold.
     #[test]
-    fn tray_section_rejects_a_misspelled_mode() {
-        let file = write_toml("[tray]\nupdates = \"sometimes\"\n");
-        assert!(Config::load_from(file.path()).is_err());
+    fn keys_from_retired_frontends_still_load() {
+        let file = write_toml(
+            r#"
+            [ui]
+            primary = "zai"
+            overview_vendors = ["zai"]
+            vendor_box = "floating"
+
+            [tray]
+            updates = "sometimes"
+            refresh_minutes = 10
+
+            [context]
+            enabled = true
+            layout = "floating"
+            "#,
+        );
+        let config = Config::load_from(file.path()).unwrap();
+        assert_eq!(config.ui.primary, Some(VendorId::Zai));
+        assert_eq!(config.tray.refresh_minutes(), 10);
     }
 
     #[test]
@@ -5057,6 +4587,78 @@ enabled = true
     }
 
     #[test]
+    fn every_config_writer_refuses_to_overwrite_an_edit_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "# preserve\n[tray]\nrefresh_minutes = 5\n";
+        std::fs::write(&path, original).unwrap();
+        let _edit = lock_config_document(&path).unwrap();
+
+        // Each production entry point runs with the same document held by a
+        // different file descriptor. No scheduling delay or real user path
+        // is involved; the lock stays held until every call has returned.
+        std::thread::scope(|scope| {
+            let jobs: Vec<_> = (0..4)
+                .map(|writer| {
+                    let path = &path;
+                    scope.spawn(move || {
+                        let result = match writer {
+                            0 => set_tray_value(path, "refresh_minutes", Some(10i64.into())),
+                            1 => {
+                                set_menu_bar_item_value(path, "openai", "hidden", Some(true.into()))
+                            }
+                            2 => set_notification_value(path, "enabled", false.into()),
+                            3 => enable_vendors_in(path, &[VendorId::Openrouter]).map(|_| ()),
+                            _ => unreachable!(),
+                        };
+                        assert!(result.is_err(), "writer {writer} ignored the edit lock");
+                    })
+                })
+                .collect();
+            for job in jobs {
+                job.join().unwrap();
+            }
+        });
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn a_waiting_config_writer_preserves_the_edit_committed_before_unlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "# keep\n[tray]\nrefresh_minutes = 5\n").unwrap();
+        let edit = lock_config_document(&path).unwrap();
+        let (starting, started) = std::sync::mpsc::sync_channel(0);
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                starting.send(()).unwrap();
+                set_notification_value(&path, "enabled", false.into()).unwrap();
+            });
+            started.recv().unwrap();
+            let mut doc = read_config_document(&path).unwrap();
+            set_value(&mut doc, "tray", "refresh_minutes", Some(10i64.into())).unwrap();
+            write_config_document(&path, &doc).unwrap();
+            drop(edit);
+            writer.join().unwrap();
+        });
+        let saved = Config::load_from(&path).unwrap();
+        assert_eq!(saved.tray.refresh_minutes(), 10);
+        assert!(!saved.notifications.enabled);
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .starts_with("# keep\n")
+        );
+    }
+
+    #[test]
+    fn config_locks_do_not_block_other_documents_in_the_same_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let _first = lock_config_document(&dir.path().join("first.toml")).unwrap();
+        let _second = lock_config_document(&dir.path().join("second.toml")).unwrap();
+    }
+
+    #[test]
     fn set_tray_value_writes_refresh_minutes_as_an_integer() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -5086,15 +4688,15 @@ enabled = true
         );
 
         set_tray_value(&path, "shortcut", Some("Alt+F5".into())).unwrap();
-        set_tray_value(&path, "updates", Some("off".into())).unwrap();
+        set_tray_value(&path, "menu_bar_style", Some("bars".into())).unwrap();
         let config = Config::load_from(&path).unwrap();
         assert_eq!(config.tray.shortcut.as_deref(), Some("Alt+F5"));
-        assert_eq!(config.tray.updates(), UpdateMode::Off);
+        assert_eq!(config.tray.menu_bar_style.as_deref(), Some("bars"));
 
         set_tray_value(&path, "shortcut", None).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("shortcut"), "{text}");
-        assert!(text.contains("updates = \"off\""), "{text}");
+        assert!(text.contains("menu_bar_style = \"bars\""), "{text}");
 
         // Idempotent removal does not rewrite the file.
         let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
@@ -5241,8 +4843,8 @@ api_key = \"k\"
         std::fs::write(&path, original).unwrap();
 
         // `enabled = false` in the file is the user having said no. Only the
-        // automatic path goes through here — the Settings overlay writes with
-        // `set_bool` — so nothing a person does by hand is blocked by this.
+        // automatic path goes through here, so nothing a person writes in the
+        // file by hand is overridden.
         let written = enable_vendors_in(&path, &[VendorId::Grok]).unwrap();
 
         assert!(written.is_empty(), "{written:?}");

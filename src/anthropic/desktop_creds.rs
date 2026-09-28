@@ -27,7 +27,6 @@
 use std::path::PathBuf;
 
 use serde_json::Value;
-#[cfg(any(target_os = "macos", test))]
 use sha1::{Digest, Sha1};
 
 use crate::error::{AppError, Result};
@@ -44,7 +43,6 @@ const CONFIG_KEYS: [&str; 2] = ["oauth:tokenCacheV2", "oauth:tokenCache"];
 const SNAPSHOT_FILES: [&str; 2] = ["config-tokenCacheV2", "config-tokenCache"];
 
 /// Where a Desktop token blob lives.
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BlobSource {
     /// The live `config.json`; the blob is a string value under one of
@@ -84,7 +82,6 @@ pub struct Writeback {
 /// Shared by the TUI and the widget so both surface the same accounts. macOS
 /// only — the Desktop token store and its Keychain key exist nowhere else, and
 /// such accounts are never enumerated off-Mac.
-#[cfg(target_os = "macos")]
 pub fn account_target(
     config: &crate::config::Config,
     label: &str,
@@ -114,22 +111,11 @@ pub fn account_target(
     Ok((super::creds::CredsTarget::Desktop(source), cache))
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn account_target(
-    _config: &crate::config::Config,
-    label: &str,
-) -> Result<(super::creds::CredsTarget, crate::cache::Cache)> {
-    Err(AppError::Other(format!(
-        "Claude Desktop accounts are macOS-only (requested {label:?})"
-    )))
-}
-
 /// Build the credential source for a saved Desktop profile, applying the
 /// refresh-safety policy. The *active* account (the one `config.json` currently
 /// points at) is read from the live `config.json` and is always read-only.
 /// Every other account is read from its own refreshable snapshot. Pure: the
 /// key is injected, so it is testable without a Keychain.
-#[cfg(any(target_os = "macos", test))]
 pub(crate) fn source_for(
     config_json: &std::path::Path,
     profile_dir: &std::path::Path,
@@ -155,7 +141,6 @@ pub(crate) fn source_for(
 
 /// Stable, path-safe cache identity. SHA-1 is already required by Chromium's
 /// PBKDF2 format here; this use is namespacing, not a security signature.
-#[cfg(any(target_os = "macos", test))]
 fn desktop_cache_key(account_uuid: &str) -> String {
     let digest = Sha1::digest(account_uuid.as_bytes());
     let mut encoded = String::with_capacity(digest.len() * 2);
@@ -168,7 +153,6 @@ fn desktop_cache_key(account_uuid: &str) -> String {
 }
 
 impl DesktopCreds {
-    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn with_coordination_lock(mut self, path: PathBuf) -> Self {
         self.coordination_lock = Some(path);
         self

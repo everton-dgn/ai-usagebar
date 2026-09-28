@@ -41,7 +41,7 @@ use serde_json::{Value, json};
 use crate::cache::LockGuard;
 use crate::config::OpenAiAccount;
 use crate::display::sanitize_untrusted_path;
-use crate::error::{AppError, Result};
+use crate::error::{AccountFailure, AppError, Result};
 
 /// Suffix of the identity marker kept beside each named account's credential
 /// file: `auth.json` gets `.auth.json.ai-usagebar-account.json`.
@@ -225,7 +225,8 @@ pub fn switch_account(
         [Some(default_path), Some(target_path), outgoing_path]
             .into_iter()
             .flatten(),
-    )?;
+    )
+    .map_err(|error| error.for_account(AccountFailure::LockUnavailable))?;
 
     // Decide again under the locks: a refresh or another switch may have
     // changed the files since the first look.
@@ -265,6 +266,7 @@ pub fn switch_account(
                 "{error}; these files could not be restored and need attention: {}",
                 failures.join("; ")
             ))
+            .for_account(AccountFailure::RecoveryRequired)
         });
     }
     Ok(SwitchOutcome::Switched {
@@ -278,7 +280,8 @@ fn decide<'a>(
     label: &str,
     force: bool,
 ) -> Result<Decision<'a>> {
-    validate_layout(default_path, accounts)?;
+    validate_layout(default_path, accounts)
+        .map_err(|error| error.for_account(AccountFailure::InvalidState))?;
     let target = find(accounts, label)?;
     let active = resolve_active_label(default_path, accounts);
     let default_blob = read_optional(default_path)?;
@@ -290,30 +293,32 @@ fn decide<'a>(
                  them before switching, so one account never has two live copies",
                 sanitize_untrusted_path(default_path),
                 sanitize_untrusted_path(&target.codex_auth_path)
-            )));
+            ))
+            .for_account(AccountFailure::InvalidState));
         }
         return Ok(Decision::AlreadyActive);
     }
     if active.is_none() && default_blob.is_some() && !force {
         return Err(AppError::Credentials(format!(
             "the Codex login in {} is not managed here, so switching to {label:?} would \
-             overwrite a login that cannot be saved first. Register it with \
-             `ai-usagebar account add <label> --codex --adopt-current`, or pass --force to \
-             discard it.",
+             overwrite a login that cannot be saved first.",
             sanitize_untrusted_path(default_path)
-        )));
+        ))
+        .for_account(AccountFailure::UnmanagedLogin));
     }
 
     let target_blob = read_optional(&target.codex_auth_path)?.ok_or_else(|| {
         AppError::Credentials(format!(
-            "no stored Codex login for {label:?}; sign it in once with `CODEX_HOME={} codex login`",
+            "no stored Codex login for {label:?} in {}; sign in to Codex for that account first",
             sanitize_untrusted_path(parent_of(&target.codex_auth_path))
         ))
+        .for_account(AccountFailure::MissingLogin)
     })?;
     let target_id = account_id_of(&target_blob).ok_or_else(|| {
         AppError::Credentials(format!(
             "the Codex login stored for {label:?} has no account id; sign it in again"
         ))
+        .for_account(AccountFailure::InvalidState)
     })?;
     let outgoing = active
         .as_deref()
@@ -326,7 +331,8 @@ fn decide<'a>(
              switching, so saving it back cannot overwrite a separate login",
             account.label,
             sanitize_untrusted_path(&account.codex_auth_path)
-        )));
+        ))
+        .for_account(AccountFailure::InvalidState));
     }
     Ok(Decision::Move(Plan {
         target,
@@ -405,7 +411,7 @@ pub fn adopt_current(
     validate_layout(default_path, accounts)?;
     let live = account_id_in(default_path).ok_or_else(|| {
         AppError::Credentials(format!(
-            "no Codex login with an account id at {}; run `codex login` first",
+            "no Codex login with an account id at {}; sign in to Codex first",
             sanitize_untrusted_path(default_path)
         ))
     })?;
@@ -531,17 +537,11 @@ impl Journal {
     }
 }
 
-#[cfg(unix)]
 fn restrict_dir(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
         .map_err(|error| AppError::io_at(path, error))
-}
-
-#[cfg(not(unix))]
-fn restrict_dir(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -794,7 +794,7 @@ mod tests {
         fx.adopt_main();
         std::fs::remove_file(&fx.accounts[1].codex_auth_path).unwrap();
         let error = fx.switch("work").unwrap_err();
-        assert!(error.to_string().contains("codex login"), "{error}");
+        assert!(error.to_string().contains("sign in to Codex"), "{error}");
         assert_eq!(Fixture::refresh_token_at(&fx.default), "rt-main");
     }
 
@@ -849,7 +849,6 @@ mod tests {
         assert_eq!(resolve_active_label(&fx.default, &fx.accounts), None);
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_symlinked_credential_file_is_refused() {
         let fx = Fixture::new();
@@ -861,7 +860,6 @@ mod tests {
         assert!(error.to_string().contains("symlink"), "{error}");
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_rollback_reports_what_it_could_not_restore_and_restores_the_rest() {
         use std::os::unix::fs::PermissionsExt;

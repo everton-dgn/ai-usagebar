@@ -377,23 +377,15 @@ fn delete_raw_service(service: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(target_os = "macos")]
     use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
-    #[cfg(target_os = "macos")]
     use security_framework::os::macos::keychain::SecKeychain;
-    #[cfg(target_os = "macos")]
     use std::panic::{AssertUnwindSafe, catch_unwind};
-    #[cfg(target_os = "macos")]
     use std::sync::atomic::{AtomicU64, Ordering};
-    #[cfg(target_os = "macos")]
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[cfg(target_os = "macos")]
     const TEST_ACCOUNT: &str = "alice";
-    #[cfg(target_os = "macos")]
     const ERR_SEC_ITEM_NOT_FOUND_OSSTATUS: i32 = -25300;
 
-    #[cfg(target_os = "macos")]
     fn unique_test_service(test_name: &str) -> String {
         static NONCE: AtomicU64 = AtomicU64::new(0);
         let timestamp = SystemTime::now()
@@ -407,7 +399,6 @@ mod tests {
         )
     }
 
-    #[cfg(target_os = "macos")]
     fn matching_item_count(service: &str, account: &str) -> usize {
         let keychain = SecKeychain::default().expect("default Keychain");
         let result = ItemSearchOptions::new()
@@ -426,7 +417,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn delete_test_item(service: &str, account: &str) -> std::io::Result<()> {
         let out = Command::new("/usr/bin/security")
             .args(["delete-generic-password", "-a", account, "-s", service])
@@ -441,14 +431,12 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     struct KeychainTestCleanup {
         service: String,
         account: &'static str,
         armed: bool,
     }
 
-    #[cfg(target_os = "macos")]
     impl KeychainTestCleanup {
         fn new(service: String) -> Self {
             Self {
@@ -467,7 +455,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     impl Drop for KeychainTestCleanup {
         fn drop(&mut self) {
             if self.armed {
@@ -476,7 +463,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn write_test_item(service: &str, blob: &str) {
         assert!(
             matches!(
@@ -488,7 +474,6 @@ mod tests {
         write_raw_service_as(service, TEST_ACCOUNT, blob).expect("write synthetic Keychain item");
     }
 
-    #[cfg(target_os = "macos")]
     fn read_test_item_through_security(service: &str) -> Vec<u8> {
         let out = Command::new("/usr/bin/security")
             .args([
@@ -542,7 +527,6 @@ mod tests {
     /// concurrent Keychain change (another test cleaning up, the menu bar
     /// refreshing) can make one enumeration exit non-zero or come back short,
     /// so only the presence of our item counts and the dump is retried.
-    #[cfg(target_os = "macos")]
     fn partition_list_through_security(service: &str) -> String {
         let keychain = default_keychain_path();
         let needle = format!("\"svce\"<blob>=\"{service}\"");
@@ -586,7 +570,6 @@ mod tests {
 
     /// Where `security add-generic-password` puts an item when no keychain is
     /// named: the user's default keychain (normally login.keychain-db).
-    #[cfg(target_os = "macos")]
     fn default_keychain_path() -> String {
         let out = Command::new("/usr/bin/security")
             .args(["default-keychain", "-d", "user"])
@@ -706,7 +689,6 @@ mod tests {
     /// partition list was never re-stamped with our cdhash).
     #[test]
     #[ignore = "writes to the real login Keychain"]
-    #[cfg(target_os = "macos")]
     fn keychain_round_trip_keeps_one_item_readable_by_security() {
         let service = unique_test_service("round-trip");
         let mut cleanup = KeychainTestCleanup::new(service.clone());
@@ -736,7 +718,6 @@ mod tests {
 
     #[test]
     #[ignore = "writes to the real login Keychain"]
-    #[cfg(target_os = "macos")]
     fn keychain_round_trip_cleanup_guard_runs_during_panic() {
         let service = unique_test_service("panic-cleanup");
         let unwind = catch_unwind(AssertUnwindSafe({
@@ -797,7 +778,6 @@ mod tests {
     /// `cdhash:` — so no later read can raise the XARA dialog.
     #[test]
     #[ignore = "writes to the real login Keychain"]
-    #[cfg(target_os = "macos")]
     fn keychain_oversized_blob_round_trips_via_argv_and_keeps_apple_tool_partition() {
         let service = unique_test_service("oversized");
         let mut cleanup = KeychainTestCleanup::new(service.clone());

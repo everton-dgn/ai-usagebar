@@ -241,44 +241,6 @@ fn decode_blob_bytes(bytes: &[u8]) -> Option<String> {
     }
 }
 
-#[cfg(windows)]
-fn read_platform() -> Option<String> {
-    use windows_sys::Win32::Security::Credentials::{
-        CRED_TYPE_GENERIC, CREDENTIALW, CredFree, CredReadW,
-    };
-
-    let target: Vec<u16> = format!("{KEYRING_SERVICE}:{KEYRING_ACCOUNT}")
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
-    // SAFETY: `target` is a NUL-terminated UTF-16 string that outlives the
-    // call; `credential` is a local out-slot the API fills on success.
-    let ok = unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) };
-    // `ERROR_NOT_FOUND` is the expected "never signed in" case; any other
-    // failure (locked store, denied access) is treated the same way rather
-    // than failing the vendor on a keyring hiccup.
-    if ok == 0 || credential.is_null() {
-        return None;
-    }
-    // SAFETY: `CredReadW` succeeded, so `credential` points at a CREDENTIALW
-    // owned by the API that stays valid until `CredFree`. The blob pointer
-    // and size describe one allocation of exactly `CredentialBlobSize` bytes.
-    let bytes = unsafe {
-        let cred = &*credential;
-        let len = cred.CredentialBlobSize as usize;
-        if cred.CredentialBlob.is_null() || len == 0 || len > MAX_BLOB_BYTES {
-            Vec::new()
-        } else {
-            std::slice::from_raw_parts(cred.CredentialBlob, len).to_vec()
-        }
-    };
-    // SAFETY: `credential` came from `CredReadW` and is freed exactly once.
-    unsafe { CredFree(credential.cast()) };
-    decode_blob_bytes(&bytes)
-}
-
-#[cfg(target_os = "macos")]
 fn read_platform() -> Option<String> {
     let out = std::process::Command::new("/usr/bin/security")
         .args([
@@ -288,29 +250,6 @@ fn read_platform() -> Option<String> {
             "-a",
             KEYRING_ACCOUNT,
             "-w",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    decode_blob_bytes(&out.stdout)
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn read_platform() -> Option<String> {
-    // `secret-tool` (libsecret) speaks to whichever Secret Service is running.
-    // A missing binary or no running daemon both exit non-zero / fail to
-    // spawn, and both mean "no session available here".
-    let out = std::process::Command::new("secret-tool")
-        .args([
-            "lookup",
-            "service",
-            KEYRING_SERVICE,
-            "username",
-            KEYRING_ACCOUNT,
         ])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -536,14 +475,5 @@ mod tests {
             read_saved_session(Some("keyring".into()), Some(&path)).as_deref(),
             Some("keyring")
         );
-    }
-
-    /// Touches the real Credential Manager; asserts only that the read does
-    /// not error, and never inspects or prints the value.
-    #[cfg(windows)]
-    #[test]
-    #[ignore = "reads the real Windows credential store"]
-    fn reading_the_real_windows_credential_never_errors() {
-        assert!(read().is_ok());
     }
 }

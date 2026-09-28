@@ -16,73 +16,73 @@ pub const HIGHEST_PROVIDER: &str = "highest";
 #[cfg(test)]
 pub const CHIP_GAP: &str = "     ";
 
-/// The popover's bundled provider marks (`windows/popover/src/icons/providers`),
+/// The popover's bundled provider marks (`frontend/src/icons/providers`),
 /// drawn by the macOS status item in place of the provider's name.
 pub const PROVIDER_MARKS: &[(&str, &str)] = &[
     (
         "anthropic",
-        include_str!("../../windows/popover/src/icons/providers/anthropic.svg"),
+        include_str!("../../frontend/src/icons/providers/anthropic.svg"),
     ),
     (
         "anthropic_api",
-        include_str!("../../windows/popover/src/icons/providers/anthropic_api.svg"),
+        include_str!("../../frontend/src/icons/providers/anthropic_api.svg"),
     ),
     (
         "antigravity",
-        include_str!("../../windows/popover/src/icons/providers/antigravity.svg"),
+        include_str!("../../frontend/src/icons/providers/antigravity.svg"),
     ),
     (
         "copilot",
-        include_str!("../../windows/popover/src/icons/providers/copilot.svg"),
+        include_str!("../../frontend/src/icons/providers/copilot.svg"),
     ),
     (
         "cursor",
-        include_str!("../../windows/popover/src/icons/providers/cursor.svg"),
+        include_str!("../../frontend/src/icons/providers/cursor.svg"),
     ),
     (
         "deepseek",
-        include_str!("../../windows/popover/src/icons/providers/deepseek.svg"),
+        include_str!("../../frontend/src/icons/providers/deepseek.svg"),
     ),
     (
         "grok",
-        include_str!("../../windows/popover/src/icons/providers/grok.svg"),
+        include_str!("../../frontend/src/icons/providers/grok.svg"),
     ),
     (
         "grokbot",
-        include_str!("../../windows/popover/src/icons/providers/grokbot.svg"),
+        include_str!("../../frontend/src/icons/providers/grokbot.svg"),
     ),
     (
         "kimi",
-        include_str!("../../windows/popover/src/icons/providers/kimi.svg"),
+        include_str!("../../frontend/src/icons/providers/kimi.svg"),
     ),
     (
         "minimax",
-        include_str!("../../windows/popover/src/icons/providers/minimax.svg"),
+        include_str!("../../frontend/src/icons/providers/minimax.svg"),
     ),
     (
         "moonshot",
-        include_str!("../../windows/popover/src/icons/providers/moonshot.svg"),
+        include_str!("../../frontend/src/icons/providers/moonshot.svg"),
     ),
     (
         "openai",
-        include_str!("../../windows/popover/src/icons/providers/openai.svg"),
+        include_str!("../../frontend/src/icons/providers/openai.svg"),
     ),
     (
         "opencode_go",
-        include_str!("../../windows/popover/src/icons/providers/opencode_go.svg"),
+        include_str!("../../frontend/src/icons/providers/opencode_go.svg"),
     ),
     (
         "openrouter",
-        include_str!("../../windows/popover/src/icons/providers/openrouter.svg"),
+        include_str!("../../frontend/src/icons/providers/openrouter.svg"),
     ),
     (
         "zai",
-        include_str!("../../windows/popover/src/icons/providers/zai.svg"),
+        include_str!("../../frontend/src/icons/providers/zai.svg"),
     ),
 ];
 
 /// Entry slugs whose mark file has another name; mirrors `ICON_ALIAS` in
-/// `windows/popover/src/model.js` (a test keeps the two in step).
+/// `frontend/src/model.js` (a test keeps the two in step).
 const MARK_ALIASES: &[(&str, &str)] = &[("supergrok", "grok"), ("opencode-go", "opencode_go")];
 
 /// How full a quota is, as the popover's bar colors read it.
@@ -934,10 +934,7 @@ mod tests {
     #[test]
     fn the_mark_table_matches_the_popover_icons_and_aliases() {
         // Repo files, not user state: the popover's icon folder and alias map.
-        let dir = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/windows/popover/src/icons/providers"
-        );
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/frontend/src/icons/providers");
         let mut files: Vec<String> = std::fs::read_dir(dir)
             .expect("popover icons")
             .filter_map(|entry| {
@@ -955,7 +952,7 @@ mod tests {
 
         let model = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/windows/popover/src/model.js"
+            "/frontend/src/model.js"
         ))
         .expect("model.js");
         let line = model

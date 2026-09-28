@@ -35,7 +35,7 @@ pub fn validate_region(region: &str) -> Result<()> {
         Ok(())
     } else {
         Err(AppError::Credentials(
-            "Kiro CLI token contains an invalid AWS region. Run `kiro-cli login` again.".into(),
+            "Kiro CLI token contains an invalid AWS region. A new Kiro CLI sign-in is needed, which this app cannot do.".into(),
         ))
     }
 }

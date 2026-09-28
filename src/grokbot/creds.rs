@@ -36,11 +36,9 @@ use crate::error::{AppError, Result};
 const FALLBACK_SECRET: &str = "peanuts";
 
 /// Login-Keychain generic-password service holding Grok Bot's OSCrypt secret.
-#[cfg(target_os = "macos")]
 const MACOS_SERVICE: &str = "Grok Bot Safe Storage";
 /// Account of that item. Pairing it with the service avoids colliding with a
 /// differently-named password under the same service.
-#[cfg(target_os = "macos")]
 const MACOS_ACCOUNT: &str = "Grok Bot Key";
 
 /// The app's Cursor OAuth session, decrypted.
@@ -72,50 +70,13 @@ pub fn key_for(secret: Option<&str>) -> [u8; 16] {
 
 /// The platform OSCrypt key.
 ///
-/// Linux: Secret Service secret when one is stored, else `"peanuts"`.
-/// macOS: the Keychain item; a missing item is an error, not peanuts.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// The Keychain item; a missing item is an error, not peanuts.
 pub fn oscrypt_key() -> Result<[u8; 16]> {
-    #[cfg(target_os = "linux")]
-    {
-        Ok(key_for(lookup_secret().as_deref()))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        macos_oscrypt_key()
-    }
-}
-
-/// `secret-tool lookup application "Grok Bot"`, read-only. A missing binary,
-/// no running daemon, or no such item all mean the app stored no secret and
-/// the `"peanuts"` default applies — so every failure is `None`, not an error.
-#[cfg(target_os = "linux")]
-fn lookup_secret() -> Option<String> {
-    let mut command = std::process::Command::new("secret-tool");
-    command
-        .args(["lookup", "application", "Grok Bot"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped());
-    // A credential lookup must not inherit this process's provider keys.
-    for var in crate::vendor::vendor_secret_env_vars_to_remove(&[]) {
-        command.env_remove(var);
-    }
-    let out = command.output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let secret = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if secret.is_empty() {
-        None
-    } else {
-        Some(secret)
-    }
+    macos_oscrypt_key()
 }
 
 /// `security find-generic-password -s "Grok Bot Safe Storage" -a "Grok Bot Key" -w`.
 /// Read-only; the secret arrives on stdout, never in argv.
-#[cfg(target_os = "macos")]
 fn macos_oscrypt_key() -> Result<[u8; 16]> {
     let secret = lookup_macos_secret().ok_or_else(|| {
         AppError::Credentials(
@@ -126,7 +87,6 @@ fn macos_oscrypt_key() -> Result<[u8; 16]> {
     Ok(crate::safe_storage::derive_key(secret.as_bytes()))
 }
 
-#[cfg(target_os = "macos")]
 fn lookup_macos_secret() -> Option<String> {
     let mut command = std::process::Command::new("/usr/bin/security");
     command

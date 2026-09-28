@@ -61,8 +61,8 @@ pub fn read_from(path: &Path) -> Result<Credentials> {
     let raw = std::fs::read(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             AppError::Credentials(format!(
-                "Model Studio: no bl CLI config at {}; install the official `bl` CLI and \
-                 run `bl auth login --console` to re-auth",
+                "Model Studio: no bl CLI config at {}; a Model Studio console sign-in is \
+                 needed, which this app cannot do",
                 crate::display::sanitize_untrusted_path(path)
             ))
         } else {
@@ -183,7 +183,7 @@ mod tests {
         let err = read_from(&missing).unwrap_err();
         assert!(matches!(err, AppError::Credentials(_)), "{err:?}");
         let message = err.to_string();
-        assert!(message.contains("bl auth login --console"), "{message}");
+        assert!(message.contains("console sign-in"), "{message}");
         assert!(message.contains("config.json"), "{message}");
     }
 

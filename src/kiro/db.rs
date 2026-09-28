@@ -26,7 +26,6 @@ use crate::error::{AppError, Result};
 const TOKEN_KEY: &str = "kirocli:odic:token";
 const DEVICE_REGISTRATION_KEY: &str = "kirocli:odic:device-registration";
 const PROFILE_STATE_KEY: &str = "api.codewhisperer.profile";
-const LOGIN_HINT: &str = "kiro-cli login";
 
 /// Default location of kiro-cli's local database. Verified on Linux
 /// (`~/.local/share/kiro-cli/data.sqlite3`, i.e. `directories::BaseDirs::data_dir()`
@@ -81,7 +80,7 @@ pub struct KiroCredentials {
 pub fn read_credentials(path: &Path) -> Result<KiroCredentials> {
     if !path.exists() {
         return Err(AppError::Credentials(format!(
-            "Kiro CLI database not found at {}. Run `{LOGIN_HINT}`, then try again.",
+            "Kiro CLI database not found at {}. A Kiro CLI sign-in is needed, which this app cannot do.",
             path.display()
         )));
     }
@@ -107,7 +106,7 @@ pub fn read_credentials(path: &Path) -> Result<KiroCredentials> {
     ] {
         if value.trim().is_empty() {
             return Err(AppError::Credentials(format!(
-                "Kiro CLI {label} is empty. Run `{LOGIN_HINT}` again."
+                "Kiro CLI {label} is empty. A new Kiro CLI sign-in is needed, which this app cannot do."
             )));
         }
     }
@@ -116,7 +115,7 @@ pub fn read_credentials(path: &Path) -> Result<KiroCredentials> {
     let expires_at = DateTime::parse_from_rfc3339(&token.expires_at)
         .map_err(|e| {
             AppError::Credentials(format!(
-                "Kiro CLI token has an unreadable expiry ({:?}): {e}. Run `{LOGIN_HINT}` again.",
+                "Kiro CLI token has an unreadable expiry ({:?}): {e}. A new Kiro CLI sign-in is needed, which this app cannot do.",
                 token.expires_at
             ))
         })?
@@ -137,22 +136,23 @@ pub fn read_credentials(path: &Path) -> Result<KiroCredentials> {
 }
 
 fn read_auth_kv<T: for<'de> Deserialize<'de>>(conn: &Connection, key: &str) -> Result<T> {
-    let raw: String =
-        match conn.query_row("SELECT value FROM auth_kv WHERE key = ?1", [key], |row| {
-            row.get(0)
-        }) {
-            Ok(raw) => raw,
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                return Err(AppError::Credentials(format!(
-                    "no Kiro CLI `{key}` entry found. Run `{LOGIN_HINT}`, then try again."
-                )));
-            }
-            Err(e) => {
-                return Err(AppError::Credentials(format!(
-                    "could not read Kiro CLI `{key}` entry: {e}"
-                )));
-            }
-        };
+    let raw: String = match conn.query_row(
+        "SELECT value FROM auth_kv WHERE key = ?1",
+        [key],
+        |row| row.get(0),
+    ) {
+        Ok(raw) => raw,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err(AppError::Credentials(format!(
+                "no Kiro CLI `{key}` entry found. A Kiro CLI sign-in is needed, which this app cannot do."
+            )));
+        }
+        Err(e) => {
+            return Err(AppError::Credentials(format!(
+                "could not read Kiro CLI `{key}` entry: {e}"
+            )));
+        }
+    };
     serde_json::from_str(&raw)
         .map_err(|e| AppError::Credentials(format!("Kiro CLI `{key}` entry is malformed: {e}")))
 }

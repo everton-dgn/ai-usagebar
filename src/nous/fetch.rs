@@ -180,6 +180,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(snapshot.plan.as_deref(), Some("Pro"));
+        assert_eq!(snapshot.email, None);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn account_email_comes_from_the_same_authenticated_response() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/account")
+            .match_header("authorization", "Bearer test-access-token")
+            .with_status(200)
+            .with_body(
+                r#"{"user":{"email":"person@example.test","privy_did":"test-did"},
+                    "subscription":{"plan":"Plus","monthly_credits":20.0}}"#,
+            )
+            .create_async()
+            .await;
+        let endpoints = Endpoints {
+            account: format!("{}/account", server.url()),
+            token: format!("{}/token", server.url()),
+        };
+
+        let snapshot = fetch_account(&reqwest::Client::new(), "test-access-token", &endpoints)
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot.email.as_ref().map(|email| email.as_str()),
+            Some("person@example.test")
+        );
+        assert_eq!(snapshot.plan.as_deref(), Some("Plus"));
+        let debug = format!("{snapshot:?}");
+        assert!(!debug.contains("person@example.test"));
+        assert!(!debug.contains("test-access-token"));
         mock.assert_async().await;
     }
 

@@ -7,7 +7,6 @@ pub mod credentials;
 pub mod fetch;
 pub mod oauth;
 pub mod types;
-pub mod vendor;
 
 pub use types::{
     AccountSnapshot, DeviceCode, TokenResponse, parse_account, parse_device_code, parse_token,

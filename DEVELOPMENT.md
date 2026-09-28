@@ -1,218 +1,146 @@
-# Development guide
+# Desenvolvimento
 
-Build, test, and run `ai-usagebar` from a checkout. For the pre-PR gate and
-provider-addition rules see [CONTRIBUTING.md](CONTRIBUTING.md). For release
-invariants see [CLAUDE.md](CLAUDE.md).
+Este repositório mantém o aplicativo visual para macOS com Apple Silicon.
+Os comandos deste documento são ferramentas de manutenção do código. O uso do
+aplicativo está no [guia de primeiro uso](docs/getting-started.md).
 
-- [Prerequisites](#prerequisites)
-- [Build](#build)
-- [Run locally](#run-locally)
-- [Tests](#tests)
-- [Lint and format](#lint-and-format)
-- [Configuration while developing](#configuration-while-developing)
-- [Ollama Cloud](#ollama-cloud)
-- [Windows](#windows)
-- [Layout](#layout)
-- [See also](#see-also)
+## Ambiente
 
-## Prerequisites
+| Ferramenta | Requisito |
+| --- | --- |
+| Máquina | Mac com Apple Silicon |
+| Rust e Cargo | Rust 1.90 ou superior, conforme `Cargo.toml` |
+| Node.js | 22.12 ou superior no fluxo de desenvolvimento |
+| npm | Executável compatível com `frontend/package-lock.json` |
+| Ferramentas Apple | Compilador, SDK e ferramentas de assinatura |
 
-| Tool | Version | Notes |
-|---|---|---|
-| Rust / Cargo | **1.90+** (MSRV) | [rustup](https://rustup.rs/) |
-| Node.js | 18+ | GNOME / KDE / Omarchy / Windows popover contract tests |
-| Git | any | |
+A versão mínima funcional do macOS precisa de validação nativa. O deployment
+target do build não comprova sozinho que todas as integrações funcionam em uma
+versão anterior do sistema.
 
-On Windows you also need the **MSVC Build Tools** (linker) and **NASM**
-(`ring` uses it). See [docs/windows-build.md](docs/windows-build.md).
+Confira os executáveis antes de instalar dependências: um alias global não deve
+substituir o gerenciador usado pelo lockfile. Este frontend mantém
+`package-lock.json`; não converta gerenciadores como efeito colateral do build.
 
-Optional:
-
-- `cargo-machete` — unused-dependency check (`cargo install cargo-machete`)
-- Live API keys in the environment for `make smoke`
-
-## Build
+Prepare as dependências explicitamente:
 
 ```bash
-git clone https://github.com/akitaonrails/ai-usagebar.git
-cd ai-usagebar
-
-cargo build --release
+make frontend-deps
 ```
 
-Binaries land at:
+O alvo usa `npm ci --ignore-scripts --no-fund --no-audit`. A compilação Cargo
+não instala pacotes. Repita essa preparação quando o lockfile mudar ou as
+dependências estiverem ausentes.
 
-| Binary | Path |
-|---|---|
-| Widget / CLI | `target/release/ai-usagebar` |
-| TUI | `target/release/ai-usagebar-tui` |
-| Windows tray | `target/release/ai-usagebar-tray` (Windows only) |
-
-Debug builds (`cargo build`) are fine for iterating; the first release build
-is slow because of `reqwest` / `ring`.
-
-Install to `$PREFIX` (default `/usr/local`):
+## Build e assinatura
 
 ```bash
-make install                 # /usr/local/bin + share
-make install PREFIX=$HOME/.local
+cargo build --release --locked --bin ai-usagebar-tray
 ```
 
-KDE plasmoid install is separate (`make install install-plasmoid`) and is
-documented in [kde-plasmoid/README.md](kde-plasmoid/README.md).
+O executável fica em `target/release/ai-usagebar-tray`. O build compila a interface
+em `frontend/` com o Vite local e incorpora seus assets no executável. HTML,
+JavaScript e CSS precisam existir como arquivos regulares e não vazios;
+dependência ausente, bundle antigo ou página substituta não são alternativas
+aceitas. `AI_USAGEBAR_NODE` permite selecionar o Node usado nessa etapa.
 
-## Run locally
-
-From the checkout, without installing:
+Para preparar o aplicativo completo para abrir pelo Finder:
 
 ```bash
-./target/release/ai-usagebar --json
-./target/release/ai-usagebar --vendor openrouter --format '{or_balance}'
-./target/release/ai-usagebar --watch 5          # refresh every 5s while iterating on --format
-./target/release/ai-usagebar-tui
+make bundle
 ```
 
-`--config PATH` points both binaries at an alternate TOML. The file **must
-already exist**; loads and the Settings overlay then read and write that path
-for the whole process, so a scratch config never touches the real one:
+O alvo gera `target/release/AI Usage.app` para arm64 e verifica sua assinatura.
+Ele não instala nem abre o bundle. Preserve o `CFBundleIdentifier` da cópia
+usada localmente (`ai-usagebar-tray`) ao preparar a substituição.
+
+O script de assinatura aceita um executável ou bundle local:
 
 ```bash
-./target/release/ai-usagebar --config ./config.test.toml --vendor kimi --watch 5
-./target/release/ai-usagebar-tui --config ./config.test.toml
+scripts/sign-macos-tray.sh 'caminho/AI Usage.app'
 ```
 
-Default config locations:
+O script mantém o identificador do bundle e verifica a assinatura.
+`CODESIGN_IDENTITY` seleciona o certificado; `CODESIGN_IDENTITY=-` é uma opção
+explícita de assinatura ad hoc para desenvolvimento. A troca de identidade pode
+exigir nova autorização de Acessibilidade.
 
-| OS | Path |
-|---|---|
-| Linux | `~/.config/ai-usagebar/config.toml` |
-| macOS | `~/Library/Application Support/ai-usagebar/config.toml` (legacy `~/.config/…` still wins if present) |
-| Windows | `%APPDATA%\ai-usagebar\config.toml` |
+Mantenha a cópia de uso em uma localização fixa, como `~/Applications/AI Usage.app`.
+Antes de substituir um bundle local, faça backup e encerre a cópia aberta.
+Instalação, reinício do aplicativo e publicação são ações distintas da
+compilação e exigem autorização da tarefa.
 
-## Tests
+O LaunchAgent usa o executável da cópia instalada. Ao iniciar, o aplicativo
+reconcilia registros antigos que ele próprio criou, com backup, fora da thread
+da janela. Uma opção desligada continua desligada. Cópias em diretórios de
+build não substituem a instalação escolhida; arquivos modificados manualmente
+ou que apontam para outro bundle existente são preservados.
 
-The gate contributors run is the same one CI runs:
+## Alterar e validar
+
+1. Confira o Git e preserve mudanças locais preexistentes.
+2. Leia implementação, consumidores e testes do comportamento alterado.
+3. Faça a menor mudança que atende ao pedido. Correções lógicas devem ter uma
+   prova da regressão, seguida da execução sobre a correção.
+4. Execute as [verificações aplicáveis](docs/testing.md) e registre falhas,
+   testes ignorados e limites da evidência.
+5. Atualize os guias afetados e o changelog ainda não publicado.
+
+Para a validação completa local:
 
 ```bash
-make test                                          # cargo test + desktop JS suites
-cargo clippy --all-targets -- -D warnings
+CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --all-targets --locked --offline --quiet -- --test-threads=2
+cargo clippy --all-targets --locked --offline -- -D warnings
 cargo fmt --all -- --check
-cargo machete                                      # no unused dependencies
+make frontend-test frontend-typecheck
+make node-test changelog-check
+git diff --check
 ```
 
-`make test` rather than `cargo test` alone: the GNOME, KDE, Omarchy, and
-Windows-popover frontends have Node contract tests, and a report-shape change
-can break them without touching Rust.
+O modo offline depende do cache local. Falta de pacote deve ser tratada como
+preparação explícita do ambiente, sem instalar dependências durante um teste.
+Serialize builds Cargo no mesmo checkout. Desativar o incremental e os símbolos
+de teste reduz o espaço ocupado pelos artefatos locais.
 
-| Target | What it runs |
-|---|---|
-| `make test` | `cargo test` + `desktop-test` + `plugin-test` |
-| `make desktop-test` | GNOME, KDE, Windows popover `.test.mjs` |
-| `make plugin-test` | Omarchy `model.test.mjs` |
-| `make smoke` | `cargo test --test live -- --ignored --nocapture` |
-| `make clippy` | `cargo clippy --all-targets -- -D warnings` |
-| `make fmt` | `cargo fmt` |
+## Dados e autenticação
 
-Live smoke tests need credentials in the environment (`OLLAMA_API_KEY`,
-`ZAI_API_KEY`, …). Tests marked `#[ignore]` never run in `make test`. A
-`#[test]` must not read a real `$HOME` / `$XDG` path — the AUR package runs
-`cargo test` during install.
+Testes automáticos usam diretórios temporários, dependências injetadas e dados
+fictícios. Não podem ler configuração, credenciais, Keychain, transcrições ou
+histórico reais. Testes de rede real ficam fora do gate comum e exigem uma
+execução autorizada.
 
-```bash
-# One live vendor
-OLLAMA_API_KEY=… cargo test --test live ollama_live -- --ignored --nocapture
-```
+Preserve a lógica transacional de ativação de contas, os locks, o isolamento
+por conta e a renovação de tokens. Nunca copie a implementação de autenticação
+para o frontend ou transforme uma falha de recuperação em uma nova tentativa
+silenciosa.
 
-## Lint and format
+Não registre tokens, chaves, códigos de acesso, URLs OAuth completas ou respostas
+brutas de autenticação em logs, snapshots, mensagens de interface ou relatórios.
+Os testes do worker de contas usam o próprio executável com um ambiente isolado,
+sem abrir a janela ou consultar a conta pessoal.
 
-```bash
-cargo fmt --all
-cargo clippy --all-targets --locked -- -D warnings
-```
+## Prova do aplicativo instalado
 
-CI denies warnings (`-D warnings`) and checks formatting. rustfmt is the
-style; do not hand-format around it.
+Um teste aprovado em `target/debug` não comprova o comportamento da cópia aberta.
+Para validar um ajuste nativo, registre PID, caminho e SHA-256 do executável
+real, além da sequência de interação observada. Confira o acesso real à
+Acessibilidade no processo, não apenas a presença de uma entrada nos Ajustes.
 
-## Configuration while developing
+A [prova nativa](docs/testing.md#prova-nativa) cobre os harnesses disponíveis.
+Abertura e reabertura do painel, troca de provedor, fixação, redimensionamento,
+foco, animações e preferências após reinício também precisam de observação no
+bundle que será utilizado.
 
-Copy [config.example.toml](config.example.toml) and enable only the vendors
-you have credentials for. Opt-in vendors (DeepSeek, Ollama Cloud, Kimi, …)
-default to `enabled = false` and never fetch until flipped on.
+## Histórico e entrega
 
-```toml
-[ollama]
-enabled = true
-api_key_env = "OLLAMA_API_KEY"
-plan = "pro"
-```
+O [changelog ativo](CHANGELOG.md) recebe as mudanças novas. O
+[histórico original](docs/history/CHANGELOG.original.md) preserva o documento
+anterior sem tradução ou alteração das versões publicadas. A verificação de
+histórico compara as seções com as tags existentes.
 
-Putting an inline `api_key` in any section requires `chmod 600` on the file.
-Environment variables are the safer default.
+Commit, push, tags e publicação seguem a autorização específica da tarefa.
+Os comandos de build e teste não devem executar essas ações implicitamente.
+A licença e os avisos originais permanecem preservados.
 
-See [docs/configuration.md](docs/configuration.md) for the full reference.
-
-## Ollama Cloud
-
-Native provider — **not** a `[[custom]]` table. Bearer token from
-https://ollama.com/settings/keys against `GET https://ollama.com/api/usage`.
-
-Copy the `[ollama]` section from [config.example.toml](config.example.toml)
-into your config and set `enabled = true`:
-
-```toml
-[ollama]
-enabled = true
-api_key_env = "OLLAMA_API_KEY"
-plan = "pro"
-```
-
-```bash
-export OLLAMA_API_KEY="…"          # minted at ollama.com/settings/keys
-./target/release/ai-usagebar --vendor ollama
-./target/release/ai-usagebar-tui
-```
-
-The local daemon at `127.0.0.1:11434` has **no** quota route. The Ed25519
-CLI key in `~/.ollama/id_ed25519` is a registry credential and is refused by
-`/api/usage` with 401.
-
-Full walkthrough: [docs/ollama-setup.md](docs/ollama-setup.md).
-
-## Windows
-
-MSVC + NASM are required to compile. After `cargo build --release`:
-
-```powershell
-.\target\release\ai-usagebar.exe --json
-.\target\release\ai-usagebar-tui.exe
-```
-
-There is no `make` on a stock PowerShell. Run the cargo commands directly.
-Details, PATH, and tray install: [docs/windows-build.md](docs/windows-build.md).
-
-## Layout
-
-| Path | What |
-|---|---|
-| `src/` | Library + vendor modules (`src/ollama/`, `src/zai/`, …) |
-| `src/bin/` | `ai-usagebar`, `ai-usagebar-tui`, `ai-usagebar-tray` |
-| `src/tui/` | TUI app, panels, Settings overlay |
-| `src/widget/` | Waybar / CLI renderer |
-| `tests/` | Integration, live smoke, fixtures |
-| `gnome-extension/`, `kde-plasmoid/`, `omarchy/`, `macos/`, `windows/` | Native frontends |
-| `docs/` | Configuration, placeholders, vendor endpoints |
-| `.github/workflows/` | `ci.yml` (fmt, clippy, tests, MSRV 1.90, Nix) and `release.yml` |
-
-Adding a vendor is an exhaustive-match exercise: `VendorId`, `VendorSnapshot`,
-`VendorId::all()`, config section, catalog, detect, widget CLI, TUI fetch,
-Settings `KEY_VENDORS` (if API-key), placeholders, changelog. Missing
-`VendorId::all()` is how a provider shows up in Settings and nowhere else.
-
-## See also
-
-- [CONTRIBUTING.md](CONTRIBUTING.md) — pre-PR gate and how to add a provider
-- [CLAUDE.md](CLAUDE.md) — release checklist and invariants
-- [docs/configuration.md](docs/configuration.md) — config reference
-- [docs/vendor-endpoints.md](docs/vendor-endpoints.md) — endpoint matrix
-- [docs/windows-build.md](docs/windows-build.md) — Windows toolchain
-- [docs/ollama-setup.md](docs/ollama-setup.md) — Ollama Cloud
+Consulte também a [arquitetura](docs/architecture.md), os
+[contratos de teste](docs/testing.md) e as [invariantes](CLAUDE.md).

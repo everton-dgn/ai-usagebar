@@ -32,7 +32,6 @@ const IV: [u8; 16] = [b' '; 16];
 const PREFIX: &[u8] = b"v10";
 
 /// Login-Keychain generic-password service holding Claude Desktop's secret.
-#[cfg(target_os = "macos")]
 pub const SERVICE: &str = "Claude Safe Storage";
 
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
@@ -91,7 +90,6 @@ pub fn encrypt(key: &[u8; KEY_LEN], plaintext: &[u8]) -> String {
 /// The derived AES key for Claude Desktop, read from the login Keychain.
 /// macOS-only; the caller handles the "no key / not macOS" case by skipping the
 /// Desktop usage source entirely.
-#[cfg(target_os = "macos")]
 pub fn macos_key() -> Result<[u8; KEY_LEN]> {
     use std::process::Command;
     let out = Command::new("/usr/bin/security")

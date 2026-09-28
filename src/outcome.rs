@@ -24,6 +24,9 @@ use crate::error::{AppError, Result};
 #[derive(Debug, Clone)]
 pub struct Outcome<T> {
     pub snapshot: T,
+    /// Display identity from the same authenticated connection as this result.
+    /// Kept separate from usage snapshots and their disk caches.
+    pub email: Option<crate::identity::AccountEmail>,
     /// The payload is past its TTL — shown, but marked.
     pub stale: bool,
     /// The failure recorded by the most recent unsuccessful refresh, redacted
@@ -42,6 +45,7 @@ impl<T> Outcome<T> {
     pub fn fresh(snapshot: T) -> Self {
         Self {
             snapshot,
+            email: None,
             stale: false,
             last_error: None,
             cache_age: Some(Duration::ZERO),
@@ -54,6 +58,7 @@ impl<T> Outcome<T> {
     pub fn cached(snapshot: T, cache: &Cache, stale: bool) -> Self {
         Self {
             snapshot,
+            email: None,
             stale,
             last_error: cache.read_last_error(),
             cache_age: cache.payload_age(),
@@ -65,6 +70,7 @@ impl<T> Outcome<T> {
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Outcome<U> {
         Outcome {
             snapshot: f(self.snapshot),
+            email: self.email,
             stale: self.stale,
             last_error: self.last_error,
             cache_age: self.cache_age,
@@ -80,6 +86,11 @@ impl<T> Outcome<T> {
     /// `false` for a within-TTL cache hit too.
     pub fn off_the_wire(&self) -> bool {
         !self.stale && self.cache_age == Some(Duration::ZERO)
+    }
+
+    pub fn with_email(mut self, email: Option<crate::identity::AccountEmail>) -> Self {
+        self.email = email;
+        self
     }
 }
 
@@ -197,6 +208,15 @@ mod tests {
         assert_eq!(out.last_error, Some((429, "slow down".to_string())));
     }
 
+    #[test]
+    fn map_preserves_authenticated_identity_without_logging_email() {
+        let out = Outcome::fresh(7u8)
+            .with_email(crate::identity::AccountEmail::parse("account@example.test"))
+            .map(u32::from);
+        assert_eq!(out.email.as_ref().unwrap().as_str(), "account@example.test");
+        assert!(!format!("{out:?}").contains("account@example.test"));
+    }
+
     /// Freshness as the notification check needs it: only a wire-fresh
     /// outcome counts, and a within-TTL cache hit — which is also
     /// `stale: false` — must not.
@@ -206,6 +226,7 @@ mod tests {
         assert!(fresh.off_the_wire());
 
         let hand_cached = Outcome {
+            email: None,
             snapshot: "cached",
             stale: false,
             last_error: None,
@@ -223,6 +244,7 @@ mod tests {
         assert!(!stale.off_the_wire());
 
         let unknown_age = Outcome {
+            email: None,
             snapshot: "cached",
             stale: false,
             last_error: None,

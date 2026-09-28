@@ -1,10 +1,9 @@
 //! End-to-end integration test for the Anthropic vendor.
 //!
 //! Stands up a mockito server that pretends to be the Anthropic OAuth +
-//! usage endpoints, drives the full `fetch_snapshot` + `render_anthropic`
-//! pipeline against canned fixtures, and asserts the resulting Waybar JSON
-//! via `insta` snapshots. Catches schema drift in either the wire types or
-//! the rendered output.
+//! usage endpoints, drives the full `fetch_snapshot` pipeline against canned
+//! fixtures, and asserts the snapshot the report projects. Catches schema
+//! drift in the wire types and the stale-cache fallback.
 
 use std::io::Write;
 use std::path::Path;
@@ -12,9 +11,6 @@ use std::time::Duration;
 
 use ai_usagebar::anthropic::{self, fetch::Endpoints};
 use ai_usagebar::cache::Cache;
-use ai_usagebar::format::updated_at_hm;
-use ai_usagebar::theme::Theme;
-use ai_usagebar::widget::render::{DEFAULT_FORMAT, RenderInput, render_anthropic};
 use chrono::{TimeZone, Utc};
 use tempfile::{NamedTempFile, TempDir};
 
@@ -49,22 +45,8 @@ fn read_fixture(name: &str) -> String {
     })
 }
 
-fn normalize_updated_time(
-    tooltip: &str,
-    now: chrono::DateTime<Utc>,
-    cache_age: Option<Duration>,
-) -> String {
-    let updated = updated_at_hm(now, cache_age);
-    let expected = format!("Updated {updated}");
-    assert!(
-        tooltip.contains(&expected),
-        "tooltip did not contain {expected:?}"
-    );
-    tooltip.replace(&expected, "Updated HH:MM")
-}
-
 #[tokio::test]
-async fn full_response_renders_expected_waybar_json() {
+async fn full_response_yields_every_window_and_extra_usage() {
     let mut server = mockito::Server::new_async().await;
     server
         .mock("GET", "/api/oauth/usage")
@@ -91,32 +73,29 @@ async fn full_response_renders_expected_waybar_json() {
     .await
     .unwrap();
 
-    // Pin "now" to a known value so countdown / pacing are deterministic.
-    let now = Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap();
-    let theme = Theme::default(); // One Dark — stable across machines
-    let format = DEFAULT_FORMAT.to_string();
-    let input = RenderInput {
-        outcome: &outcome,
-        theme: &theme,
-        format: &format,
-        tooltip_format: None,
-        icon: None,
-        pace_tolerance: 5,
-        format_pace_color: false,
-        tooltip_pace_pts: false,
-        now,
-    };
-    let out = render_anthropic(&input);
-    insta::assert_snapshot!("full_response_bar_text", &out.text);
-    insta::assert_snapshot!(
-        "full_response_tooltip",
-        normalize_updated_time(&out.tooltip, now, outcome.cache_age)
+    let snap = &outcome.snapshot;
+    assert!(!outcome.stale);
+    assert!(outcome.last_error.is_none());
+    assert_eq!(snap.plan, "Max 5x");
+    assert_eq!(snap.session.utilization_pct, 62);
+    assert_eq!(
+        snap.session.resets_at,
+        Some(Utc.with_ymd_and_hms(2026, 5, 23, 13, 30, 0).unwrap())
     );
-    assert_eq!(format!("{:?}", out.class), "Mid");
+    assert_eq!(snap.weekly.utilization_pct, 27);
+    assert_eq!(
+        snap.weekly.resets_at,
+        Some(Utc.with_ymd_and_hms(2026, 5, 27, 13, 0, 0).unwrap())
+    );
+    let sonnet = snap.sonnet.as_ref().expect("sonnet window");
+    assert_eq!(sonnet.utilization_pct, 4);
+    let extra = snap.extra.as_ref().expect("extra usage");
+    assert_eq!(extra.spent.0, 250);
+    assert_eq!(extra.limit.map(|limit| limit.0), Some(5000));
 }
 
 #[tokio::test]
-async fn no_sonnet_no_extra_renders_minimal_tooltip() {
+async fn no_sonnet_no_extra_yields_only_the_two_core_windows() {
     let mut server = mockito::Server::new_async().await;
     server
         .mock("GET", "/api/oauth/usage")
@@ -142,31 +121,15 @@ async fn no_sonnet_no_extra_renders_minimal_tooltip() {
     )
     .await
     .unwrap();
-    let now = Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap();
-    let theme = Theme::default();
-    let format = DEFAULT_FORMAT.to_string();
-    let input = RenderInput {
-        outcome: &outcome,
-        theme: &theme,
-        format: &format,
-        tooltip_format: None,
-        icon: None,
-        pace_tolerance: 5,
-        format_pace_color: false,
-        tooltip_pace_pts: false,
-        now,
-    };
-    let out = render_anthropic(&input);
-    assert!(!out.tooltip.contains("Sonnet only"));
-    assert!(!out.tooltip.contains("Extra usage"));
-    insta::assert_snapshot!(
-        "minimal_response_tooltip",
-        normalize_updated_time(&out.tooltip, now, outcome.cache_age)
-    );
+    let snap = &outcome.snapshot;
+    assert_eq!(snap.session.utilization_pct, 15);
+    assert_eq!(snap.weekly.utilization_pct, 8);
+    assert!(snap.sonnet.is_none());
+    assert!(snap.extra.is_none());
 }
 
 #[tokio::test]
-async fn http_429_falls_back_to_stale_cache_with_pause_indicator() {
+async fn http_429_falls_back_to_stale_cache_with_the_error_kept() {
     let mut server = mockito::Server::new_async().await;
     server
         .mock("GET", "/api/oauth/usage")
@@ -198,23 +161,11 @@ async fn http_429_falls_back_to_stale_cache_with_pause_indicator() {
     .unwrap();
     assert!(outcome.stale);
     assert_eq!(outcome.last_error.as_ref().map(|(c, _)| *c), Some(429));
-
-    let now = Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap();
-    let theme = Theme::default();
-    let format = DEFAULT_FORMAT.to_string();
-    let input = RenderInput {
-        outcome: &outcome,
-        theme: &theme,
-        format: &format,
-        tooltip_format: None,
-        icon: None,
-        pace_tolerance: 5,
-        format_pace_color: false,
-        tooltip_pace_pts: false,
-        now,
-    };
-    let out = render_anthropic(&input);
-    assert!(out.text.contains("⏸"));
-    assert!(out.tooltip.contains("HTTP 429"));
-    assert!(out.tooltip.contains("slow down"));
+    assert!(
+        outcome
+            .last_error
+            .as_ref()
+            .is_some_and(|(_, message)| message.contains("slow down"))
+    );
+    assert_eq!(outcome.snapshot.session.utilization_pct, 62);
 }

@@ -10,13 +10,41 @@ na barra de menus. Os dados exibidos dependem do que cada serviço disponibiliza
 
 ## Interface
 
+### Várias contas na barra de menus
+
+![Barra de menus com duas contas Claude, duas Codex, Z.AI e MiniMax, percentuais em branco, amarelo e vermelho e estrelas nas contas em uso](docs/images/macos-menu-bar.png)
+
+Consulte vários provedores sem abrir o painel. Esta captura mostra duas contas
+Claude, duas Codex, Z.AI e MiniMax lado a lado, com consumos de 0% a 97%.
+As estrelas identificam as contas em uso. As cores ajudam a localizar os limites
+mais consumidos; os valores também podem aparecer sem cor.
+
+Em **Configurações > Barra**, escolha quais provedores aparecem, a janela de
+consumo e se deseja mostrar valores, somente o gráfico ou apenas a conta em uso.
+Também é possível centralizar os itens da barra.
+
+### Painel e métricas
+
 | Consumo por provedor | Personalização visual |
 | --- | --- |
 | ![Painel do AI Usage com abas de provedores e consumo demonstrativo](docs/images/macos-overview.png) | ![Personalização do Claude com seleção e ordem das métricas](docs/images/macos-customization.png) |
 
-Capturas do frontend atual com contas e consumo fictícios. O endereço
-`conta@exemplo.test` é demonstrativo; nenhum e-mail ou dado de conta real foi
-usado nessas imagens.
+Use abas para consultar um provedor por vez ou a visualização em lista para
+acompanhar as contas no mesmo painel. A personalização permite escolher as
+métricas visíveis e sua ordem.
+
+### Aparência e opções de uso
+
+<img src="docs/images/macos-preferences.png" alt="Preferências em português com tema, visualização em lista, limites de cor em 70% e 85%, plano, meta de uso e horários de redefinição" width="480">
+
+Em **Configurações > Preferências**, altere o idioma, o tema, a visualização em
+lista ou abas e os percentuais que ativam amarelo e vermelho. Escolha entre
+consumo usado ou restante e entre contagem regressiva ou horário de redefinição.
+
+A captura da barra é do aplicativo em uso e não contém nomes nem e-mails.
+As imagens do painel e da personalização usam contas e consumo fictícios;
+`conta@exemplo.test` é um endereço demonstrativo. A captura das preferências
+foi feita sem contas conectadas. Nenhuma imagem contém credenciais.
 
 ## Começar a usar
 
@@ -46,9 +74,21 @@ O aplicativo oferece uma orientação para autorizar a cópia que está em execu
 
 ## Provedores e contas
 
-Há conectores para Claude, Codex, Z.AI/GLM, MiniMax, GitHub Copilot, Cursor,
-Kimi, Kiro, Antigravity e outros serviços. Alguns mostram cotas de assinatura;
-outros mostram saldo ou cobrança de API. Consulte
+O catálogo atual contém 24 provedores:
+
+| Provedor | Provedor | Provedor |
+| --- | --- | --- |
+| Claude | Anthropic API | Codex |
+| GitHub Copilot | Z.AI (GLM) | OpenRouter |
+| DeepSeek | Kimi | Kilo |
+| Novita | Moonshot | Grok |
+| SuperGrok | Grok Bot | Antigravity |
+| Cursor | MiniMax | Kiro |
+| Nous Research | OpenCode Go | Command Code |
+| Ollama Cloud | OrcaRouter | Model Studio |
+
+Alguns conectores mostram cotas de assinatura; outros mostram saldo ou cobrança
+de API. Os dados disponíveis e a forma de conexão variam por serviço. Consulte
 [contas e provedores](docs/accounts.md) e as
 [fontes dos dados](docs/vendor-endpoints.md) para entender cada conexão.
 

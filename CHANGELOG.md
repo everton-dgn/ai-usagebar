@@ -8,6 +8,8 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 
 ### Alterado
 
+- README com captura da barra de menus em uso, preferências visuais e lista
+  completa dos 24 provedores, sem identificação pessoal nas imagens.
 - Produto concentrado no aplicativo visual do macOS, com a interface existente.
 - Frontend organizado em `frontend/`, separado dos arquivos antigos do Windows.
 - README e guias separados por uso, contas, configuração, manutenção e testes.

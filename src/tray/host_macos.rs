@@ -2954,8 +2954,8 @@ mod presentation_tests {
             ..Default::default()
         };
         let mut items = std::collections::BTreeMap::from([("zai".to_owned(), own.clone())]);
-        // A provider table the config cannot edit: nothing is saved or dropped.
-        let text = "[tray.menu_bar_items]\nzai = { window = \"monthly\" }\n";
+        // A config that cannot be read: nothing is saved or dropped.
+        let text = "[tray\nmenu_bar_window = \"weekly\"\n";
         std::fs::write(&path, text).unwrap();
         replace_own_choices(&mut items, "window", &command, Some(&path));
         assert_eq!(items["zai"], own);

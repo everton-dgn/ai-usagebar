@@ -581,17 +581,17 @@ fn set_item_value(
         .ok_or_else(|| AppError::Other("config.toml: [tray] is not a table".into()))?;
     let items = tray
         .entry("menu_bar_items")
-        .or_insert_with(toml_edit::table)
+        .or_insert_with(toml_edit::table);
+    standard_table(items);
+    let items = items
         .as_table_mut()
         .ok_or_else(|| AppError::Other("config.toml: menu_bar_items is not a table".into()))?;
     items.set_implicit(true);
-    let item = items
-        .entry(id)
-        .or_insert_with(toml_edit::table)
-        .as_table_mut()
-        .ok_or_else(|| {
-            AppError::Other(format!("config.toml: menu_bar_items.{id} is not a table"))
-        })?;
+    let item = items.entry(id).or_insert_with(toml_edit::table);
+    standard_table(item);
+    let item = item.as_table_mut().ok_or_else(|| {
+        AppError::Other(format!("config.toml: menu_bar_items.{id} is not a table"))
+    })?;
     match value {
         Some(value) => {
             item.insert(key, toml_edit::Item::Value(value));
@@ -607,6 +607,16 @@ fn set_item_value(
         tray.remove("menu_bar_items");
     }
     Ok(())
+}
+
+/// Turn a table written inline by hand into a standard one, as the app writes
+/// them, so it can be edited the same way. Any other item stays as it is.
+fn standard_table(item: &mut toml_edit::Item) {
+    if item.is_inline_table() {
+        *item = std::mem::take(item)
+            .into_table()
+            .map_or_else(|item| item, toml_edit::Item::Table);
+    }
 }
 
 /// Persist one validated notification preference without disturbing other
@@ -4820,15 +4830,55 @@ enabled = true
                 .is_err()
         );
 
-        // A provider table it cannot edit leaves the file as it was, with the
-        // global value and the providers before it.
-        let before = "[tray]\nmenu_bar_window = \"weekly\"\n\n[tray.menu_bar_items]\n\"openai@work\".window = \"session\"\nzai = { window = \"monthly\" }\n";
+        // Tables written inline or with dotted keys by hand are edited too.
+        std::fs::write(
+            &path,
+            "[tray]\nmenu_bar_window = \"weekly\"\n\n[tray.menu_bar_items]\n\"openai@work\".window = \"session\"\nzai = { window = \"monthly\", hidden = true }\n",
+        )
+        .unwrap();
+        set_tray_value_for_all_items(&path, "menu_bar_window", "session".into(), "window").unwrap();
+        let tray = Config::load_from(&path).unwrap().tray;
+        assert_eq!(tray.menu_bar_window.as_deref(), Some("session"));
+        assert!(!tray.menu_bar_items.contains_key("openai@work"));
+        assert_eq!(tray.menu_bar_items["zai"].window, None);
+        assert!(tray.menu_bar_items["zai"].hidden);
+
+        // A config it cannot read is left as it was.
+        let before = "[tray\nmenu_bar_window = \"weekly\"\n";
         std::fs::write(&path, before).unwrap();
         assert!(
             set_tray_value_for_all_items(&path, "menu_bar_window", "session".into(), "window")
                 .is_err()
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn menu_bar_items_written_inline_are_edited_like_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[tray]\nmenu_bar_items = { zai = { window = \"monthly\" } }\n",
+        )
+        .unwrap();
+        set_menu_bar_item_value(&path, "zai", "hide_value", Some(true.into())).unwrap();
+        set_menu_bar_item_value(&path, "kimi", "window", Some("weekly".into())).unwrap();
+        let tray = Config::load_from(&path).unwrap().tray;
+        assert_eq!(
+            tray.menu_bar_items["zai"].window.as_deref(),
+            Some("monthly")
+        );
+        assert_eq!(tray.menu_bar_items["zai"].hide_value, Some(true));
+        assert_eq!(
+            tray.menu_bar_items["kimi"].window.as_deref(),
+            Some("weekly")
+        );
+
+        set_menu_bar_item_value(&path, "zai", "window", None).unwrap();
+        set_menu_bar_item_value(&path, "zai", "hide_value", None).unwrap();
+        let tray = Config::load_from(&path).unwrap().tray;
+        assert!(!tray.menu_bar_items.contains_key("zai"));
     }
 
     #[test]

@@ -162,12 +162,14 @@ define_class!(
 struct CenterBar {
     panel: Retained<NSPanel>,
     stack: Retained<NSStackView>,
-    /// Where the last other app's menus ended; kept while this app is in
-    /// front, so opening the popover does not move the providers.
+    /// Where the menus shown end, as last read, or `None` when unknown; kept
+    /// while this app is in front, so opening the popover does not move the
+    /// providers.
     menu_end: Rc<Cell<Option<f64>>>,
     /// The left edge of this app's chart item.
     chart_left: Rc<Cell<Option<f64>>>,
-    /// Measures the menus again while the last one is not laid out.
+    /// Measures the menus again while the menu bar lays them out or, after
+    /// an app comes to the front, while they cannot be read.
     remeasure: Rc<Cell<Option<Retained<NSTimer>>>>,
     /// One of the providers is open: its popover stays where it opened, so
     /// a new measurement moves the panel only once it closes.
@@ -225,7 +227,15 @@ impl CenterBar {
             RcBlock::new(move |notification: NonNull<NSNotification>| {
                 // SAFETY: AppKit passes a live notification for the call.
                 if !activates_this_app(unsafe { notification.as_ref() }) {
-                    measure(&panel, &stack, &menu_end, &chart_left, &held, &remeasure);
+                    measure(
+                        &panel,
+                        &stack,
+                        &menu_end,
+                        &chart_left,
+                        &held,
+                        &remeasure,
+                        true,
+                    );
                 } else if !held.get() {
                     place(&panel, &stack, menu_end.get(), chart_left.get());
                 }
@@ -272,6 +282,7 @@ impl CenterBar {
                 &self.chart_left,
                 &self.held,
                 &self.remeasure,
+                false,
             );
         } else {
             place(
@@ -347,15 +358,14 @@ fn activates_this_app(notification: &NSNotification) -> bool {
         .is_some_and(|app| app.processIdentifier() == std::process::id() as i32)
 }
 
-/// Where the menus end over one round of measurements, from an app coming
-/// to the front until the menu bar has laid out its menus or the tries run
-/// out.
+/// Where the menus end over one round of measurements, until the menu bar
+/// has laid them out or the tries run out.
 #[derive(Clone, Copy)]
 struct Reading {
     /// Where the panel is placed by.
     x: Option<f64>,
-    /// Whether `x` was read from the menus shown now, not kept from the
-    /// previous app's.
+    /// Whether `x` was read in this round, from the menus shown now, not
+    /// kept from before.
     read: bool,
 }
 
@@ -366,32 +376,40 @@ impl Reading {
     }
 
     /// Take in a measurement and tell whether to measure again. Menus
-    /// Accessibility cannot read may be another app's by now, so their end
-    /// is unknown; menus still being laid out keep the end until theirs is
-    /// read.
+    /// Accessibility cannot read may be another app's by now, unless this
+    /// round read them; menus still being laid out keep the end until theirs
+    /// is read.
     fn take(&mut self, measured: Option<MenuEnd>) -> bool {
         match measured {
-            None => *self = Self::from_kept(None),
+            None if !self.read => self.x = None,
             Some(MenuEnd { x: Some(x), .. }) => {
                 *self = Self {
                     x: Some(x),
                     read: true,
                 }
             }
-            Some(MenuEnd { x: None, .. }) => {}
+            _ => {}
         }
         measured.is_none_or(|end| !end.laid_out)
     }
 
-    /// The end once no try is left: one not read from the menus shown now
-    /// is another app's.
-    fn settled(self) -> Option<f64> {
-        self.x.filter(|_| self.read)
+    /// Take in a later try, the `last` one or not, and tell whether to
+    /// measure again. Once none is left, an end not read in this round is
+    /// another app's.
+    fn retake(&mut self, measured: Option<MenuEnd>, last: bool) -> bool {
+        let again = self.take(measured) && !last;
+        if !again && !self.read {
+            self.x = None;
+        }
+        again
     }
 }
 
 /// Measure where the menus end and place the panel, measuring again while
-/// the last menu is not laid out or Accessibility cannot read them.
+/// the menu bar lays them out or, when `unreadable` and with the permission,
+/// while Accessibility cannot read them. Right after an app comes to the
+/// front, it may not answer yet; later on, a hung app would cost each try
+/// the timeout.
 fn measure(
     panel: &Retained<NSPanel>,
     stack: &Retained<NSStackView>,
@@ -399,26 +417,28 @@ fn measure(
     chart_left: &Rc<Cell<Option<f64>>>,
     held: &Rc<Cell<bool>>,
     remeasure: &Cell<Option<Retained<NSTimer>>>,
+    unreadable: bool,
 ) {
     if let Some(timer) = remeasure.take() {
         timer.invalidate();
     }
+    let measured = menu_space::app_menu_end();
     let mut reading = Reading::from_kept(menu_end.get());
-    let again = reading.take(menu_space::app_menu_end());
+    let again = reading.take(measured);
     menu_end.set(reading.x);
     if !held.get() {
         place(panel, stack, menu_end.get(), chart_left.get());
     }
-    if again {
+    if again && (measured.is_some() || (unreadable && menu_space::trusted())) {
         let timer = remeasure_menus(panel, stack, menu_end, chart_left, held, reading);
         remeasure.set(Some(timer));
     }
 }
 
-/// Measure the menus again until the last one is laid out, and place the
-/// panel whenever their end moves. A last menu that stays hidden leaves the
-/// end of those drawn; an app that does not answer costs each try the
-/// Accessibility timeout.
+/// Measure the menus again until the last one is laid out or the tries run
+/// out, and place the panel whenever their end moves. A last menu that
+/// stays hidden leaves the end of those drawn; an app that does not answer
+/// costs each try one Accessibility timeout.
 fn remeasure_menus(
     panel: &Retained<NSPanel>,
     stack: &Retained<NSStackView>,
@@ -434,17 +454,15 @@ fn remeasure_menus(
     let block = RcBlock::new(move |timer: NonNull<NSTimer>| {
         tries.set(tries.get() + 1);
         let mut now = reading.get();
-        let again = now.take(menu_space::app_menu_end());
+        let again = now.retake(menu_space::app_menu_end(), tries.get() == REMEASURE_TRIES);
         reading.set(now);
-        let done = !again || tries.get() == REMEASURE_TRIES;
-        let x = if done { now.settled() } else { now.x };
-        if menu_end.get() != x {
-            menu_end.set(x);
+        if menu_end.get() != now.x {
+            menu_end.set(now.x);
             if !held.get() {
-                place(&panel, &stack, x, chart_left.get());
+                place(&panel, &stack, now.x, chart_left.get());
             }
         }
-        if done {
+        if !again {
             // SAFETY: the run loop passes the timer that fired, alive for the call.
             unsafe { timer.as_ref() }.invalidate();
         }
@@ -1686,22 +1704,30 @@ mod tests {
         let mut reading = Reading::from_kept(Some(372.0));
         assert!(reading.take(None), "measured again");
         assert_eq!(reading.x, None);
-        assert_eq!(reading.settled(), None);
+        // Unless this round read them already.
+        let mut reading = Reading::from_kept(None);
+        assert!(reading.take(end(Some(44.0), false)));
+        assert!(reading.retake(None, false));
+        assert_eq!(reading.x, Some(44.0));
     }
 
     #[test]
     fn a_reading_keeps_the_end_until_the_menus_are_laid_out() {
         let mut reading = Reading::from_kept(Some(372.0));
-        // No menu drawn yet: the previous app's end stays for now, but not
-        // once the tries run out.
+        // No menu drawn yet: the previous app's end stays for now...
         assert!(reading.take(end(None, false)));
         assert_eq!(reading.x, Some(372.0));
-        assert_eq!(reading.settled(), None);
-        // The first ones drawn are this app's.
-        assert!(reading.take(end(Some(44.0), false)));
-        assert_eq!(reading.settled(), Some(44.0));
+        // ...but not once the tries run out.
+        let mut out = reading;
+        assert!(!out.retake(end(None, false), true));
+        assert_eq!(out.x, None);
+        // The first ones drawn are this app's, even with no try left.
+        assert!(reading.retake(end(Some(44.0), false), false));
+        let mut out = reading;
+        assert!(!out.retake(end(None, false), true));
+        assert_eq!(out.x, Some(44.0));
         // The last one ends the round.
-        assert!(!reading.take(end(Some(372.0), true)));
-        assert_eq!(reading.settled(), Some(372.0));
+        assert!(!reading.retake(end(Some(372.0), true), false));
+        assert_eq!(reading.x, Some(372.0));
     }
 }

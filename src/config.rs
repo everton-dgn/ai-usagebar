@@ -4820,9 +4820,9 @@ enabled = true
                 .is_err()
         );
 
-        // A provider table it cannot edit leaves the file as it was, global
-        // value included.
-        let before = "[tray]\nmenu_bar_window = \"weekly\"\n\n[tray.menu_bar_items]\nzai = { window = \"monthly\" }\n";
+        // A provider table it cannot edit leaves the file as it was, with the
+        // global value and the providers before it.
+        let before = "[tray]\nmenu_bar_window = \"weekly\"\n\n[tray.menu_bar_items]\n\"openai@work\".window = \"session\"\nzai = { window = \"monthly\" }\n";
         std::fs::write(&path, before).unwrap();
         assert!(
             set_tray_value_for_all_items(&path, "menu_bar_window", "session".into(), "window")

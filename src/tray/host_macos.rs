@@ -1126,17 +1126,36 @@ fn chart_global_pick(tag: isize, bar: ChartMenuState) -> Option<(Command, Option
 
 /// A pick among the chart menu's global options. The window, value and color
 /// apply to every provider, so each provider's own choice for them goes
-/// first, whether it came from its menu or from Settings. The config gets
-/// both in one write, so a failed one drops no provider's choice.
+/// first, whether it came from its menu or from Settings.
 fn chart_global_command(state: &mut TrayState, tag: isize) -> Option<Command> {
     let (command, key) = chart_global_pick(tag, chart_menu_state(state))?;
     if let Some(key) = key {
-        clear_own_choice(&mut state.menu_bar_items, key);
-        if let (Some(path), Some((global, value))) = (config_path(), global_value(&command)) {
-            let _ = crate::config::set_tray_value_for_all_items(&path, global, value, key);
-        }
+        replace_own_choices(
+            &mut state.menu_bar_items,
+            key,
+            &command,
+            config_path().as_deref(),
+        );
     }
     Some(command)
+}
+
+/// Drop each provider's own choice for `key` and save that with the global
+/// value `command` sets, in one write to the config at `path`. If the write
+/// fails, the choices stay in memory too, and the command saves only the
+/// global value.
+fn replace_own_choices(
+    items: &mut std::collections::BTreeMap<String, MenuBarItemConfig>,
+    key: &str,
+    command: &Command,
+    path: Option<&std::path::Path>,
+) {
+    if let (Some(path), Some((global, value))) = (path, global_value(command))
+        && crate::config::set_tray_value_for_all_items(path, global, value, key).is_err()
+    {
+        return;
+    }
+    clear_own_choice(items, key);
 }
 
 /// The `[tray]` preference a global option writes.
@@ -2921,6 +2940,33 @@ mod presentation_tests {
             same_window(&[], UsageWindow::Monthly),
             Some(UsageWindow::Monthly)
         );
+    }
+
+    #[test]
+    fn a_global_pick_keeps_the_choices_it_cannot_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let command = Command::SetMenuBarWindow {
+            value: WindowChoice::Session,
+        };
+        let own = MenuBarItemConfig {
+            window: Some("monthly".into()),
+            ..Default::default()
+        };
+        let mut items = std::collections::BTreeMap::from([("zai".to_owned(), own.clone())]);
+        // A provider table the config cannot edit: nothing is saved or dropped.
+        let text = "[tray.menu_bar_items]\nzai = { window = \"monthly\" }\n";
+        std::fs::write(&path, text).unwrap();
+        replace_own_choices(&mut items, "window", &command, Some(&path));
+        assert_eq!(items["zai"], own);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        // Saved: the choice goes from memory and from the file.
+        std::fs::write(&path, "[tray.menu_bar_items.zai]\nwindow = \"monthly\"\n").unwrap();
+        replace_own_choices(&mut items, "window", &command, Some(&path));
+        assert!(items.is_empty());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("menu_bar_window = \"session\""), "{saved}");
+        assert!(!saved.contains("monthly"), "{saved}");
     }
 
     #[test]

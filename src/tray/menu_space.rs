@@ -56,33 +56,39 @@ pub fn app_menu_end() -> Option<MenuEnd> {
     let element = unsafe { AXUIElement::new_application(pid) };
     // SAFETY: a plain setter on a live element.
     unsafe { element.set_messaging_timeout(MENUS_TIMEOUT) };
-    let bar = attribute(&element, "AXMenuBar")?
+    let bar = attribute(&element, "AXMenuBar")
+        .ok()?
         .downcast::<AXUIElement>()
         .ok()?;
-    Some(menu_end(
+    menu_end(
         children(&bar, MENUS_TIMEOUT)?
             .iter()
             .map(|item| frame(item)),
-    ))
+    )
 }
 
-/// How long Accessibility waits on the app whose menus are shown, and on
-/// each other app for its status items: a hung app must not stall the menu
-/// bar.
+/// How long Accessibility waits for each answer from an app, so a hung one
+/// cannot stall the menu bar.
 const MENUS_TIMEOUT: f32 = 0.25;
+/// The same for asking every running app whether it has status items.
 const EXTRAS_TIMEOUT: f32 = 0.1;
 
-/// Where menus with these frames, left to right, end. `None` stands for a
-/// menu without a size. Only the frames up to the last menu that has one,
-/// from the right, are read.
-fn menu_end(frames: impl DoubleEndedIterator<Item = Option<CGRect>>) -> MenuEnd {
+/// Where menus with these frames, left to right, end, or `None` once the app
+/// stops answering. `Ok(None)` stands for a menu without a size. Only the
+/// frames up to the last menu that has one, from the right, are read.
+fn menu_end(
+    frames: impl DoubleEndedIterator<Item = Result<Option<CGRect>, AXError>>,
+) -> Option<MenuEnd> {
     let mut frames = frames.rev();
-    let last = frames.next().flatten();
-    let drawn = last.or_else(|| frames.flatten().next());
-    MenuEnd {
+    let last = frames.next().transpose().ok()?.flatten();
+    let drawn = match last {
+        Some(rect) => Some(rect),
+        None => frames.find_map(Result::transpose).transpose().ok()?,
+    };
+    Some(MenuEnd {
         x: drawn.map(|rect| rect.origin.x + rect.size.width),
         laid_out: last.is_some(),
-    }
+    })
 }
 
 /// `element`'s children, asked for and then read within `timeout`, which
@@ -90,7 +96,8 @@ fn menu_end(frames: impl DoubleEndedIterator<Item = Option<CGRect>>) -> MenuEnd 
 fn children(element: &AXUIElement, timeout: f32) -> Option<Vec<CFRetained<AXUIElement>>> {
     // SAFETY: a plain setter on a live element.
     unsafe { element.set_messaging_timeout(timeout) };
-    let array = attribute(element, "AXChildren")?
+    let array = attribute(element, "AXChildren")
+        .ok()?
         .downcast::<CFArray>()
         .ok()?;
     // SAFETY: an AXChildren value is an array of AXUIElements.
@@ -106,24 +113,35 @@ fn children(element: &AXUIElement, timeout: f32) -> Option<Vec<CFRetained<AXUIEl
     )
 }
 
-fn attribute(element: &AXUIElement, name: &'static str) -> Option<CFRetained<CFType>> {
+/// `element`'s attribute `name`, or the error Accessibility answered with.
+fn attribute(element: &AXUIElement, name: &'static str) -> Result<CFRetained<CFType>, AXError> {
     let name = CFString::from_static_str(name);
     let mut value: *const CFType = std::ptr::null();
     // SAFETY: `value` is a valid out-pointer for a +1 reference.
     let error = unsafe { element.copy_attribute_value(&name, NonNull::from(&mut value)) };
     if error != AXError::Success {
-        return None;
+        return Err(error);
     }
     // SAFETY: on success the value is a +1 reference we now own.
-    NonNull::new(value.cast_mut()).map(|value| unsafe { CFRetained::from_raw(value) })
+    NonNull::new(value.cast_mut())
+        .map(|value| unsafe { CFRetained::from_raw(value) })
+        .ok_or(AXError::NoValue)
 }
 
-fn frame(element: &AXUIElement) -> Option<CGRect> {
-    let value = attribute(element, "AXFrame")?.downcast::<AXValue>().ok()?;
-    let mut rect = CGRect::default();
-    // SAFETY: an AXFrame value holds a CGRect, written into `rect`.
-    let ok = unsafe { value.value(AXValueType::CGRect, NonNull::from(&mut rect).cast()) };
-    ok.then_some(rect).filter(on_screen)
+/// `element`'s frame when Accessibility reports it drawn, or the error when
+/// the app did not answer in time.
+fn frame(element: &AXUIElement) -> Result<Option<CGRect>, AXError> {
+    let value = match attribute(element, "AXFrame") {
+        Ok(value) => value.downcast::<AXValue>().ok(),
+        Err(AXError::CannotComplete) => return Err(AXError::CannotComplete),
+        Err(_) => None,
+    };
+    Ok(value.and_then(|value| {
+        let mut rect = CGRect::default();
+        // SAFETY: an AXFrame value holds a CGRect, written into `rect`.
+        let ok = unsafe { value.value(AXValueType::CGRect, NonNull::from(&mut rect).cast()) };
+        ok.then_some(rect).filter(on_screen)
+    }))
 }
 
 /// Whether Accessibility reports `rect` as drawn. A menu that is not, such as
@@ -152,12 +170,15 @@ pub fn status_items_start(own: Option<f64>, bar_height: f64) -> Option<f64> {
             let element = unsafe { AXUIElement::new_application(pid) };
             // SAFETY: a plain setter on a live element.
             unsafe { element.set_messaging_timeout(EXTRAS_TIMEOUT) };
-            let extras = attribute(&element, "AXExtrasMenuBar")?
+            let extras = attribute(&element, "AXExtrasMenuBar")
+                .ok()?
                 .downcast::<AXUIElement>()
                 .ok()?;
-            children(&extras, EXTRAS_TIMEOUT)?
+            children(&extras, MENUS_TIMEOUT)?
                 .iter()
-                .filter_map(|item| frame(item))
+                // An app that stops answering keeps the items read so far.
+                .map_while(|item| frame(item).ok())
+                .flatten()
                 .filter(|rect| rect.origin.y < bar_height)
                 .map(|rect| rect.origin.x)
                 .reduce(f64::min)
@@ -199,19 +220,39 @@ mod tests {
 
     #[test]
     fn the_menus_are_laid_out_once_the_last_one_is() {
-        let apple = Some(rect(10.0, 0.0, 34.0, 30.0));
-        let help = Some(rect(323.0, 0.0, 49.0, 30.0));
-        let end = |x, laid_out| MenuEnd { x, laid_out };
+        let apple = Ok(Some(rect(10.0, 0.0, 34.0, 30.0)));
+        let help = Ok(Some(rect(323.0, 0.0, 49.0, 30.0)));
+        let hidden = Ok(None);
+        let end = |x, laid_out| Some(MenuEnd { x, laid_out });
         // ChatGPT's menus while the menu bar redrew the first ones.
         assert_eq!(
-            menu_end([apple, None, None, help].into_iter()),
+            menu_end([apple, hidden, hidden, help].into_iter()),
             end(Some(372.0), true)
         );
         // Those of an app that has just come to the front, or has none yet.
-        assert_eq!(menu_end([None, None].into_iter()), end(None, false));
+        assert_eq!(menu_end([hidden, hidden].into_iter()), end(None, false));
         assert_eq!(menu_end(std::iter::empty()), end(None, false));
         // Only the first ones laid out: where they end is not the end yet.
-        assert_eq!(menu_end([apple, None].into_iter()), end(Some(44.0), false));
+        assert_eq!(
+            menu_end([apple, hidden].into_iter()),
+            end(Some(44.0), false)
+        );
+    }
+
+    #[test]
+    fn menus_of_an_app_that_stops_answering_have_no_end() {
+        let apple = Ok(Some(rect(10.0, 0.0, 34.0, 30.0)));
+        let timeout = Err(AXError::CannotComplete);
+        assert_eq!(menu_end([apple, timeout].into_iter()), None);
+        assert_eq!(menu_end([timeout, Ok(None)].into_iter()), None);
+        // A menu left of the last one is not read once that has a size.
+        assert_eq!(
+            menu_end([timeout, apple].into_iter()),
+            Some(MenuEnd {
+                x: Some(44.0),
+                laid_out: true
+            })
+        );
     }
 
     #[test]

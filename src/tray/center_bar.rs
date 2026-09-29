@@ -51,7 +51,7 @@ pub(super) struct CenterBar {
     /// an app comes to the front, while they cannot be read.
     remeasure: Rc<Cell<Option<Retained<NSTimer>>>>,
     /// One of the providers is open: its popover stays where it opened, so
-    /// a new measurement moves the panel only once it closes.
+    /// the panel moves only once it closes, unless it is off screen.
     held: Rc<Cell<bool>>,
     observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
 }
@@ -115,7 +115,7 @@ impl CenterBar {
                         &remeasure,
                         true,
                     );
-                } else if !held.get() {
+                } else if movable(&panel, &held) {
                     place(&panel, &stack, menu_end.get(), chart_left.get());
                 }
             })
@@ -163,7 +163,7 @@ impl CenterBar {
                 &self.remeasure,
                 false,
             );
-        } else {
+        } else if movable(&self.panel, &self.held) {
             place(
                 &self.panel,
                 &self.stack,
@@ -199,6 +199,12 @@ impl Drop for CenterBar {
         }
         self.panel.orderOut(None);
     }
+}
+
+/// Whether the panel may move: not while one of its providers is open, unless
+/// it is off screen, as right after its providers are rebuilt.
+fn movable(panel: &NSPanel, held: &Cell<bool>) -> bool {
+    !held.get() || !panel.isVisible()
 }
 
 /// Size the panel to its buttons and center it in the free stretch of the
@@ -305,7 +311,7 @@ fn measure(
     let mut reading = Reading::from_kept(menu_end.get());
     let again = reading.take(measured);
     menu_end.set(reading.x);
-    if !held.get() {
+    if movable(panel, held) {
         place(panel, stack, menu_end.get(), chart_left.get());
     }
     if again && (measured.is_some() || (unreadable && menu_space::trusted())) {
@@ -337,7 +343,7 @@ fn remeasure_menus(
         reading.set(now);
         if menu_end.get() != now.x {
             menu_end.set(now.x);
-            if !held.get() {
+            if movable(&panel, &held) {
                 place(&panel, &stack, now.x, chart_left.get());
             }
         }

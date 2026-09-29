@@ -54,14 +54,23 @@ pub fn app_menu_end() -> Option<MenuEnd> {
     }
     // SAFETY: any pid is accepted; a gone process makes later calls fail.
     let element = unsafe { AXUIElement::new_application(pid) };
-    // A hung app must not stall the menu bar.
     // SAFETY: a plain setter on a live element.
-    unsafe { element.set_messaging_timeout(0.25) };
+    unsafe { element.set_messaging_timeout(MENUS_TIMEOUT) };
     let bar = attribute(&element, "AXMenuBar")?
         .downcast::<AXUIElement>()
         .ok()?;
-    Some(menu_end(children(&bar)?.iter().map(|item| frame(item))))
+    Some(menu_end(
+        children(&bar, MENUS_TIMEOUT)?
+            .iter()
+            .map(|item| frame(item)),
+    ))
 }
+
+/// How long Accessibility waits on the app whose menus are shown, and on
+/// each other app for its status items: a hung app must not stall the menu
+/// bar.
+const MENUS_TIMEOUT: f32 = 0.25;
+const EXTRAS_TIMEOUT: f32 = 0.1;
 
 /// Where menus with these frames, left to right, end. `None` stands for a
 /// menu without a size. Only the frames up to the last menu that has one,
@@ -76,13 +85,25 @@ fn menu_end(frames: impl DoubleEndedIterator<Item = Option<CGRect>>) -> MenuEnd 
     }
 }
 
-fn children(element: &AXUIElement) -> Option<Vec<CFRetained<AXUIElement>>> {
+/// `element`'s children, asked for and then read within `timeout`, which
+/// Accessibility keeps only on the element it was set on.
+fn children(element: &AXUIElement, timeout: f32) -> Option<Vec<CFRetained<AXUIElement>>> {
+    // SAFETY: a plain setter on a live element.
+    unsafe { element.set_messaging_timeout(timeout) };
     let array = attribute(element, "AXChildren")?
         .downcast::<CFArray>()
         .ok()?;
     // SAFETY: an AXChildren value is an array of AXUIElements.
     let array: CFRetained<CFArray<AXUIElement>> = unsafe { CFRetained::cast_unchecked(array) };
-    Some(array.iter().collect())
+    Some(
+        array
+            .iter()
+            // SAFETY: a plain setter on a live element.
+            .inspect(|child| unsafe {
+                child.set_messaging_timeout(timeout);
+            })
+            .collect(),
+    )
 }
 
 fn attribute(element: &AXUIElement, name: &'static str) -> Option<CFRetained<CFType>> {
@@ -130,11 +151,11 @@ pub fn status_items_start(own: Option<f64>, bar_height: f64) -> Option<f64> {
             // SAFETY: any pid is accepted; a gone process makes later calls fail.
             let element = unsafe { AXUIElement::new_application(pid) };
             // SAFETY: a plain setter on a live element.
-            unsafe { element.set_messaging_timeout(0.1) };
+            unsafe { element.set_messaging_timeout(EXTRAS_TIMEOUT) };
             let extras = attribute(&element, "AXExtrasMenuBar")?
                 .downcast::<AXUIElement>()
                 .ok()?;
-            children(&extras)?
+            children(&extras, EXTRAS_TIMEOUT)?
                 .iter()
                 .filter_map(|item| frame(item))
                 .filter(|rect| rect.origin.y < bar_height)

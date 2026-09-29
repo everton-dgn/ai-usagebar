@@ -41,6 +41,8 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
   menus do app ativado ainda estão sendo montados ou quando um app sem barra de
   menus própria fica em primeiro plano, e logo após a concessão da
   Acessibilidade.
+- Centralização sem travar a barra de menus por segundos quando outro app deixa
+  de responder.
 
 ### Removido
 

@@ -35,7 +35,7 @@ use objc2_foundation::{
 use objc2_quartz_core::{CAAutoresizingMask, CALayer};
 
 use super::menu_bar::{Chip, Level};
-use super::menu_space;
+use super::menu_space::{self, MenuEnd};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -56,8 +56,9 @@ const CENTER_RULE_GAP: f64 = 28.0;
 /// highlight of an open item shows; taken back out of the row's spacing.
 const CENTER_ROOM: f64 = 6.0;
 /// Right after an app comes to the front, the menu bar can still be laying
-/// out its menus. They are measured again this often until the last one is,
-/// at most this many times.
+/// out its menus, or the app not answering Accessibility yet. They are
+/// measured again this often until the last one is laid out, at most this
+/// many times.
 const REMEASURE_INTERVAL: f64 = 0.2;
 const REMEASURE_TRIES: u32 = 5;
 
@@ -261,8 +262,8 @@ impl CenterBar {
     }
 
     fn place(&self) {
-        // Not measured yet, as when centering or the permission has just
-        // been turned on.
+        // Not measured yet, as when centering has just been turned on, or
+        // not readable when last measured, as without the permission.
         if self.menu_end.get().is_none() {
             measure(
                 &self.panel,
@@ -346,8 +347,51 @@ fn activates_this_app(notification: &NSNotification) -> bool {
         .is_some_and(|app| app.processIdentifier() == std::process::id() as i32)
 }
 
+/// Where the menus end over one round of measurements, from an app coming
+/// to the front until the menu bar has laid out its menus or the tries run
+/// out.
+#[derive(Clone, Copy)]
+struct Reading {
+    /// Where the panel is placed by.
+    x: Option<f64>,
+    /// Whether `x` was read from the menus shown now, not kept from the
+    /// previous app's.
+    read: bool,
+}
+
+impl Reading {
+    /// A round that starts from the end kept until now.
+    fn from_kept(x: Option<f64>) -> Self {
+        Self { x, read: false }
+    }
+
+    /// Take in a measurement and tell whether to measure again. Menus
+    /// Accessibility cannot read may be another app's by now, so their end
+    /// is unknown; menus still being laid out keep the end until theirs is
+    /// read.
+    fn take(&mut self, measured: Option<MenuEnd>) -> bool {
+        match measured {
+            None => *self = Self::from_kept(None),
+            Some(MenuEnd { x: Some(x), .. }) => {
+                *self = Self {
+                    x: Some(x),
+                    read: true,
+                }
+            }
+            Some(MenuEnd { x: None, .. }) => {}
+        }
+        measured.is_none_or(|end| !end.laid_out)
+    }
+
+    /// The end once no try is left: one not read from the menus shown now
+    /// is another app's.
+    fn settled(self) -> Option<f64> {
+        self.x.filter(|_| self.read)
+    }
+}
+
 /// Measure where the menus end and place the panel, measuring again while
-/// the last menu is not laid out.
+/// the last menu is not laid out or Accessibility cannot read them.
 fn measure(
     panel: &Retained<NSPanel>,
     stack: &Retained<NSStackView>,
@@ -359,45 +403,48 @@ fn measure(
     if let Some(timer) = remeasure.take() {
         timer.invalidate();
     }
-    let measured = menu_space::app_menu_end();
-    if let Some(x) = measured.and_then(|end| end.x) {
-        menu_end.set(Some(x));
-    }
+    let mut reading = Reading::from_kept(menu_end.get());
+    let again = reading.take(menu_space::app_menu_end());
+    menu_end.set(reading.x);
     if !held.get() {
         place(panel, stack, menu_end.get(), chart_left.get());
     }
-    if measured.is_some_and(|end| !end.laid_out) {
-        let timer = remeasure_menus(panel, stack, menu_end, chart_left, held);
+    if again {
+        let timer = remeasure_menus(panel, stack, menu_end, chart_left, held, reading);
         remeasure.set(Some(timer));
     }
 }
 
-/// Measure the menus again until the last one is laid out or Accessibility
-/// stops answering, and place the panel whenever their end moves. A last
-/// menu that stays hidden leaves the end of those drawn.
+/// Measure the menus again until the last one is laid out, and place the
+/// panel whenever their end moves. A last menu that stays hidden leaves the
+/// end of those drawn; an app that does not answer costs each try the
+/// Accessibility timeout.
 fn remeasure_menus(
     panel: &Retained<NSPanel>,
     stack: &Retained<NSStackView>,
     menu_end: &Rc<Cell<Option<f64>>>,
     chart_left: &Rc<Cell<Option<f64>>>,
     held: &Rc<Cell<bool>>,
+    reading: Reading,
 ) -> Retained<NSTimer> {
     let (panel, stack) = (panel.clone(), stack.clone());
     let (menu_end, chart_left, held) = (menu_end.clone(), chart_left.clone(), held.clone());
+    let reading = Cell::new(reading);
     let tries = Cell::new(0);
     let block = RcBlock::new(move |timer: NonNull<NSTimer>| {
         tries.set(tries.get() + 1);
-        let measured = menu_space::app_menu_end();
-        if let Some(x) = measured.and_then(|end| end.x)
-            && menu_end.get() != Some(x)
-        {
-            menu_end.set(Some(x));
+        let mut now = reading.get();
+        let again = now.take(menu_space::app_menu_end());
+        reading.set(now);
+        let done = !again || tries.get() == REMEASURE_TRIES;
+        let x = if done { now.settled() } else { now.x };
+        if menu_end.get() != x {
+            menu_end.set(x);
             if !held.get() {
-                place(&panel, &stack, Some(x), chart_left.get());
+                place(&panel, &stack, x, chart_left.get());
             }
         }
-        let pending = measured.is_some_and(|end| !end.laid_out);
-        if !pending || tries.get() == REMEASURE_TRIES {
+        if done {
             // SAFETY: the run loop passes the timer that fired, alive for the call.
             unsafe { timer.as_ref() }.invalidate();
         }
@@ -1622,5 +1669,39 @@ pub fn tooltip_line(chip: &Chip) -> String {
         format!("{line} · cached")
     } else {
         line
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn end(x: Option<f64>, laid_out: bool) -> Option<MenuEnd> {
+        Some(MenuEnd { x, laid_out })
+    }
+
+    #[test]
+    fn menus_accessibility_cannot_read_have_no_end() {
+        // The previous app's end, while this one's menus do not answer.
+        let mut reading = Reading::from_kept(Some(372.0));
+        assert!(reading.take(None), "measured again");
+        assert_eq!(reading.x, None);
+        assert_eq!(reading.settled(), None);
+    }
+
+    #[test]
+    fn a_reading_keeps_the_end_until_the_menus_are_laid_out() {
+        let mut reading = Reading::from_kept(Some(372.0));
+        // No menu drawn yet: the previous app's end stays for now, but not
+        // once the tries run out.
+        assert!(reading.take(end(None, false)));
+        assert_eq!(reading.x, Some(372.0));
+        assert_eq!(reading.settled(), None);
+        // The first ones drawn are this app's.
+        assert!(reading.take(end(Some(44.0), false)));
+        assert_eq!(reading.settled(), Some(44.0));
+        // The last one ends the round.
+        assert!(!reading.take(end(Some(372.0), true)));
+        assert_eq!(reading.settled(), Some(372.0));
     }
 }

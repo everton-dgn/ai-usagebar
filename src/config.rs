@@ -567,7 +567,8 @@ pub fn set_tray_value_for_all_items(
 }
 
 /// Set or clear `key` in the `[tray.menu_bar_items."<id>"]` table of `doc`,
-/// removing the tables left empty.
+/// removing the tables left empty. Tables written inline by hand are edited
+/// in place, keeping their form and comments.
 fn set_item_value(
     doc: &mut toml_edit::DocumentMut,
     id: &str,
@@ -582,16 +583,27 @@ fn set_item_value(
     let items = tray
         .entry("menu_bar_items")
         .or_insert_with(toml_edit::table);
-    standard_table(items);
+    if let Some(items) = items.as_table_mut() {
+        items.set_implicit(true);
+    }
+    // An inline table holds only values, so a new provider in one is inline too.
+    let inline = items.is_inline_table();
     let items = items
-        .as_table_mut()
+        .as_table_like_mut()
         .ok_or_else(|| AppError::Other("config.toml: menu_bar_items is not a table".into()))?;
-    items.set_implicit(true);
-    let item = items.entry(id).or_insert_with(toml_edit::table);
-    standard_table(item);
-    let item = item.as_table_mut().ok_or_else(|| {
-        AppError::Other(format!("config.toml: menu_bar_items.{id} is not a table"))
-    })?;
+    let item = items
+        .entry(id)
+        .or_insert_with(|| {
+            if inline {
+                toml_edit::value(toml_edit::InlineTable::new())
+            } else {
+                toml_edit::table()
+            }
+        })
+        .as_table_like_mut()
+        .ok_or_else(|| {
+            AppError::Other(format!("config.toml: menu_bar_items.{id} is not a table"))
+        })?;
     match value {
         Some(value) => {
             item.insert(key, toml_edit::Item::Value(value));
@@ -607,16 +619,6 @@ fn set_item_value(
         tray.remove("menu_bar_items");
     }
     Ok(())
-}
-
-/// Turn a table written inline by hand into a standard one, as the app writes
-/// them, so it can be edited the same way. Any other item stays as it is.
-fn standard_table(item: &mut toml_edit::Item) {
-    if item.is_inline_table() {
-        *item = std::mem::take(item)
-            .into_table()
-            .map_or_else(|item| item, toml_edit::Item::Table);
-    }
 }
 
 /// Persist one validated notification preference without disturbing other
@@ -4837,6 +4839,8 @@ enabled = true
         )
         .unwrap();
         set_tray_value_for_all_items(&path, "menu_bar_window", "session".into(), "window").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("zai = {"), "{text}");
         let tray = Config::load_from(&path).unwrap().tray;
         assert_eq!(tray.menu_bar_window.as_deref(), Some("session"));
         assert!(!tray.menu_bar_items.contains_key("openai@work"));
@@ -4854,16 +4858,19 @@ enabled = true
     }
 
     #[test]
-    fn menu_bar_items_written_inline_are_edited_like_the_others() {
+    fn menu_bar_items_written_inline_are_edited_in_place() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "[tray]\nmenu_bar_items = { zai = { window = \"monthly\" } }\n",
+            "[tray]\n# mine\nmenu_bar_items = { zai = { window = \"monthly\" } } # work\n",
         )
         .unwrap();
         set_menu_bar_item_value(&path, "zai", "hide_value", Some(true.into())).unwrap();
         set_menu_bar_item_value(&path, "kimi", "window", Some("weekly".into())).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# mine") && text.contains("# work"), "{text}");
+        assert!(text.contains("menu_bar_items = {"), "{text}");
         let tray = Config::load_from(&path).unwrap().tray;
         assert_eq!(
             tray.menu_bar_items["zai"].window.as_deref(),
@@ -4874,6 +4881,11 @@ enabled = true
             tray.menu_bar_items["kimi"].window.as_deref(),
             Some("weekly")
         );
+
+        // Clearing what is not set leaves the file alone.
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        set_menu_bar_item_value(&path, "zai", "color_value", None).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
 
         set_menu_bar_item_value(&path, "zai", "window", None).unwrap();
         set_menu_bar_item_value(&path, "zai", "hide_value", None).unwrap();

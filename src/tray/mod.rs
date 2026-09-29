@@ -19,6 +19,8 @@ mod strip;
 #[cfg(target_os = "macos")]
 mod assets;
 #[cfg(target_os = "macos")]
+mod center_bar;
+#[cfg(target_os = "macos")]
 mod host_macos;
 #[cfg(target_os = "macos")]
 mod menu_space;

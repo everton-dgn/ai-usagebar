@@ -24,6 +24,10 @@ mod menu_bar {
     }
 }
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
+#[path = "../src/tray/center_bar.rs"]
+mod center_bar;
+#[cfg(target_os = "macos")]
 #[allow(dead_code, unused_imports)]
 #[path = "../src/tray/menu_space.rs"]
 mod menu_space;

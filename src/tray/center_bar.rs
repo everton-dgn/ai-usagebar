@@ -10,7 +10,7 @@ use objc2_app_kit::{
     NSLayoutAttribute, NSPanel, NSRunningApplication, NSScreen, NSStackView, NSStatusBar,
     NSStatusWindowLevel, NSUserInterfaceLayoutOrientation, NSWindowCollectionBehavior,
     NSWindowStyleMask, NSWorkspace, NSWorkspaceApplicationKey,
-    NSWorkspaceDidActivateApplicationNotification,
+    NSWorkspaceDidActivateApplicationNotification, NSWorkspaceDidTerminateApplicationNotification,
 };
 use objc2_foundation::{
     MainThreadMarker, NSDefaultRunLoopMode, NSNotification, NSNotificationCenter, NSObjectProtocol,
@@ -122,7 +122,7 @@ impl CenterBar {
         };
         let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
         // SAFETY: the block only touches main-thread objects and AppKit posts
-        // both notifications on the main thread.
+        // these notifications on the main thread.
         let observers = unsafe {
             vec![
                 NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
@@ -133,6 +133,14 @@ impl CenterBar {
                 ),
                 workspace.addObserverForName_object_queue_usingBlock(
                     Some(NSWorkspaceDidActivateApplicationNotification),
+                    None,
+                    None,
+                    &block,
+                ),
+                // The app that owns the menu bar can quit while this one is in
+                // front, and then no other app comes to the front.
+                workspace.addObserverForName_object_queue_usingBlock(
+                    Some(NSWorkspaceDidTerminateApplicationNotification),
                     None,
                     None,
                     &block,

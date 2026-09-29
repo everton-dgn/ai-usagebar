@@ -282,12 +282,19 @@ pub struct View<'a> {
     pub thresholds: (f64, f64),
 }
 
-/// The quota window a provider's chip reads: its own, or `global` where it
-/// has none or follows the global one (`"auto"`).
-pub fn item_window(item: Option<&MenuBarItemConfig>, global: UsageWindow) -> UsageWindow {
-    item.and_then(|item| item.window.as_deref())
+/// A provider's own quota window, if it has one: `"auto"` follows the global
+/// one.
+pub fn own_window(item: &MenuBarItemConfig) -> Option<UsageWindow> {
+    item.window
+        .as_deref()
         .filter(|window| *window != "auto")
-        .map_or(global, UsageWindow::parse)
+        .map(UsageWindow::parse)
+}
+
+/// The quota window a provider's chip reads: its own, or `global` where it
+/// has none.
+pub fn item_window(item: Option<&MenuBarItemConfig>, global: UsageWindow) -> UsageWindow {
+    item.and_then(own_window).unwrap_or(global)
 }
 
 impl View<'_> {

@@ -1381,12 +1381,21 @@ const MENU_TOGGLE_COLOR: isize = 14;
 const MENU_CENTERED: isize = 15;
 const MENU_ACCESSIBILITY: isize = 16;
 
+/// Whether a provider's menu checks `choice`: "Same as the menu bar" while it
+/// has no window of its own, otherwise that window.
+fn window_checked(own: Option<UsageWindow>, choice: UsageWindow) -> bool {
+    match own {
+        None => choice == UsageWindow::Auto,
+        Some(own) => own == choice && own != UsageWindow::Auto,
+    }
+}
+
 fn provider_menu(state: &mut TrayState, id: &str) -> Vec<MenuLine> {
     state.menu_provider = Some(id.to_owned());
     let pt = state.language == "pt-BR";
     let label = |en: &str, br: &str| (if pt { br } else { en }).to_owned();
     let item = state.menu_bar_items.get(id).cloned().unwrap_or_default();
-    let window = item.window.as_deref().map(UsageWindow::parse);
+    let window = menu_bar::own_window(&item);
     let hide_value = item.hide_value.unwrap_or(state.menu_bar_hide_value);
     let name = state
         .strip_names
@@ -1418,15 +1427,10 @@ fn provider_menu(state: &mut TrayState, id: &str) -> Vec<MenuLine> {
             UsageWindow::Weekly => label("Weekly", "Semanal"),
             UsageWindow::Monthly => label("Monthly", "Mensal"),
         };
-        let checked = match (window, choice) {
-            (None, UsageWindow::Auto) => true,
-            (Some(set), choice) => set == choice && choice != UsageWindow::Auto,
-            _ => false,
-        };
         lines.push(MenuLine::Pick {
             title,
             tag,
-            checked,
+            checked: window_checked(window, choice),
         });
     }
     lines.push(MenuLine::Separator);
@@ -2911,6 +2915,25 @@ mod presentation_tests {
         // With no provider in the menu bar, the global value stands.
         assert!(all_on(&[], true, shows));
         assert!(!all_on(&[], false, shows));
+    }
+
+    #[test]
+    fn a_provider_following_the_menu_bar_checks_that_option() {
+        let own = |window: &str| {
+            menu_bar::own_window(&MenuBarItemConfig {
+                window: Some(window.into()),
+                ..Default::default()
+            })
+        };
+        // "auto" written by hand follows the menu bar, as no window does.
+        assert!(window_checked(own("auto"), UsageWindow::Auto));
+        assert!(window_checked(
+            menu_bar::own_window(&MenuBarItemConfig::default()),
+            UsageWindow::Auto
+        ));
+        assert!(window_checked(own("weekly"), UsageWindow::Weekly));
+        assert!(!window_checked(own("weekly"), UsageWindow::Auto));
+        assert!(!window_checked(own("auto"), UsageWindow::Weekly));
     }
 
     #[test]

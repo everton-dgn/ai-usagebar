@@ -1040,8 +1040,9 @@ struct ChartMenuState {
     all_show: bool,
     /// Every provider in the menu bar colors its value.
     all_colored: bool,
-    /// No provider in the menu bar has a window of its own.
-    shared_window: bool,
+    /// The window every provider in the menu bar reads, when they all read
+    /// the same one.
+    window: Option<UsageWindow>,
     active_only: bool,
     centered: bool,
 }
@@ -1056,12 +1057,20 @@ fn chart_menu_state(state: &TrayState) -> ChartMenuState {
             item.hide_value.map(|hide| !hide)
         }),
         all_colored: all_on(&shown, state.menu_bar_color_value, |item| item.color_value),
-        shared_window: !shown
-            .iter()
-            .any(|item| item.is_some_and(|item| item.window.is_some())),
+        window: same_window(&shown, state.menu_bar_window),
         active_only: state.menu_bar_active_account_only,
         centered: state.menu_bar_centered,
     }
+}
+
+/// The window every provider shown reads, by its own choice or by the
+/// global one, when they all read the same. With none shown, the global one.
+fn same_window(shown: &[Option<&MenuBarItemConfig>], global: UsageWindow) -> Option<UsageWindow> {
+    let mut windows = shown
+        .iter()
+        .map(|item| menu_bar::item_window(*item, global));
+    let first = windows.next().unwrap_or(global);
+    windows.all(|window| window == first).then_some(first)
 }
 
 /// Whether every provider shown has an option on: by its own choice, or by
@@ -1191,11 +1200,7 @@ fn show_chart_menu(state: &mut TrayState) {
             WindowChoice::Weekly => label("Weekly", "Semanal"),
             WindowChoice::Monthly => label("Monthly", "Mensal"),
         };
-        lines.push(pick(
-            title,
-            tag,
-            bar.shared_window && choice.usage_window() == state.menu_bar_window,
-        ));
+        lines.push(pick(title, tag, bar.window == Some(choice.usage_window())));
     }
     lines.extend([
         MenuLine::Separator,
@@ -2821,7 +2826,7 @@ mod presentation_tests {
         let bar = ChartMenuState {
             all_show: true,
             all_colored: false,
-            shared_window: true,
+            window: None,
             active_only: false,
             centered: true,
         };
@@ -2887,6 +2892,35 @@ mod presentation_tests {
         // With no provider in the menu bar, the global value stands.
         assert!(all_on(&[], true, shows));
         assert!(!all_on(&[], false, shows));
+    }
+
+    #[test]
+    fn a_window_is_checked_when_every_provider_shown_reads_it() {
+        let weekly = MenuBarItemConfig {
+            window: Some("weekly".into()),
+            ..Default::default()
+        };
+        let global = MenuBarItemConfig {
+            window: Some("auto".into()),
+            ..Default::default()
+        };
+        // A provider's own window that matches the global one.
+        assert_eq!(
+            same_window(&[Some(&weekly), None], UsageWindow::Weekly),
+            Some(UsageWindow::Weekly)
+        );
+        assert_eq!(
+            same_window(&[Some(&weekly), Some(&global)], UsageWindow::Session),
+            None
+        );
+        assert_eq!(
+            same_window(&[Some(&global)], UsageWindow::Session),
+            Some(UsageWindow::Session)
+        );
+        assert_eq!(
+            same_window(&[], UsageWindow::Monthly),
+            Some(UsageWindow::Monthly)
+        );
     }
 
     #[test]

@@ -174,16 +174,29 @@ pub fn status_items_start(own: Option<f64>, bar_height: f64) -> Option<f64> {
                 .ok()?
                 .downcast::<AXUIElement>()
                 .ok()?;
-            children(&extras, MENUS_TIMEOUT)?
-                .iter()
-                // An app that stops answering keeps the items read so far.
-                .map_while(|item| frame(item).ok())
-                .flatten()
-                .filter(|rect| rect.origin.y < bar_height)
-                .map(|rect| rect.origin.x)
-                .reduce(f64::min)
+            leftmost(
+                children(&extras, MENUS_TIMEOUT)?
+                    .iter()
+                    .map(|item| frame(item)),
+                bar_height,
+            )
         })
         .chain(own)
+        .reduce(f64::min)
+}
+
+/// The left edge of the leftmost status item with these frames that sits in
+/// the menu bar. Items not drawn are skipped; once the app stops answering,
+/// the items read so far count.
+fn leftmost(
+    frames: impl Iterator<Item = Result<Option<CGRect>, AXError>>,
+    bar_height: f64,
+) -> Option<f64> {
+    frames
+        .map_while(Result::ok)
+        .flatten()
+        .filter(|rect| rect.origin.y < bar_height)
+        .map(|rect| rect.origin.x)
         .reduce(f64::min)
 }
 
@@ -253,6 +266,29 @@ mod tests {
                 laid_out: true
             })
         );
+    }
+
+    #[test]
+    fn status_items_not_drawn_do_not_hide_the_next_ones() {
+        let item = |x| Ok(Some(rect(x, 0.0, 24.0, 30.0)));
+        let hidden = Ok(None);
+        assert_eq!(
+            leftmost([item(1200.0), hidden, item(1100.0)].into_iter(), 30.0),
+            Some(1100.0)
+        );
+        // Items outside the menu bar do not count.
+        let below = Ok(Some(rect(900.0, 40.0, 24.0, 30.0)));
+        assert_eq!(
+            leftmost([item(1200.0), below].into_iter(), 30.0),
+            Some(1200.0)
+        );
+        // Once the app stops answering, the items read so far count.
+        let timeout = Err(AXError::CannotComplete);
+        assert_eq!(
+            leftmost([item(1200.0), timeout, item(1100.0)].into_iter(), 30.0),
+            Some(1200.0)
+        );
+        assert_eq!(leftmost([hidden].into_iter(), 30.0), None);
     }
 
     #[test]

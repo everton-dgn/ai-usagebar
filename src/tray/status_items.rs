@@ -21,15 +21,16 @@ use objc2_app_kit::{
     NSCompositingOperation, NSControl, NSControlStateValueOn, NSEvent, NSEventMask,
     NSEventModifierFlags, NSEventType, NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
     NSImage, NSLayoutAttribute, NSLineCapStyle, NSMenu, NSMenuItem, NSPanel,
-    NSRectFillUsingOperation, NSResponder, NSScreen, NSStackView, NSStatusBar, NSStatusItem,
-    NSStatusWindowLevel, NSTextAttachment, NSTextField, NSUserInterfaceLayoutOrientation,
-    NSVariableStatusItemLength, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode,
-    NSWindowStyleMask, NSWorkspace, NSWorkspaceDidActivateApplicationNotification,
+    NSRectFillUsingOperation, NSResponder, NSRunningApplication, NSScreen, NSStackView,
+    NSStatusBar, NSStatusItem, NSStatusWindowLevel, NSTextAttachment, NSTextField,
+    NSUserInterfaceLayoutOrientation, NSVariableStatusItemLength, NSView,
+    NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask, NSWorkspace,
+    NSWorkspaceApplicationKey, NSWorkspaceDidActivateApplicationNotification,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSAttributedString, NSData, NSDictionary, NSMutableAttributedString,
-    NSNotification, NSNotificationCenter, NSNumber, NSObject, NSObjectProtocol, NSPoint,
-    NSProcessInfo, NSRect, NSSize, NSString,
+    MainThreadMarker, NSArray, NSAttributedString, NSData, NSDefaultRunLoopMode, NSDictionary,
+    NSMutableAttributedString, NSNotification, NSNotificationCenter, NSNumber, NSObject,
+    NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSRunLoop, NSSize, NSString, NSTimer,
 };
 use objc2_quartz_core::{CAAutoresizingMask, CALayer};
 
@@ -54,6 +55,11 @@ const CENTER_RULE_GAP: f64 = 28.0;
 /// Room a centered button keeps on each side of its content, where the
 /// highlight of an open item shows; taken back out of the row's spacing.
 const CENTER_ROOM: f64 = 6.0;
+/// Right after an app comes to the front, the menu bar can still be laying
+/// out its menus. They are measured again this often until the last one is,
+/// at most this many times.
+const REMEASURE_INTERVAL: f64 = 0.2;
+const REMEASURE_TRIES: u32 = 5;
 
 /// What a provider item or its menu reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +166,11 @@ struct CenterBar {
     menu_end: Rc<Cell<Option<f64>>>,
     /// The left edge of this app's chart item.
     chart_left: Rc<Cell<Option<f64>>>,
+    /// Measures the menus again while the last one is not laid out.
+    remeasure: Rc<Cell<Option<Retained<NSTimer>>>>,
+    /// One of the providers is open: its popover stays where it opened, so
+    /// a new measurement moves the panel only once it closes.
+    held: Rc<Cell<bool>>,
     observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
 }
 
@@ -201,16 +212,22 @@ impl CenterBar {
                 "not granted"
             }
         );
-        let menu_end = Rc::new(Cell::new(menu_space::app_menu_end()));
+        // Measured when the panel is first placed, with the providers in it.
+        let menu_end = Rc::new(Cell::new(None));
         let chart_left = Rc::new(Cell::new(None));
+        let remeasure: Rc<Cell<Option<Retained<NSTimer>>>> = Rc::default();
+        let held = Rc::new(Cell::new(false));
         let block = {
             let (panel, stack) = (panel.clone(), stack.clone());
             let (menu_end, chart_left) = (menu_end.clone(), chart_left.clone());
-            RcBlock::new(move |_: NonNull<NSNotification>| {
-                if let Some(end) = menu_space::app_menu_end() {
-                    menu_end.set(Some(end));
+            let (remeasure, held) = (remeasure.clone(), held.clone());
+            RcBlock::new(move |notification: NonNull<NSNotification>| {
+                // SAFETY: AppKit passes a live notification for the call.
+                if !activates_this_app(unsafe { notification.as_ref() }) {
+                    measure(&panel, &stack, &menu_end, &chart_left, &held, &remeasure);
+                } else if !held.get() {
+                    place(&panel, &stack, menu_end.get(), chart_left.get());
                 }
-                place(&panel, &stack, menu_end.get(), chart_left.get());
             })
         };
         let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
@@ -237,22 +254,49 @@ impl CenterBar {
             stack,
             menu_end,
             chart_left,
+            remeasure,
+            held,
             observers,
         }
     }
 
     fn place(&self) {
-        place(
-            &self.panel,
-            &self.stack,
-            self.menu_end.get(),
-            self.chart_left.get(),
-        );
+        // Not measured yet, as when centering or the permission has just
+        // been turned on.
+        if self.menu_end.get().is_none() {
+            measure(
+                &self.panel,
+                &self.stack,
+                &self.menu_end,
+                &self.chart_left,
+                &self.held,
+                &self.remeasure,
+            );
+        } else {
+            place(
+                &self.panel,
+                &self.stack,
+                self.menu_end.get(),
+                self.chart_left.get(),
+            );
+        }
+    }
+
+    /// Hold the panel while one of its providers is open, and place it once
+    /// none is, in case the menus were measured again meanwhile.
+    fn hold(&self, open: bool) {
+        if self.held.replace(open) && !open {
+            self.place();
+        }
     }
 }
 
 impl Drop for CenterBar {
     fn drop(&mut self) {
+        // A later measurement would order the panel front again.
+        if let Some(timer) = self.remeasure.take() {
+            timer.invalidate();
+        }
         let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
         for observer in &self.observers {
             // SAFETY: each observer came from one of these two centers, and
@@ -288,6 +332,85 @@ fn place(panel: &NSPanel, stack: &NSStackView, menu_end: Option<f64>, chart_left
         true,
     );
     panel.orderFrontRegardless();
+}
+
+/// Whether `notification` reports this app coming to the front. It shows no
+/// menus, so the providers stay where they are while its popover opens.
+fn activates_this_app(notification: &NSNotification) -> bool {
+    // SAFETY: an immutable AppKit constant.
+    let key: &AnyObject = unsafe { NSWorkspaceApplicationKey }.as_ref();
+    notification
+        .userInfo()
+        .and_then(|info| info.objectForKey(key))
+        .and_then(|app| app.downcast::<NSRunningApplication>().ok())
+        .is_some_and(|app| app.processIdentifier() == std::process::id() as i32)
+}
+
+/// Measure where the menus end and place the panel, measuring again while
+/// the last menu is not laid out.
+fn measure(
+    panel: &Retained<NSPanel>,
+    stack: &Retained<NSStackView>,
+    menu_end: &Rc<Cell<Option<f64>>>,
+    chart_left: &Rc<Cell<Option<f64>>>,
+    held: &Rc<Cell<bool>>,
+    remeasure: &Cell<Option<Retained<NSTimer>>>,
+) {
+    if let Some(timer) = remeasure.take() {
+        timer.invalidate();
+    }
+    let measured = menu_space::app_menu_end();
+    if let Some(x) = measured.and_then(|end| end.x) {
+        menu_end.set(Some(x));
+    }
+    if !held.get() {
+        place(panel, stack, menu_end.get(), chart_left.get());
+    }
+    if measured.is_some_and(|end| !end.laid_out) {
+        let timer = remeasure_menus(panel, stack, menu_end, chart_left, held);
+        remeasure.set(Some(timer));
+    }
+}
+
+/// Measure the menus again until the last one is laid out or Accessibility
+/// stops answering, and place the panel whenever their end moves. A last
+/// menu that stays hidden leaves the end of those drawn.
+fn remeasure_menus(
+    panel: &Retained<NSPanel>,
+    stack: &Retained<NSStackView>,
+    menu_end: &Rc<Cell<Option<f64>>>,
+    chart_left: &Rc<Cell<Option<f64>>>,
+    held: &Rc<Cell<bool>>,
+) -> Retained<NSTimer> {
+    let (panel, stack) = (panel.clone(), stack.clone());
+    let (menu_end, chart_left, held) = (menu_end.clone(), chart_left.clone(), held.clone());
+    let tries = Cell::new(0);
+    let block = RcBlock::new(move |timer: NonNull<NSTimer>| {
+        tries.set(tries.get() + 1);
+        let measured = menu_space::app_menu_end();
+        if let Some(x) = measured.and_then(|end| end.x)
+            && menu_end.get() != Some(x)
+        {
+            menu_end.set(Some(x));
+            if !held.get() {
+                place(&panel, &stack, Some(x), chart_left.get());
+            }
+        }
+        let pending = measured.is_some_and(|end| !end.laid_out);
+        if !pending || tries.get() == REMEASURE_TRIES {
+            // SAFETY: the run loop passes the timer that fired, alive for the call.
+            unsafe { timer.as_ref() }.invalidate();
+        }
+    });
+    // SAFETY: the timer is added to the main run loop only, so the block never
+    // leaves this thread. In the default mode it waits while a menu is open,
+    // so the panel does not move under it. NSDefaultRunLoopMode is an
+    // immutable constant.
+    unsafe {
+        let timer = NSTimer::timerWithTimeInterval_repeats_block(REMEASURE_INTERVAL, true, &block);
+        NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSDefaultRunLoopMode);
+        timer
+    }
 }
 
 /// Where a provider is drawn: its own status item, or a button in the center.
@@ -526,6 +649,9 @@ impl ProviderItems {
                 }
                 Slot::Center(button) => mark_open(button, on),
             }
+        }
+        if let Some(center) = &self.center {
+            center.hold(open.is_some());
         }
     }
 

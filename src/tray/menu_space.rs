@@ -28,13 +28,26 @@ pub fn request_access(changed: impl Fn() + 'static) {
     accessibility_prompt::show(Box::new(changed));
 }
 
-/// Where the frontmost app's menus end, in screen points from the left, or
-/// `None` without the permission, for this app itself, or on any failure.
-pub fn app_menu_end() -> Option<f64> {
+/// Where the menus shown in the menu bar end, as Accessibility reports them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MenuEnd {
+    /// The right edge of the last menu that has a size, in screen points
+    /// from the left.
+    pub x: Option<f64>,
+    /// Whether the last menu has one. Right after an app comes to the front,
+    /// the menu bar can still be laying out its menus.
+    pub laid_out: bool,
+}
+
+/// Where the menus shown in the menu bar end, or `None` without the
+/// permission or when Accessibility cannot read them, as for a hung app.
+pub fn app_menu_end() -> Option<MenuEnd> {
     if !trusted() {
         return None;
     }
-    let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+    // An accessory app in front, such as this one or a launcher, leaves the
+    // menu bar to the last regular app; its own menus are never on screen.
+    let app = NSWorkspace::sharedWorkspace().menuBarOwningApplication()?;
     let pid = app.processIdentifier();
     if pid == std::process::id() as i32 {
         return None;
@@ -47,8 +60,20 @@ pub fn app_menu_end() -> Option<f64> {
     let bar = attribute(&element, "AXMenuBar")?
         .downcast::<AXUIElement>()
         .ok()?;
-    let last = children(&bar)?.iter().rev().find_map(|item| frame(item))?;
-    Some(last.origin.x + last.size.width)
+    Some(menu_end(children(&bar)?.iter().map(|item| frame(item))))
+}
+
+/// Where menus with these frames, left to right, end. `None` stands for a
+/// menu without a size. Only the frames up to the last menu that has one,
+/// from the right, are read.
+fn menu_end(frames: impl DoubleEndedIterator<Item = Option<CGRect>>) -> MenuEnd {
+    let mut frames = frames.rev();
+    let last = frames.next().flatten();
+    let drawn = last.or_else(|| frames.flatten().next());
+    MenuEnd {
+        x: drawn.map(|rect| rect.origin.x + rect.size.width),
+        laid_out: last.is_some(),
+    }
 }
 
 fn children(element: &AXUIElement) -> Option<Vec<CFRetained<AXUIElement>>> {
@@ -77,7 +102,14 @@ fn frame(element: &AXUIElement) -> Option<CGRect> {
     let mut rect = CGRect::default();
     // SAFETY: an AXFrame value holds a CGRect, written into `rect`.
     let ok = unsafe { value.value(AXValueType::CGRect, NonNull::from(&mut rect).cast()) };
-    ok.then_some(rect)
+    ok.then_some(rect).filter(on_screen)
+}
+
+/// Whether Accessibility reports `rect` as drawn. A menu that is not, such as
+/// an accessory app's or one the menu bar has yet to lay out, sits at the
+/// bar's bottom-left corner, less than a point wide or tall.
+fn on_screen(rect: &CGRect) -> bool {
+    rect.size.width >= 1.0 && rect.size.height >= 1.0
 }
 
 /// The left edge of the leftmost status item, from every other app's menu
@@ -129,6 +161,37 @@ pub fn centered_x(width: f64, screen: (f64, f64), left: Option<f64>, right: Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objc2_core_foundation::{CGPoint, CGSize};
+
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> CGRect {
+        CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
+    }
+
+    #[test]
+    fn a_menu_without_a_size_is_not_on_screen() {
+        // A menu the menu bar has not drawn and ChatGPT's Help menu, as
+        // macOS 27 reports them.
+        assert!(!on_screen(&rect(0.0, 30.0, 0.0, 0.0)));
+        assert!(on_screen(&rect(323.0, 0.0, 49.0, 30.0)));
+        assert!(!on_screen(&rect(-1.0, 30.0, 1.0, 0.0)));
+    }
+
+    #[test]
+    fn the_menus_are_laid_out_once_the_last_one_is() {
+        let apple = Some(rect(10.0, 0.0, 34.0, 30.0));
+        let help = Some(rect(323.0, 0.0, 49.0, 30.0));
+        let end = |x, laid_out| MenuEnd { x, laid_out };
+        // ChatGPT's menus while the menu bar redrew the first ones.
+        assert_eq!(
+            menu_end([apple, None, None, help].into_iter()),
+            end(Some(372.0), true)
+        );
+        // Those of an app that has just come to the front, or has none yet.
+        assert_eq!(menu_end([None, None].into_iter()), end(None, false));
+        assert_eq!(menu_end(std::iter::empty()), end(None, false));
+        // Only the first ones laid out: where they end is not the end yet.
+        assert_eq!(menu_end([apple, None].into_iter()), end(Some(44.0), false));
+    }
 
     #[test]
     fn the_strip_centers_in_the_free_stretch() {

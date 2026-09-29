@@ -520,6 +520,60 @@ pub fn set_menu_bar_item_value(
     let _edit = lock_config_document(path)?;
     let mut doc = read_config_document(path)?;
     let before = doc.to_string();
+    set_item_value(&mut doc, id, key, value)?;
+    if doc.to_string() == before {
+        return Ok(());
+    }
+    write_config_document(path, &doc)
+}
+
+/// Write one `[tray]` preference and clear `item_key` from every provider's
+/// `[tray.menu_bar_items."<id>"]` table in one write, so a failure leaves
+/// both as they were. Tables left empty are removed.
+pub fn set_tray_value_for_all_items(
+    path: &Path,
+    key: &str,
+    value: toml_edit::Value,
+    item_key: &str,
+) -> Result<()> {
+    if !matches!(item_key, "window" | "hide_value" | "color_value") {
+        return Err(AppError::Other(format!(
+            "invalid menu bar item setting: {item_key}"
+        )));
+    }
+    let _edit = lock_config_document(path)?;
+    let mut doc = read_config_document(path)?;
+    let before = doc.to_string();
+    set_value(&mut doc, "tray", key, Some(value))?;
+    let ids: Vec<String> = doc
+        .get("tray")
+        .and_then(|tray| tray.get("menu_bar_items"))
+        .and_then(toml_edit::Item::as_table_like)
+        .map(|items| {
+            items
+                .iter()
+                .filter(|(_, item)| item.get(item_key).is_some())
+                .map(|(id, _)| id.to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in ids {
+        set_item_value(&mut doc, &id, item_key, None)?;
+    }
+    if doc.to_string() == before {
+        return Ok(());
+    }
+    write_config_document(path, &doc)
+}
+
+/// Set or clear `key` in the `[tray.menu_bar_items."<id>"]` table of `doc`,
+/// removing the tables left empty.
+fn set_item_value(
+    doc: &mut toml_edit::DocumentMut,
+    id: &str,
+    key: &str,
+    value: Option<toml_edit::Value>,
+) -> Result<()> {
     let tray = doc
         .entry("tray")
         .or_insert_with(toml_edit::table)
@@ -552,10 +606,7 @@ pub fn set_menu_bar_item_value(
     if items.is_empty() {
         tray.remove("menu_bar_items");
     }
-    if doc.to_string() == before {
-        return Ok(());
-    }
-    write_config_document(path, &doc)
+    Ok(())
 }
 
 /// Persist one validated notification preference without disturbing other
@@ -4743,6 +4794,41 @@ enabled = true
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("menu_bar_items"), "{text}");
         assert!(set_menu_bar_item_value(&path, "zai", "color", None).is_err());
+    }
+
+    #[test]
+    fn a_global_menu_bar_value_clears_the_providers_choice_in_one_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[tray]\n# mine\nmenu_bar_window = \"weekly\"\n").unwrap();
+        set_menu_bar_item_value(&path, "openai@work", "window", Some("session".into())).unwrap();
+        set_menu_bar_item_value(&path, "openai@work", "hidden", Some(true.into())).unwrap();
+        set_menu_bar_item_value(&path, "zai", "window", Some("monthly".into())).unwrap();
+
+        set_tray_value_for_all_items(&path, "menu_bar_window", "session".into(), "window").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# mine"), "{text}");
+        let tray = Config::load_from(&path).unwrap().tray;
+        assert_eq!(tray.menu_bar_window.as_deref(), Some("session"));
+        // Only the choice the global value replaces goes.
+        let work = &tray.menu_bar_items["openai@work"];
+        assert_eq!(work.window, None);
+        assert!(work.hidden);
+        assert!(!tray.menu_bar_items.contains_key("zai"), "{text}");
+        assert!(
+            set_tray_value_for_all_items(&path, "menu_bar_window", "auto".into(), "hidden")
+                .is_err()
+        );
+
+        // A provider table it cannot edit leaves the file as it was, global
+        // value included.
+        let before = "[tray]\nmenu_bar_window = \"weekly\"\n\n[tray.menu_bar_items]\nzai = { window = \"monthly\" }\n";
+        std::fs::write(&path, before).unwrap();
+        assert!(
+            set_tray_value_for_all_items(&path, "menu_bar_window", "session".into(), "window")
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 
     #[test]

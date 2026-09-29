@@ -1117,33 +1117,43 @@ fn chart_global_pick(tag: isize, bar: ChartMenuState) -> Option<(Command, Option
 
 /// A pick among the chart menu's global options. The window, value and color
 /// apply to every provider, so each provider's own choice for them goes
-/// first, whether it came from its menu or from Settings.
+/// first, whether it came from its menu or from Settings. The config gets
+/// both in one write, so a failed one drops no provider's choice.
 fn chart_global_command(state: &mut TrayState, tag: isize) -> Option<Command> {
     let (command, key) = chart_global_pick(tag, chart_menu_state(state))?;
     if let Some(key) = key {
-        for id in overridden(&state.menu_bar_items, key) {
-            set_menu_bar_item(state, &id, key, None);
+        clear_own_choice(&mut state.menu_bar_items, key);
+        if let (Some(path), Some((global, value))) = (config_path(), global_value(&command)) {
+            let _ = crate::config::set_tray_value_for_all_items(&path, global, value, key);
         }
     }
     Some(command)
 }
 
-/// The providers with a choice of their own for `key`: `window`,
-/// `hide_value` or `color_value`.
-fn overridden(
-    items: &std::collections::BTreeMap<String, MenuBarItemConfig>,
-    key: &str,
-) -> Vec<String> {
-    items
-        .iter()
-        .filter(|(_, item)| match key {
-            "window" => item.window.is_some(),
-            "hide_value" => item.hide_value.is_some(),
-            "color_value" => item.color_value.is_some(),
-            _ => false,
-        })
-        .map(|(id, _)| id.clone())
-        .collect()
+/// The `[tray]` preference a global option writes.
+fn global_value(command: &Command) -> Option<(&'static str, toml_edit::Value)> {
+    Some(match command {
+        Command::SetMenuBarWindow { value } => {
+            ("menu_bar_window", value.usage_window().as_str().into())
+        }
+        Command::SetMenuBarHideValue { value } => ("menu_bar_hide_value", (*value).into()),
+        Command::SetMenuBarColorValue { value } => ("menu_bar_color_value", (*value).into()),
+        _ => return None,
+    })
+}
+
+/// Drop each provider's own choice for `key`: `window`, `hide_value` or
+/// `color_value`, and the providers left with no choice of their own.
+fn clear_own_choice(items: &mut std::collections::BTreeMap<String, MenuBarItemConfig>, key: &str) {
+    for item in items.values_mut() {
+        match key {
+            "window" => item.window = None,
+            "hide_value" => item.hide_value = None,
+            "color_value" => item.color_value = None,
+            _ => {}
+        }
+    }
+    items.retain(|_, item| *item != MenuBarItemConfig::default());
 }
 
 fn show_chart_menu(state: &mut TrayState) {
@@ -2880,7 +2890,7 @@ mod presentation_tests {
     }
 
     #[test]
-    fn a_global_option_finds_only_the_providers_own_choice_for_it() {
+    fn a_global_option_drops_only_the_providers_own_choice_for_it() {
         let mut items = std::collections::BTreeMap::new();
         items.insert(
             "openai@work".to_owned(),
@@ -2904,11 +2914,15 @@ mod presentation_tests {
                 ..Default::default()
             },
         );
-        assert_eq!(overridden(&items, "window"), ["openai@work"]);
-        assert_eq!(overridden(&items, "hide_value"), ["zai"]);
-        assert_eq!(overridden(&items, "color_value"), ["zai"]);
+        clear_own_choice(&mut items, "window");
+        // openai@work had only a window of its own.
+        assert_eq!(items.keys().collect::<Vec<_>>(), ["kimi", "zai"]);
+        clear_own_choice(&mut items, "hide_value");
+        assert_eq!(items["zai"].hide_value, None);
+        assert_eq!(items["zai"].color_value, Some(false));
+        clear_own_choice(&mut items, "hidden");
         assert!(
-            overridden(&items, "hidden").is_empty(),
+            items["kimi"].hidden,
             "hiding a provider is not a global option"
         );
     }

@@ -6,6 +6,12 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 
 ## [Unreleased]
 
+### Adicionado
+
+- Opções globais da barra no clique direito do ícone principal: janela, valor,
+  cor, só a conta em uso e centralização. Janela, valor e cor escolhidos ali
+  valem para todos os provedores e descartam as escolhas individuais.
+
 ### Alterado
 
 - README com captura da barra de menus em uso, preferências visuais e lista

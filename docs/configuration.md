@@ -30,6 +30,12 @@ Escolha a janela de consumo global e, quando necessário, uma configuração
 específica para cada provedor. As opções do clique direito e da aba **Barra**
 controlam a mesma apresentação.
 
+O clique direito no ícone principal traz parte das opções globais: janela,
+valor, cor, **Só a conta em uso** e centralização. Janela, valor e cor escolhidos
+ali valem para todos os provedores e descartam a escolha individual de cada um,
+feita no menu do provedor ou na aba **Barra**. Nessa aba, a opção global vale só
+para os provedores sem escolha própria.
+
 **Só a conta em uso** reduz os itens mostrados quando há várias contas de
 um provedor. Esse filtro não troca a sessão ativa. A centralização depende de
 Acessibilidade; use a orientação nativa se o aplicativo indicar falta de acesso.

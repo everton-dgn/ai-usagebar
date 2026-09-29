@@ -38,9 +38,10 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 - Verificação de todas as tags com proveniência das divergências históricas,
   mantendo o changelog original intacto.
 - Barra de provedores centralizada após a troca de aplicativo, mesmo quando os
-  menus do app ativado ainda estão sendo montados ou não respondem de imediato,
-  quando um app sem barra de menus própria fica em primeiro plano, e logo após
-  a concessão da Acessibilidade.
+  menus do app ativado ainda estão sendo montados ou levam até 1 s para
+  responder, quando um app sem barra de menus própria fica em primeiro plano, e
+  logo após a concessão da Acessibilidade. Sem uma leitura dos menus, a barra
+  fica no meio da tela, sem cobrir os ícones de status.
 - Centralização sem travar a barra de menus por segundos quando outro app deixa
   de responder.
 

@@ -10,7 +10,7 @@ barra; não há uma interface de linha de comando para operá-lo.
 | --- | --- | --- |
 | Interface | `frontend/src/` | Telas, componentes, preferências de apresentação e tradução |
 | Host macOS | `src/tray/host_macos.rs` | Ciclo da janela, eventos, coleta e conexão com o WebView |
-| Barra | `src/tray/status_items.rs`, `menu_bar.rs`, `menu_space.rs` | Itens por provedor, desenho, cliques e posicionamento |
+| Barra | `src/tray/status_items.rs`, `center_bar.rs`, `menu_bar.rs`, `menu_space.rs` | Itens por provedor, desenho, cliques e posicionamento |
 | Fronteira do WebView | `src/tray/ipc.rs`, `assets.rs`, `browse.rs` | Comandos tipados, assets locais e links externos |
 | Entradas e coleta | `src/core/entries.rs`, `refresh.rs` | Identidade das entradas e atualização dos dados |
 | Projeção | `src/core/sections.rs`, `src/report.rs` | Métricas, resets, links e relatório visual |

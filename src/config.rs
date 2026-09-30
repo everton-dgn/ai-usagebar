@@ -520,6 +520,61 @@ pub fn set_menu_bar_item_value(
     let _edit = lock_config_document(path)?;
     let mut doc = read_config_document(path)?;
     let before = doc.to_string();
+    set_item_value(&mut doc, id, key, value)?;
+    if doc.to_string() == before {
+        return Ok(());
+    }
+    write_config_document(path, &doc)
+}
+
+/// Write one `[tray]` preference and clear `item_key` from every provider's
+/// `[tray.menu_bar_items."<id>"]` table in one write, so a failure leaves
+/// both as they were. Tables left empty are removed.
+pub fn set_tray_value_for_all_items(
+    path: &Path,
+    key: &str,
+    value: toml_edit::Value,
+    item_key: &str,
+) -> Result<()> {
+    if !matches!(item_key, "window" | "hide_value" | "color_value") {
+        return Err(AppError::Other(format!(
+            "invalid menu bar item setting: {item_key}"
+        )));
+    }
+    let _edit = lock_config_document(path)?;
+    let mut doc = read_config_document(path)?;
+    let before = doc.to_string();
+    set_value(&mut doc, "tray", key, Some(value))?;
+    let ids: Vec<String> = doc
+        .get("tray")
+        .and_then(|tray| tray.get("menu_bar_items"))
+        .and_then(toml_edit::Item::as_table_like)
+        .map(|items| {
+            items
+                .iter()
+                .filter(|(_, item)| item.get(item_key).is_some())
+                .map(|(id, _)| id.to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in ids {
+        set_item_value(&mut doc, &id, item_key, None)?;
+    }
+    if doc.to_string() == before {
+        return Ok(());
+    }
+    write_config_document(path, &doc)
+}
+
+/// Set or clear `key` in the `[tray.menu_bar_items."<id>"]` table of `doc`,
+/// removing the tables left empty. Tables written inline by hand are edited
+/// in place, keeping their form and comments.
+fn set_item_value(
+    doc: &mut toml_edit::DocumentMut,
+    id: &str,
+    key: &str,
+    value: Option<toml_edit::Value>,
+) -> Result<()> {
     let tray = doc
         .entry("tray")
         .or_insert_with(toml_edit::table)
@@ -527,14 +582,25 @@ pub fn set_menu_bar_item_value(
         .ok_or_else(|| AppError::Other("config.toml: [tray] is not a table".into()))?;
     let items = tray
         .entry("menu_bar_items")
-        .or_insert_with(toml_edit::table)
-        .as_table_mut()
+        .or_insert_with(toml_edit::table);
+    if let Some(items) = items.as_table_mut() {
+        items.set_implicit(true);
+    }
+    // An inline table holds only values, so a new provider in one is inline too.
+    let inline = items.is_inline_table();
+    let items = items
+        .as_table_like_mut()
         .ok_or_else(|| AppError::Other("config.toml: menu_bar_items is not a table".into()))?;
-    items.set_implicit(true);
     let item = items
         .entry(id)
-        .or_insert_with(toml_edit::table)
-        .as_table_mut()
+        .or_insert_with(|| {
+            if inline {
+                toml_edit::value(toml_edit::InlineTable::new())
+            } else {
+                toml_edit::table()
+            }
+        })
+        .as_table_like_mut()
         .ok_or_else(|| {
             AppError::Other(format!("config.toml: menu_bar_items.{id} is not a table"))
         })?;
@@ -552,10 +618,7 @@ pub fn set_menu_bar_item_value(
     if items.is_empty() {
         tray.remove("menu_bar_items");
     }
-    if doc.to_string() == before {
-        return Ok(());
-    }
-    write_config_document(path, &doc)
+    Ok(())
 }
 
 /// Persist one validated notification preference without disturbing other
@@ -4743,6 +4806,91 @@ enabled = true
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("menu_bar_items"), "{text}");
         assert!(set_menu_bar_item_value(&path, "zai", "color", None).is_err());
+    }
+
+    #[test]
+    fn a_global_menu_bar_value_clears_the_providers_choice_in_one_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[tray]\n# mine\nmenu_bar_window = \"weekly\"\n").unwrap();
+        set_menu_bar_item_value(&path, "openai@work", "window", Some("session".into())).unwrap();
+        set_menu_bar_item_value(&path, "openai@work", "hidden", Some(true.into())).unwrap();
+        set_menu_bar_item_value(&path, "zai", "window", Some("monthly".into())).unwrap();
+
+        set_tray_value_for_all_items(&path, "menu_bar_window", "session".into(), "window").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# mine"), "{text}");
+        let tray = Config::load_from(&path).unwrap().tray;
+        assert_eq!(tray.menu_bar_window.as_deref(), Some("session"));
+        // Only the choice the global value replaces goes.
+        let work = &tray.menu_bar_items["openai@work"];
+        assert_eq!(work.window, None);
+        assert!(work.hidden);
+        assert!(!tray.menu_bar_items.contains_key("zai"), "{text}");
+        assert!(
+            set_tray_value_for_all_items(&path, "menu_bar_window", "auto".into(), "hidden")
+                .is_err()
+        );
+
+        // Tables written inline or with dotted keys by hand are edited too.
+        std::fs::write(
+            &path,
+            "[tray]\nmenu_bar_window = \"weekly\"\n\n[tray.menu_bar_items]\n\"openai@work\".window = \"session\"\nzai = { window = \"monthly\", hidden = true }\n",
+        )
+        .unwrap();
+        set_tray_value_for_all_items(&path, "menu_bar_window", "session".into(), "window").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("zai = {"), "{text}");
+        let tray = Config::load_from(&path).unwrap().tray;
+        assert_eq!(tray.menu_bar_window.as_deref(), Some("session"));
+        assert!(!tray.menu_bar_items.contains_key("openai@work"));
+        assert_eq!(tray.menu_bar_items["zai"].window, None);
+        assert!(tray.menu_bar_items["zai"].hidden);
+
+        // A config it cannot read is left as it was.
+        let before = "[tray\nmenu_bar_window = \"weekly\"\n";
+        std::fs::write(&path, before).unwrap();
+        assert!(
+            set_tray_value_for_all_items(&path, "menu_bar_window", "session".into(), "window")
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn menu_bar_items_written_inline_are_edited_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[tray]\n# mine\nmenu_bar_items = { zai = { window = \"monthly\" } } # work\n",
+        )
+        .unwrap();
+        set_menu_bar_item_value(&path, "zai", "hide_value", Some(true.into())).unwrap();
+        set_menu_bar_item_value(&path, "kimi", "window", Some("weekly".into())).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# mine") && text.contains("# work"), "{text}");
+        assert!(text.contains("menu_bar_items = {"), "{text}");
+        let tray = Config::load_from(&path).unwrap().tray;
+        assert_eq!(
+            tray.menu_bar_items["zai"].window.as_deref(),
+            Some("monthly")
+        );
+        assert_eq!(tray.menu_bar_items["zai"].hide_value, Some(true));
+        assert_eq!(
+            tray.menu_bar_items["kimi"].window.as_deref(),
+            Some("weekly")
+        );
+
+        // Clearing what is not set leaves the file alone.
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        set_menu_bar_item_value(&path, "zai", "color_value", None).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+
+        set_menu_bar_item_value(&path, "zai", "window", None).unwrap();
+        set_menu_bar_item_value(&path, "zai", "hide_value", None).unwrap();
+        let tray = Config::load_from(&path).unwrap().tray;
+        assert!(!tray.menu_bar_items.contains_key("zai"));
     }
 
     #[test]

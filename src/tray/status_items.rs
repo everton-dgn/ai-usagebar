@@ -12,31 +12,25 @@ use objc2::{
 };
 use std::ptr::NonNull;
 
-use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{
     NSAccessibility, NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua,
-    NSAppearanceNameDarkAqua, NSApplication, NSApplicationDidChangeScreenParametersNotification,
-    NSAttributedStringAttachmentConveniences, NSAttributedStringNSStringDrawing,
-    NSBackingStoreType, NSBaselineOffsetAttributeName, NSBezierPath, NSButton, NSColor,
-    NSCompositingOperation, NSControl, NSControlStateValueOn, NSEvent, NSEventMask,
+    NSAppearanceNameDarkAqua, NSApplication, NSAttributedStringAttachmentConveniences,
+    NSAttributedStringNSStringDrawing, NSBaselineOffsetAttributeName, NSBezierPath, NSButton,
+    NSColor, NSCompositingOperation, NSControl, NSControlStateValueOn, NSEvent, NSEventMask,
     NSEventModifierFlags, NSEventType, NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
-    NSImage, NSLayoutAttribute, NSLineCapStyle, NSMenu, NSMenuItem, NSPanel,
-    NSRectFillUsingOperation, NSResponder, NSScreen, NSStackView, NSStatusBar, NSStatusItem,
-    NSStatusWindowLevel, NSTextAttachment, NSTextField, NSUserInterfaceLayoutOrientation,
-    NSVariableStatusItemLength, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode,
-    NSWindowStyleMask, NSWorkspace, NSWorkspaceDidActivateApplicationNotification,
+    NSImage, NSLineCapStyle, NSMenu, NSMenuItem, NSRectFillUsingOperation, NSResponder,
+    NSStatusBar, NSStatusItem, NSTextAttachment, NSTextField, NSVariableStatusItemLength, NSView,
+    NSWindowOrderingMode,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSData, NSDictionary, NSMutableAttributedString,
-    NSNotification, NSNotificationCenter, NSNumber, NSObject, NSObjectProtocol, NSPoint,
-    NSProcessInfo, NSRect, NSSize, NSString,
+    NSNumber, NSObject, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString,
 };
 use objc2_quartz_core::{CAAutoresizingMask, CALayer};
 
+use super::center_bar::{CENTER_ACCOUNT_GAP, CENTER_ROOM, CenterBar};
 use super::menu_bar::{Chip, Level};
-use super::menu_space;
 use std::cell::Cell;
-use std::rc::Rc;
 
 /// Side of a provider mark in the menu bar, in points.
 const MARK_SIDE: f64 = 15.0;
@@ -48,12 +42,6 @@ const ITEM_ROOM: f64 = 1.25;
 /// Room on each side of a rule, which draws no highlight: providers sit
 /// further from a rule than from another account of their own.
 const RULE_ROOM: f64 = 12.75;
-/// The centered row's gap between two accounts, and around a rule.
-const CENTER_ACCOUNT_GAP: f64 = 20.0;
-const CENTER_RULE_GAP: f64 = 28.0;
-/// Room a centered button keeps on each side of its content, where the
-/// highlight of an open item shows; taken back out of the row's spacing.
-const CENTER_ROOM: f64 = 6.0;
 
 /// What a provider item or its menu reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,147 +137,6 @@ define_class!(
     }
 );
 
-/// A borderless panel over the middle of the menu bar holding the centered
-/// providers. AppKit only places status items at the right, so centering
-/// needs a window of its own.
-struct CenterBar {
-    panel: Retained<NSPanel>,
-    stack: Retained<NSStackView>,
-    /// Where the last other app's menus ended; kept while this app is in
-    /// front, so opening the popover does not move the providers.
-    menu_end: Rc<Cell<Option<f64>>>,
-    /// The left edge of this app's chart item.
-    chart_left: Rc<Cell<Option<f64>>>,
-    observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
-}
-
-impl CenterBar {
-    fn new(mtm: MainThreadMarker) -> Self {
-        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
-            NSPanel::alloc(mtm),
-            NSRect::ZERO,
-            NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
-            NSBackingStoreType::Buffered,
-            false,
-        );
-        // SAFETY: the panel is owned here and never closed through AppKit.
-        unsafe { panel.setReleasedWhenClosed(false) };
-        panel.setLevel(NSStatusWindowLevel);
-        // Not FullScreenAuxiliary: a fullscreen app hides the menu bar, so
-        // the providers stay off its space too. Transient, not Stationary:
-        // Mission Control hides the menu bar, and the providers with it.
-        panel.setCollectionBehavior(
-            NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::Transient
-                | NSWindowCollectionBehavior::IgnoresCycle,
-        );
-        panel.setBackgroundColor(Some(&NSColor::clearColor()));
-        panel.setOpaque(false);
-        panel.setHasShadow(false);
-        panel.setHidesOnDeactivate(false);
-        panel.setBecomesKeyOnlyIfNeeded(true);
-        let stack = NSStackView::new(mtm);
-        stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
-        stack.setAlignment(NSLayoutAttribute::CenterY);
-        stack.setSpacing(CENTER_RULE_GAP - CENTER_ROOM);
-        panel.setContentView(Some(&stack));
-        eprintln!(
-            "centered providers: accessibility {}",
-            if menu_space::trusted() {
-                "granted"
-            } else {
-                "not granted"
-            }
-        );
-        let menu_end = Rc::new(Cell::new(menu_space::app_menu_end()));
-        let chart_left = Rc::new(Cell::new(None));
-        let block = {
-            let (panel, stack) = (panel.clone(), stack.clone());
-            let (menu_end, chart_left) = (menu_end.clone(), chart_left.clone());
-            RcBlock::new(move |_: NonNull<NSNotification>| {
-                if let Some(end) = menu_space::app_menu_end() {
-                    menu_end.set(Some(end));
-                }
-                place(&panel, &stack, menu_end.get(), chart_left.get());
-            })
-        };
-        let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
-        // SAFETY: the block only touches main-thread objects and AppKit posts
-        // both notifications on the main thread.
-        let observers = unsafe {
-            vec![
-                NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
-                    Some(NSApplicationDidChangeScreenParametersNotification),
-                    None,
-                    None,
-                    &block,
-                ),
-                workspace.addObserverForName_object_queue_usingBlock(
-                    Some(NSWorkspaceDidActivateApplicationNotification),
-                    None,
-                    None,
-                    &block,
-                ),
-            ]
-        };
-        Self {
-            panel,
-            stack,
-            menu_end,
-            chart_left,
-            observers,
-        }
-    }
-
-    fn place(&self) {
-        place(
-            &self.panel,
-            &self.stack,
-            self.menu_end.get(),
-            self.chart_left.get(),
-        );
-    }
-}
-
-impl Drop for CenterBar {
-    fn drop(&mut self) {
-        let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
-        for observer in &self.observers {
-            // SAFETY: each observer came from one of these two centers, and
-            // removing it from the other is a no-op.
-            unsafe {
-                NSNotificationCenter::defaultCenter().removeObserver(observer.as_ref());
-                workspace.removeObserver(observer.as_ref());
-            }
-        }
-        self.panel.orderOut(None);
-    }
-}
-
-/// Size the panel to its buttons and center it in the free stretch of the
-/// primary display's menu bar, the one the status items live in.
-fn place(panel: &NSPanel, stack: &NSStackView, menu_end: Option<f64>, chart_left: Option<f64>) {
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    let Some(screen) = NSScreen::screens(mtm).firstObject() else {
-        return;
-    };
-    let frame = screen.frame();
-    let visible = screen.visibleFrame();
-    let top = frame.origin.y + frame.size.height;
-    let bar = (top - (visible.origin.y + visible.size.height))
-        .max(NSStatusBar::systemStatusBar().thickness());
-    let width = stack.fittingSize().width;
-    let items = menu_space::status_items_start(chart_left, bar);
-    let x = menu_space::centered_x(width, (frame.origin.x, frame.size.width), menu_end, items);
-    panel.setFrame_display(
-        NSRect::new(NSPoint::new(x, top - bar), NSSize::new(width, bar)),
-        true,
-    );
-    panel.orderFrontRegardless();
-}
-
 /// Where a provider is drawn: its own status item, or a button in the center.
 enum Slot {
     Status(Retained<NSStatusItem>, Option<ExpandedSession>),
@@ -363,7 +210,9 @@ impl ProviderItems {
                 .zip(chips)
                 .all(|((id, _), chip)| *id == chip.id);
         if !same && centered {
-            self.clear();
+            // The panel stays on screen while its providers are replaced: one
+            // of them may be open under it.
+            self.remove_items();
             let center = self.center.get_or_insert_with(|| CenterBar::new(mtm));
             for (index, chip) in chips.iter().enumerate() {
                 // SAFETY: NSButton's init takes no arguments and returns the object.
@@ -478,6 +327,14 @@ impl ProviderItems {
 
     /// Remove every provider item from the menu bar.
     pub fn clear(&mut self) {
+        self.remove_items();
+        if let Some(center) = &self.center {
+            center.panel.orderOut(None);
+        }
+    }
+
+    /// Remove the provider items and the rules between them.
+    fn remove_items(&mut self) {
         let bar = NSStatusBar::systemStatusBar();
         for (_, slot) in self.items.drain(..) {
             match slot {
@@ -490,9 +347,6 @@ impl ProviderItems {
                 Rule::Status(item) => bar.removeStatusItem(&item),
                 Rule::Center(view) => view.removeFromSuperview(),
             }
-        }
-        if let Some(center) = &self.center {
-            center.panel.orderOut(None);
         }
     }
 
@@ -526,6 +380,9 @@ impl ProviderItems {
                 }
                 Slot::Center(button) => mark_open(button, on),
             }
+        }
+        if let Some(center) = &self.center {
+            center.hold(open.is_some());
         }
     }
 

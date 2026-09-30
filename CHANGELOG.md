@@ -6,6 +6,12 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 
 ## [Unreleased]
 
+### Adicionado
+
+- Opções globais da barra no clique direito do ícone principal: janela, valor,
+  cor, só a conta em uso e centralização. Janela, valor e cor escolhidos ali
+  valem para todos os provedores e descartam as escolhas individuais.
+
 ### Alterado
 
 - README com captura da barra de menus em uso, preferências visuais e lista
@@ -37,6 +43,14 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 - Apresentação da tecla Command e tradução do detalhe de ritmo em português.
 - Verificação de todas as tags com proveniência das divergências históricas,
   mantendo o changelog original intacto.
+- Barra de provedores centralizada após a troca de aplicativo, mesmo quando os
+  menus do app ativado ainda estão sendo montados ou levam até 1 s para
+  responder, quando um app sem barra de menus própria fica em primeiro plano ou
+  o dono da barra fecha, e logo após a concessão da Acessibilidade. Sem uma
+  leitura dos menus, a barra fica no meio da tela, sem cobrir os ícones de
+  status.
+- Centralização sem travar a barra de menus por segundos quando outro app deixa
+  de responder.
 - Aviso de token renovado que não pôde ser salvo no Claude e no Codex sem
   pedir comando de terminal; a mensagem orienta um novo login no aplicativo
   do fornecedor e continua classificada como login expirado.

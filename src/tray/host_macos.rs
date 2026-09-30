@@ -347,13 +347,15 @@ fn run_loop() -> Result<(), String> {
             }
             Event::UserEvent(UserEvent::ProviderItem(action)) => {
                 let chart = match action {
-                    ItemAction::Menu { tag } => {
-                        chart_menu_command(tag).or_else(|| chart_global_command(&mut state, tag))
-                    }
+                    ItemAction::Menu { tag } => chart_menu_command(tag)
+                        .map(Some)
+                        .or_else(|| chart_global_command(&mut state, tag)),
                     _ => None,
                 };
                 match chart {
-                    Some(command) => handle_command(&mut state, command, control_flow),
+                    Some(Some(command)) => handle_command(&mut state, command, control_flow),
+                    // A global pick that could not be saved changes nothing.
+                    Some(None) => {}
                     None => handle_provider_item(&mut state, action),
                 }
             }
@@ -1124,38 +1126,41 @@ fn chart_global_pick(tag: isize, bar: ChartMenuState) -> Option<(Command, Option
     })
 }
 
-/// A pick among the chart menu's global options. The window, value and color
-/// apply to every provider, so each provider's own choice for them goes
-/// first, whether it came from its menu or from Settings.
-fn chart_global_command(state: &mut TrayState, tag: isize) -> Option<Command> {
+/// A pick among the chart menu's global options, or `None` when `tag` is not
+/// one. The window, value and color apply to every provider, so each
+/// provider's own choice for them goes first, whether it came from its menu or
+/// from Settings; when that cannot be saved, the pick runs no command.
+fn chart_global_command(state: &mut TrayState, tag: isize) -> Option<Option<Command>> {
     let (command, key) = chart_global_pick(tag, chart_menu_state(state))?;
-    if let Some(key) = key {
-        replace_own_choices(
+    if let Some(key) = key
+        && !replace_own_choices(
             &mut state.menu_bar_items,
             key,
             &command,
             config_path().as_deref(),
-        );
+        )
+    {
+        return Some(None);
     }
-    Some(command)
+    Some(Some(command))
 }
 
 /// Drop each provider's own choice for `key` and save that with the global
-/// value `command` sets, in one write to the config at `path`. If the write
-/// fails, the choices stay in memory too, and the command saves only the
-/// global value.
+/// value `command` sets, in one write to the config at `path`. Whether it was
+/// saved: if not, the choices stay in memory too.
 fn replace_own_choices(
     items: &mut std::collections::BTreeMap<String, MenuBarItemConfig>,
     key: &str,
     command: &Command,
     path: Option<&std::path::Path>,
-) {
+) -> bool {
     if let (Some(path), Some((global, value))) = (path, global_value(command))
         && crate::config::set_tray_value_for_all_items(path, global, value, key).is_err()
     {
-        return;
+        return false;
     }
     clear_own_choice(items, key);
+    true
 }
 
 /// The `[tray]` preference a global option writes.
@@ -2980,12 +2985,22 @@ mod presentation_tests {
         // A config that cannot be read: nothing is saved or dropped.
         let text = "[tray\nmenu_bar_window = \"weekly\"\n";
         std::fs::write(&path, text).unwrap();
-        replace_own_choices(&mut items, "window", &command, Some(&path));
+        assert!(!replace_own_choices(
+            &mut items,
+            "window",
+            &command,
+            Some(&path)
+        ));
         assert_eq!(items["zai"], own);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         // Saved: the choice goes from memory and from the file.
         std::fs::write(&path, "[tray.menu_bar_items.zai]\nwindow = \"monthly\"\n").unwrap();
-        replace_own_choices(&mut items, "window", &command, Some(&path));
+        assert!(replace_own_choices(
+            &mut items,
+            "window",
+            &command,
+            Some(&path)
+        ));
         assert!(items.is_empty());
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("menu_bar_window = \"session\""), "{saved}");

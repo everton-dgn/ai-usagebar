@@ -41,7 +41,7 @@ use super::assets;
 use super::browse;
 use super::hotkey::{self, HotkeyBinding};
 use super::icon::{Severity, tray_icon_rgba};
-use super::ipc::{self, Command, ItemSetting, Measurement};
+use super::ipc::{self, Command, ItemSetting, Measurement, WindowChoice};
 use super::menu_bar::{self, UsageWindow};
 use super::menu_space;
 use super::panel::{
@@ -347,11 +347,15 @@ fn run_loop() -> Result<(), String> {
             }
             Event::UserEvent(UserEvent::ProviderItem(action)) => {
                 let chart = match action {
-                    ItemAction::Menu { tag } => chart_menu_command(tag),
+                    ItemAction::Menu { tag } => chart_menu_command(tag)
+                        .map(Some)
+                        .or_else(|| chart_global_command(&mut state, tag)),
                     _ => None,
                 };
                 match chart {
-                    Some(command) => handle_command(&mut state, command, control_flow),
+                    Some(Some(command)) => handle_command(&mut state, command, control_flow),
+                    // A global pick that could not be saved changes nothing.
+                    Some(None) => {}
                     None => handle_provider_item(&mut state, action),
                 }
             }
@@ -1008,6 +1012,19 @@ fn press_on_open_session_item(state: &TrayState, x: f64, y: f64, timestamp: f64)
 const MENU_CHART_REFRESH: isize = 100;
 const MENU_CHART_SETTINGS: isize = 101;
 const MENU_CHART_QUIT: isize = 102;
+/// The chart menu's global options, some of the Settings screen's. Unlike
+/// there, the window, value and color picked here also replace every
+/// provider's own choice.
+const MENU_CHART_WINDOWS: [(isize, WindowChoice); 4] = [
+    (103, WindowChoice::Auto),
+    (104, WindowChoice::Session),
+    (105, WindowChoice::Weekly),
+    (106, WindowChoice::Monthly),
+];
+const MENU_CHART_TOGGLE_VALUE: isize = 107;
+const MENU_CHART_TOGGLE_COLOR: isize = 108;
+const MENU_CHART_ACTIVE_ACCOUNT_ONLY: isize = 109;
+const MENU_CHART_CENTERED: isize = 110;
 
 fn chart_menu_command(tag: isize) -> Option<Command> {
     match tag {
@@ -1016,6 +1033,160 @@ fn chart_menu_command(tag: isize) -> Option<Command> {
         MENU_CHART_QUIT => Some(Command::Quit {}),
         _ => None,
     }
+}
+
+/// Where the menu bar's providers stand on the chart menu's options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChartMenuState {
+    /// Every provider in the menu bar shows its value.
+    all_show: bool,
+    /// Every provider in the menu bar colors its value.
+    all_colored: bool,
+    /// The window every provider in the menu bar reads, when they all read
+    /// the same one.
+    window: Option<UsageWindow>,
+    active_only: bool,
+    centered: bool,
+}
+
+fn chart_menu_state(state: &TrayState) -> ChartMenuState {
+    let shown: Vec<Option<&MenuBarItemConfig>> = (0..)
+        .map_while(|index| state.provider_items.id_at(index))
+        .map(|id| state.menu_bar_items.get(id))
+        .collect();
+    ChartMenuState {
+        all_show: all_on(&shown, !state.menu_bar_hide_value, |item| {
+            item.hide_value.map(|hide| !hide)
+        }),
+        all_colored: all_on(&shown, state.menu_bar_color_value, |item| item.color_value),
+        window: same_window(&shown, state.menu_bar_window),
+        active_only: state.menu_bar_active_account_only,
+        centered: state.menu_bar_centered,
+    }
+}
+
+/// The window every provider shown reads, by its own choice or by the
+/// global one, when they all read the same. With none shown, the global one.
+fn same_window(shown: &[Option<&MenuBarItemConfig>], global: UsageWindow) -> Option<UsageWindow> {
+    let mut windows = shown
+        .iter()
+        .map(|item| menu_bar::item_window(*item, global));
+    let first = windows.next().unwrap_or(global);
+    windows.all(|window| window == first).then_some(first)
+}
+
+/// Whether every provider shown has an option on: by its own choice, or by
+/// the global one where it has none. With none shown, the global one.
+fn all_on(
+    shown: &[Option<&MenuBarItemConfig>],
+    global: bool,
+    own: fn(&MenuBarItemConfig) -> Option<bool>,
+) -> bool {
+    if shown.is_empty() {
+        return global;
+    }
+    shown
+        .iter()
+        .all(|item| item.and_then(own).unwrap_or(global))
+}
+
+/// The command one of the chart menu's global options stands for, and the
+/// provider choice it replaces. Value and color turn off only when every
+/// provider has them on, so each pick changes what the menu bar shows.
+fn chart_global_pick(tag: isize, bar: ChartMenuState) -> Option<(Command, Option<&'static str>)> {
+    Some(match tag {
+        MENU_CHART_TOGGLE_VALUE => (
+            Command::SetMenuBarHideValue {
+                value: bar.all_show,
+            },
+            Some("hide_value"),
+        ),
+        MENU_CHART_TOGGLE_COLOR => (
+            Command::SetMenuBarColorValue {
+                value: !bar.all_colored,
+            },
+            Some("color_value"),
+        ),
+        MENU_CHART_ACTIVE_ACCOUNT_ONLY => (
+            Command::SetMenuBarActiveAccountOnly {
+                value: !bar.active_only,
+            },
+            None,
+        ),
+        MENU_CHART_CENTERED => (
+            Command::SetMenuBarCentered {
+                value: !bar.centered,
+            },
+            None,
+        ),
+        _ => {
+            let (_, value) = MENU_CHART_WINDOWS.iter().find(|(t, _)| *t == tag)?;
+            (Command::SetMenuBarWindow { value: *value }, Some("window"))
+        }
+    })
+}
+
+/// A pick among the chart menu's global options, or `None` when `tag` is not
+/// one. The window, value and color apply to every provider, so each
+/// provider's own choice for them goes first, whether it came from its menu or
+/// from Settings; when that cannot be saved, the pick runs no command.
+fn chart_global_command(state: &mut TrayState, tag: isize) -> Option<Option<Command>> {
+    let (command, key) = chart_global_pick(tag, chart_menu_state(state))?;
+    if let Some(key) = key
+        && !replace_own_choices(
+            &mut state.menu_bar_items,
+            key,
+            &command,
+            config_path().as_deref(),
+        )
+    {
+        return Some(None);
+    }
+    Some(Some(command))
+}
+
+/// Drop each provider's own choice for `key` and save that with the global
+/// value `command` sets, in one write to the config at `path`. Whether it was
+/// saved: if not, the choices stay in memory too.
+fn replace_own_choices(
+    items: &mut std::collections::BTreeMap<String, MenuBarItemConfig>,
+    key: &str,
+    command: &Command,
+    path: Option<&std::path::Path>,
+) -> bool {
+    if let (Some(path), Some((global, value))) = (path, global_value(command))
+        && crate::config::set_tray_value_for_all_items(path, global, value, key).is_err()
+    {
+        return false;
+    }
+    clear_own_choice(items, key);
+    true
+}
+
+/// The `[tray]` preference a global option writes.
+fn global_value(command: &Command) -> Option<(&'static str, toml_edit::Value)> {
+    Some(match command {
+        Command::SetMenuBarWindow { value } => {
+            ("menu_bar_window", value.usage_window().as_str().into())
+        }
+        Command::SetMenuBarHideValue { value } => ("menu_bar_hide_value", (*value).into()),
+        Command::SetMenuBarColorValue { value } => ("menu_bar_color_value", (*value).into()),
+        _ => return None,
+    })
+}
+
+/// Drop each provider's own choice for `key`: `window`, `hide_value` or
+/// `color_value`, and the providers left with no choice of their own.
+fn clear_own_choice(items: &mut std::collections::BTreeMap<String, MenuBarItemConfig>, key: &str) {
+    for item in items.values_mut() {
+        match key {
+            "window" => item.window = None,
+            "hide_value" => item.hide_value = None,
+            "color_value" => item.color_value = None,
+            _ => {}
+        }
+    }
+    items.retain(|_, item| *item != MenuBarItemConfig::default());
 }
 
 fn show_chart_menu(state: &mut TrayState) {
@@ -1029,24 +1200,66 @@ fn show_chart_menu(state: &mut TrayState) {
         return;
     };
     let pt = state.language == "pt-BR";
-    let lines = [
-        MenuLine::Pick {
-            title: if pt { "Atualizar" } else { "Refresh" }.into(),
-            tag: MENU_CHART_REFRESH,
-            checked: false,
-        },
-        MenuLine::Pick {
-            title: if pt { "Configurações" } else { "Settings" }.into(),
-            tag: MENU_CHART_SETTINGS,
-            checked: false,
-        },
+    let bar = chart_menu_state(state);
+    let label = |en: &str, br: &str| (if pt { br } else { en }).to_owned();
+    let pick = |title, tag, checked| MenuLine::Pick {
+        title,
+        tag,
+        checked,
+    };
+    let mut lines = vec![
+        pick(label("Refresh", "Atualizar"), MENU_CHART_REFRESH, false),
+        pick(
+            label("Settings", "Configurações"),
+            MENU_CHART_SETTINGS,
+            false,
+        ),
         MenuLine::Separator,
-        MenuLine::Pick {
-            title: if pt { "Sair" } else { "Quit" }.into(),
-            tag: MENU_CHART_QUIT,
-            checked: false,
-        },
+        MenuLine::Heading(label("Window", "Janela")),
     ];
+    for (tag, choice) in MENU_CHART_WINDOWS {
+        let title = match choice {
+            WindowChoice::Auto => label("Highest", "Maior uso"),
+            WindowChoice::Session => label("5 hours", "5 horas"),
+            WindowChoice::Weekly => label("Weekly", "Semanal"),
+            WindowChoice::Monthly => label("Monthly", "Mensal"),
+        };
+        lines.push(pick(title, tag, bar.window == Some(choice.usage_window())));
+    }
+    lines.extend([
+        MenuLine::Separator,
+        pick(
+            label("Show value", "Mostrar valor"),
+            MENU_CHART_TOGGLE_VALUE,
+            bar.all_show,
+        ),
+        pick(
+            label("Color the value", "Colorir o valor"),
+            MENU_CHART_TOGGLE_COLOR,
+            bar.all_colored,
+        ),
+        pick(
+            label("Only the account in use", "Só a conta em uso"),
+            MENU_CHART_ACTIVE_ACCOUNT_ONLY,
+            bar.active_only,
+        ),
+        pick(
+            label("Center in the menu bar", "Centralizar no menu bar"),
+            MENU_CHART_CENTERED,
+            bar.centered,
+        ),
+    ]);
+    if bar.centered && !menu_space::trusted() {
+        lines.push(pick(
+            label("Authorize centering…", "Autorizar centralização…"),
+            MENU_ACCESSIBILITY,
+            false,
+        ));
+    }
+    lines.extend([
+        MenuLine::Separator,
+        pick(label("Quit", "Sair"), MENU_CHART_QUIT, false),
+    ]);
     state.last_anchor = status_item_frame(&state.tray)
         .map(|frame| (frame.x + frame.w / 2.0, frame.y + frame.h / 2.0));
     if state.chart_session.is_some() {
@@ -1173,12 +1386,21 @@ const MENU_TOGGLE_COLOR: isize = 14;
 const MENU_CENTERED: isize = 15;
 const MENU_ACCESSIBILITY: isize = 16;
 
+/// Whether a provider's menu checks `choice`: "Same as the menu bar" while it
+/// has no window of its own, otherwise that window.
+fn window_checked(own: Option<UsageWindow>, choice: UsageWindow) -> bool {
+    match own {
+        None => choice == UsageWindow::Auto,
+        Some(own) => own == choice && own != UsageWindow::Auto,
+    }
+}
+
 fn provider_menu(state: &mut TrayState, id: &str) -> Vec<MenuLine> {
     state.menu_provider = Some(id.to_owned());
     let pt = state.language == "pt-BR";
     let label = |en: &str, br: &str| (if pt { br } else { en }).to_owned();
     let item = state.menu_bar_items.get(id).cloned().unwrap_or_default();
-    let window = item.window.as_deref().map(UsageWindow::parse);
+    let window = menu_bar::own_window(&item);
     let hide_value = item.hide_value.unwrap_or(state.menu_bar_hide_value);
     let name = state
         .strip_names
@@ -1210,15 +1432,10 @@ fn provider_menu(state: &mut TrayState, id: &str) -> Vec<MenuLine> {
             UsageWindow::Weekly => label("Weekly", "Semanal"),
             UsageWindow::Monthly => label("Monthly", "Mensal"),
         };
-        let checked = match (window, choice) {
-            (None, UsageWindow::Auto) => true,
-            (Some(set), choice) => set == choice && choice != UsageWindow::Auto,
-            _ => false,
-        };
         lines.push(MenuLine::Pick {
             title,
             tag,
-            checked,
+            checked: window_checked(window, choice),
         });
     }
     lines.push(MenuLine::Separator);
@@ -2600,6 +2817,232 @@ mod presentation_tests {
                 "provider actions keep their routing"
             );
         }
+    }
+
+    #[test]
+    fn each_menu_line_keeps_its_own_tag() {
+        let mut tags = vec![
+            MENU_CHART_REFRESH,
+            MENU_CHART_SETTINGS,
+            MENU_CHART_QUIT,
+            MENU_CHART_TOGGLE_VALUE,
+            MENU_CHART_TOGGLE_COLOR,
+            MENU_CHART_ACTIVE_ACCOUNT_ONLY,
+            MENU_CHART_CENTERED,
+            MENU_TOGGLE_VALUE,
+            MENU_HIDE,
+            MENU_ACTIVE_ACCOUNT_ONLY,
+            MENU_OPEN,
+            MENU_TOGGLE_COLOR,
+            MENU_CENTERED,
+            MENU_ACCESSIBILITY,
+        ];
+        tags.extend(MENU_CHART_WINDOWS.iter().map(|(tag, _)| *tag));
+        tags.extend(MENU_WINDOWS.iter().map(|(tag, _)| *tag));
+        let count = tags.len();
+        tags.sort_unstable();
+        tags.dedup();
+        assert_eq!(
+            tags.len(),
+            count,
+            "the chart and provider menus share one target"
+        );
+    }
+
+    #[test]
+    fn a_global_option_changes_what_the_menu_bar_shows() {
+        let bar = ChartMenuState {
+            all_show: true,
+            all_colored: false,
+            window: None,
+            active_only: false,
+            centered: true,
+        };
+        assert_eq!(
+            chart_global_pick(MENU_CHART_TOGGLE_VALUE, bar),
+            Some((
+                Command::SetMenuBarHideValue { value: true },
+                Some("hide_value")
+            ))
+        );
+        // Some provider hides its value: the pick shows it everywhere.
+        assert_eq!(
+            chart_global_pick(
+                MENU_CHART_TOGGLE_VALUE,
+                ChartMenuState {
+                    all_show: false,
+                    ..bar
+                }
+            ),
+            Some((
+                Command::SetMenuBarHideValue { value: false },
+                Some("hide_value")
+            ))
+        );
+        assert_eq!(
+            chart_global_pick(MENU_CHART_TOGGLE_COLOR, bar),
+            Some((
+                Command::SetMenuBarColorValue { value: true },
+                Some("color_value")
+            ))
+        );
+        assert_eq!(
+            chart_global_pick(MENU_CHART_ACTIVE_ACCOUNT_ONLY, bar),
+            Some((Command::SetMenuBarActiveAccountOnly { value: true }, None))
+        );
+        assert_eq!(
+            chart_global_pick(MENU_CHART_CENTERED, bar),
+            Some((Command::SetMenuBarCentered { value: false }, None))
+        );
+        for (tag, value) in MENU_CHART_WINDOWS {
+            assert_eq!(
+                chart_global_pick(tag, bar),
+                Some((Command::SetMenuBarWindow { value }, Some("window")))
+            );
+        }
+        for tag in (1..=16).chain(MENU_CHART_REFRESH..=MENU_CHART_QUIT) {
+            assert_eq!(chart_global_pick(tag, bar), None, "tag {tag}");
+        }
+    }
+
+    #[test]
+    fn an_option_is_on_only_when_every_provider_shown_has_it() {
+        let hidden = MenuBarItemConfig {
+            hide_value: Some(true),
+            ..Default::default()
+        };
+        let plain = MenuBarItemConfig::default();
+        let shows = |item: &MenuBarItemConfig| item.hide_value.map(|hide| !hide);
+        // A provider that hid its value keeps the option off.
+        assert!(!all_on(&[Some(&hidden), None], true, shows));
+        assert!(all_on(&[Some(&plain), None], true, shows));
+        assert!(!all_on(&[Some(&plain)], false, shows));
+        // With no provider in the menu bar, the global value stands.
+        assert!(all_on(&[], true, shows));
+        assert!(!all_on(&[], false, shows));
+    }
+
+    #[test]
+    fn a_provider_following_the_menu_bar_checks_that_option() {
+        let own = |window: &str| {
+            menu_bar::own_window(&MenuBarItemConfig {
+                window: Some(window.into()),
+                ..Default::default()
+            })
+        };
+        // "auto" written by hand follows the menu bar, as no window does.
+        assert!(window_checked(own("auto"), UsageWindow::Auto));
+        assert!(window_checked(
+            menu_bar::own_window(&MenuBarItemConfig::default()),
+            UsageWindow::Auto
+        ));
+        assert!(window_checked(own("weekly"), UsageWindow::Weekly));
+        assert!(!window_checked(own("weekly"), UsageWindow::Auto));
+        assert!(!window_checked(own("auto"), UsageWindow::Weekly));
+    }
+
+    #[test]
+    fn a_window_is_checked_when_every_provider_shown_reads_it() {
+        let weekly = MenuBarItemConfig {
+            window: Some("weekly".into()),
+            ..Default::default()
+        };
+        let global = MenuBarItemConfig {
+            window: Some("auto".into()),
+            ..Default::default()
+        };
+        // A provider's own window that matches the global one.
+        assert_eq!(
+            same_window(&[Some(&weekly), None], UsageWindow::Weekly),
+            Some(UsageWindow::Weekly)
+        );
+        assert_eq!(
+            same_window(&[Some(&weekly), Some(&global)], UsageWindow::Session),
+            None
+        );
+        assert_eq!(
+            same_window(&[Some(&global)], UsageWindow::Session),
+            Some(UsageWindow::Session)
+        );
+        assert_eq!(
+            same_window(&[], UsageWindow::Monthly),
+            Some(UsageWindow::Monthly)
+        );
+    }
+
+    #[test]
+    fn a_global_pick_keeps_the_choices_it_cannot_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let command = Command::SetMenuBarWindow {
+            value: WindowChoice::Session,
+        };
+        let own = MenuBarItemConfig {
+            window: Some("monthly".into()),
+            ..Default::default()
+        };
+        let mut items = std::collections::BTreeMap::from([("zai".to_owned(), own.clone())]);
+        // A config that cannot be read: nothing is saved or dropped.
+        let text = "[tray\nmenu_bar_window = \"weekly\"\n";
+        std::fs::write(&path, text).unwrap();
+        assert!(!replace_own_choices(
+            &mut items,
+            "window",
+            &command,
+            Some(&path)
+        ));
+        assert_eq!(items["zai"], own);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        // Saved: the choice goes from memory and from the file.
+        std::fs::write(&path, "[tray.menu_bar_items.zai]\nwindow = \"monthly\"\n").unwrap();
+        assert!(replace_own_choices(
+            &mut items,
+            "window",
+            &command,
+            Some(&path)
+        ));
+        assert!(items.is_empty());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("menu_bar_window = \"session\""), "{saved}");
+        assert!(!saved.contains("monthly"), "{saved}");
+    }
+
+    #[test]
+    fn a_global_option_drops_only_the_providers_own_choice_for_it() {
+        let mut items = std::collections::BTreeMap::new();
+        items.insert(
+            "openai@work".to_owned(),
+            MenuBarItemConfig {
+                window: Some("weekly".into()),
+                ..Default::default()
+            },
+        );
+        items.insert(
+            "zai".to_owned(),
+            MenuBarItemConfig {
+                hide_value: Some(true),
+                color_value: Some(false),
+                ..Default::default()
+            },
+        );
+        items.insert(
+            "kimi".to_owned(),
+            MenuBarItemConfig {
+                hidden: true,
+                ..Default::default()
+            },
+        );
+        clear_own_choice(&mut items, "window");
+        // openai@work had only a window of its own.
+        assert_eq!(items.keys().collect::<Vec<_>>(), ["kimi", "zai"]);
+        clear_own_choice(&mut items, "hide_value");
+        assert_eq!(items["zai"].hide_value, None);
+        assert_eq!(items["zai"].color_value, Some(false));
+        clear_own_choice(&mut items, "hidden");
+        assert!(
+            items["kimi"].hidden,
+            "hiding a provider is not a global option"
+        );
     }
 
     fn report() -> Value {

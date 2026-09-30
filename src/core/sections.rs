@@ -244,11 +244,6 @@ pub(crate) fn sections_with_metadata_for(
                     label: "Error".into(),
                     value: e.clone(),
                 },
-                Section::Spacer,
-                Section::Text {
-                    label: "".into(),
-                    value: "Press `r` to retry, `q` to quit.".into(),
-                },
             ]);
             SectionBuilder::new(rows)
         }
@@ -1961,16 +1956,18 @@ mod tests {
         )));
     }
 
+    /// The app has no terminal flow, so an error card offers no keyboard
+    /// shortcut from the old TUI.
     #[test]
-    fn error_state_includes_retry_hint() {
+    fn error_state_names_the_error_without_terminal_keys() {
         let sections = sections_for(&TabState::error("token expired"), now(), 5);
         assert!(sections.iter().any(|s| matches!(
             s,
             Section::Text { value, .. } if value.contains("token expired")
         )));
-        assert!(sections.iter().any(|s| matches!(
+        assert!(!sections.iter().any(|s| matches!(
             s,
-            Section::Text { value, .. } if value.contains("`r` to retry")
+            Section::Text { value, .. } if value.contains('`') || value.contains("to quit")
         )));
     }
 

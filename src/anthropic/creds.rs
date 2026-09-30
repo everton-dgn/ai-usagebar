@@ -507,8 +507,8 @@ mod tests {
     fn a_locked_keychain_wins_over_the_file_missing_error() {
         // The regression this guards: `read_raw` mapped *every* `security`
         // failure to Ok(None), so a locked login Keychain looked identical to
-        // "not logged in" and the user was told to run `claude` while their
-        // credentials sat there intact.
+        // "not logged in" and the user was told to sign in to Claude Code
+        // again while their credentials sat there intact.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("missing.json");
         let err = read_default_with(&path, || {

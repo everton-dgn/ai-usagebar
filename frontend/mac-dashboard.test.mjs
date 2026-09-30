@@ -15,7 +15,7 @@ try {
   const { LanguageProvider, translateUsage } = await server.ssrLoadModule('/src/lib/i18n.tsx');
   assert.equal(translateUsage('pt-BR', '0% elapsed · on track'), '0% do período transcorrido · dentro do ritmo');
   assert.equal(translateUsage('en', '0% elapsed · on track'), '0% elapsed · on track');
-  const { emptyLayout, emptyPayload, layoutForProviderView, providerLinks } = await server.ssrLoadModule('/src/model.js');
+  const { emptyLayout, emptyPayload, layoutForProviderView, parseHostPayload, projectCards, providerLinks } = await server.ssrLoadModule('/src/model.js');
   const nowMs = Date.parse('2026-09-24T11:00:00Z');
   const card = {
     id: 'anthropic', title: 'Claude', plan: '', stale: false, error: '', rows: [{
@@ -297,6 +297,21 @@ try {
     })));
   assert.match(tabsAccount('anthropic@work'), /aria-label="Use Claude \(switches Claude Code and the VS Code extension\)"/);
   assert.match(tabsAccount('anthropic@home'), /aria-label="Claude · 2 is the active account"/);
+  // The card's error row shows the hint projectCards chose from the host's
+  // sign_in; it used to re-explain the error from the card id alone, which
+  // dropped every provider hint for the generic sentence.
+  const [kiroCard] = projectCards(parseHostPayload({
+    entries: [{
+      id: 'kiro', display_name: 'Kiro', status: 'error', error: 'HTTP 401: authentication rejected', sections: [],
+      sign_in: 'Needs a saved Kiro CLI sign-in. Signing in is not available in this app.',
+    }],
+  }), nowMs);
+  const kiroHtml = renderToStaticMarkup(React.createElement(TooltipProvider, {},
+    React.createElement(LanguageProvider, { language: 'en' },
+      React.createElement(ProviderSection, { card: kiroCard, layout: emptyLayout(), nowMs, payload }))));
+  assert.match(kiroHtml, /Sign-in expired/);
+  assert.match(kiroHtml, /Needs a saved Kiro CLI sign-in\. Signing in is not available in this app\./);
+  assert.doesNotMatch(kiroHtml, /This app needs a saved provider session/);
   console.log('macOS dashboard reset display: ok');
 } finally {
   await server.close();

@@ -37,6 +37,16 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 - Apresentação da tecla Command e tradução do detalhe de ritmo em português.
 - Verificação de todas as tags com proveniência das divergências históricas,
   mantendo o changelog original intacto.
+- Aviso de token renovado que não pôde ser salvo no Claude e no Codex sem
+  pedir comando de terminal; a mensagem orienta um novo login no aplicativo
+  do fornecedor e continua classificada como login expirado.
+- Orientações de login do GitHub CLI e do Kiro CLI exibidas no cartão, em vez
+  da frase genérica, sem deixar passar instruções de terminal.
+- Falhas de login e de gravação de credenciais renovadas de todos os
+  provedores classificadas como login expirado, com a orientação de cada
+  fornecedor, em vez de "Couldn't update".
+- Mensagens do Model Studio e do Antigravity sem comando de terminal nem
+  edição do arquivo de configuração.
 
 ### Removido
 

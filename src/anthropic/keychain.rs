@@ -94,10 +94,11 @@ const ERR_SEC_ITEM_NOT_FOUND: i32 = 44;
 /// Read the raw credentials JSON from the login Keychain.
 ///
 /// Returns `Ok(None)` only when the item genuinely does not exist, so callers
-/// can fall through to the file path / a "run `claude`" error. Every other
-/// `security` failure is an `Err`: a locked Keychain or a denied ACL is not the
-/// same as "you are not logged in", and reporting it as such sent users off to
-/// re-authenticate when the credentials were there all along.
+/// can fall through to the file path / a "Claude Code sign-in is needed"
+/// error. Every other `security` failure is an `Err`: a locked Keychain or a
+/// denied ACL is not the same as "you are not logged in", and reporting it as
+/// such sent users off to re-authenticate when the credentials were there all
+/// along.
 pub fn read_raw() -> Result<Option<String>> {
     read_raw_service(SERVICE)
 }

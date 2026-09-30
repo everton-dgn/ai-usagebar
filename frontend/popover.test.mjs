@@ -268,6 +268,93 @@ assert.equal(claudeCards[0].rows.length, 0);
     explainError('HTTP 401: authentication rejected', { signIn: 'Sign in to the Cursor app, then Refresh.' }).hint,
     'Sign in to the Cursor app, then Refresh.',
   );
+  // A product whose name ends in "CLI" is not a terminal step. These are the
+  // Copilot and Kiro sentences from VendorId::sign_in_hint (src/vendor.rs).
+  for (const signIn of [
+    'Needs a saved GitHub CLI sign-in with Copilot access. Signing in is not available in this app.',
+    'Needs a saved Kiro CLI sign-in. Signing in is not available in this app.',
+  ]) {
+    assert.equal(explainError('HTTP 401: authentication rejected', { signIn }).hint, signIn);
+  }
+  const copilotCards = projectCards(parseHostPayload({
+    entries: [{
+      id: 'copilot', display_name: 'Copilot', status: 'error', error: 'HTTP 403: forbidden', sections: [],
+      sign_in: 'Needs a saved GitHub CLI sign-in with Copilot access. Signing in is not available in this app.',
+    }],
+  }), 0);
+  assert.equal(copilotCards[0].errorHint, 'Needs a saved GitHub CLI sign-in with Copilot access. Signing in is not available in this app.');
+  // A bare CLI is still an instruction to open a terminal.
+  for (const signIn of [
+    'Use the gh CLI to sign in, then Refresh.',
+    'Sign in with the CLI, then Refresh.',
+    'Sign in with the cli, then Refresh.',
+    'Install the official bl CLI, then Refresh.',
+  ]) {
+    assert.equal(
+      explainError('HTTP 401: authentication rejected', { signIn }).hint,
+      'This app needs a saved provider session. Signing in is not available here yet.',
+      signIn,
+    );
+  }
+  // The rotated-token messages from anthropic::fetch and openai::fetch reach
+  // the card as a warning. They name no command and still read as a sign-in.
+  for (const [signIn, error] of [
+    ['Needs a saved Claude Code sign-in on this Mac. Signing in is not available in this app.',
+      'refreshed token could not be saved (disk full); the rotated refresh token is lost, so a new Claude Code sign-in is needed, which this app cannot do'],
+    ['Sign in to the Codex app on this Mac, then Refresh.',
+      'refreshed token could not be saved (disk full); the rotated refresh token is lost; sign in to the Codex app again'],
+  ]) {
+    const explained = explainError(error, { signIn });
+    assert.equal(explained.title, 'Sign-in expired', error);
+    assert.equal(explained.hint, signIn);
+    assert.doesNotMatch(error, TERMINAL);
+  }
+  // Every provider's sign-in failure from the Rust side reads as a sign-in,
+  // through one rule, and keeps the provider's own hint. Sources in comments.
+  {
+    const signIn = 'Provider sign-in hint.';
+    for (const error of [
+      // Refreshed credentials that could not be saved.
+      'credentials error: refreshed Kiro CLI credentials could not be saved (disk full); a new Kiro CLI sign-in is needed if the refresh token was rotated, which this app cannot do', // kiro/fetch.rs
+      'credentials error: the refreshed Kimi Code credentials could not be saved (disk full); a new Kimi Code sign-in is needed, which this app cannot do', // kimi/fetch.rs
+      'credentials error: the refreshed Grok Bot credentials could not be saved (disk full); sign in to the Grok Bot desktop app again if the refresh token was rotated', // grokbot/fetch.rs
+      // Explicit requests to sign in again.
+      'credentials error: Kiro CLI token refresh failed (HTTP 400). A new Kiro CLI sign-in is needed, which this app cannot do.', // kiro/fetch.rs
+      'credentials error: Command Code sign-in expired. A new sign-in is needed, which this app cannot do.', // commandcode/creds.rs
+      'credentials error: Model Studio: console session expired; a new Model Studio console sign-in is needed, which this app cannot do', // modelstudio/types.rs
+      "credentials error: Model Studio: the bl CLI's config.json carries no console token; a new Model Studio console sign-in is needed, which this app cannot do", // modelstudio/creds.rs
+      'credentials error: Grok Build login file not found; a new Grok Build sign-in is needed, which this app cannot do', // supergrok/direct.rs
+      'credentials error: GitHub Copilot: no token. A GitHub CLI sign-in with Copilot access is needed, which this app cannot do.', // copilot/credentials.rs
+      'credentials error: could not parse Keychain: bad json. A new Claude Code sign-in is needed, which this app cannot do.', // anthropic/creds.rs
+      'credentials error: Cursor session token is empty. Sign in to the Cursor IDE again.', // cursor/db.rs
+      'credentials error: Grok Bot token refresh was rejected; sign in to the Grok Bot desktop app again', // grokbot/fetch.rs
+      "credentials error: Antigravity's saved Google session expired; open Antigravity to sign in again", // antigravity/cloud.rs
+      "credentials error: Antigravity's saved Google session expired and this app cannot refresh it; open Antigravity to sign in again", // antigravity/fetch.rs
+    ]) {
+      const explained = explainError(error, { signIn });
+      assert.equal(explained.title, 'Sign-in expired', error);
+      assert.equal(explained.hint, signIn, error);
+      // "... CLI" here is a product name; no message names a command.
+      assert.doesNotMatch(error, /`|terminal|\brun\b|login --|config\.toml/i, error);
+    }
+    // The rule does not swallow errors that have their own title.
+    for (const [error, title] of [
+      ['no local server found. Or sign in to Antigravity once, so its saved Google session can be used while it is closed.', "Antigravity isn't running"],
+      ['HTTP 429: rate limited; next attempt in 5m', 'Too many requests'],
+      ['HTTP 503: service unavailable', 'Provider is unavailable'],
+      ['network transport error: timed out', "Can't reach the server"],
+      ['usage response did not contain valid JSON', "Couldn't read usage data"],
+      ['grokbot cache belongs to a different sign-in; refetching', "Couldn't update"],
+      ['the refreshed usage payload was discarded; the cache could not be saved later', "Couldn't update"],
+    ]) {
+      assert.equal(explainError(error, { signIn }).title, title, error);
+    }
+  }
+  // Caches written by older builds still carry the command wording.
+  assert.equal(
+    explainError('refreshed token could not be saved (x); the rotated refresh token is lost — re-run `claude` to log in again').title,
+    'Sign-in expired',
+  );
   // No hint the model can emit on its own mentions a terminal.
   for (const error of ['no vendors enabled', 'no API key', 'io error', 'did not contain valid JSON', 'no local server found', '']) {
     assert.doesNotMatch(explainError(error).hint || '', TERMINAL, error);

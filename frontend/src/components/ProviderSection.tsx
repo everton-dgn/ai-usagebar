@@ -34,7 +34,6 @@ import {
   cardHasExtras,
   condensedTextRowIndexes,
   displayPlan,
-  explainError,
   headlineAlternate,
   headlineLabel,
   isStarred,
@@ -157,7 +156,9 @@ export function ProviderSection({
         onSwitchAccount={onSwitchAccount}
       />
       <div className={cn("py-[var(--card-gutter)]", lifted ? "lifted-surface" : "card-surface")}>
-        {card.errorTitle ? <ErrorRow explained={explainError(card.errorDetail, card.id)} /> : null}
+        {card.errorTitle ? (
+          <ErrorRow explained={{ title: card.errorTitle, hint: card.errorHint, action: card.errorAction }} />
+        ) : null}
         {alwaysRows.map((row, index) => renderRow(row, index, condensedAlways, false))}
         {showExpander ? (
           <button

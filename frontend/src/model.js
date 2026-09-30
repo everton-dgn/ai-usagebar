@@ -1595,7 +1595,8 @@ export function explainError(text, entry) {
       hint: retry ? "Retrying automatically in " + retry[1] + "." : "Try Refresh in a minute.",
     };
   }
-  if (SIGN_IN_NEEDED.test(raw)) {
+  // A server failure stays an outage even when its page says "sign in".
+  if (SIGN_IN_NEEDED.test(raw) && !/HTTP 5\d\d/i.test(raw)) {
     return { title: "Sign-in expired", hint: signInHint(entry) };
   }
   if (/HTTP 5\d\d|schema mismatch/i.test(raw)) {

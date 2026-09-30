@@ -342,6 +342,8 @@ assert.equal(claudeCards[0].rows.length, 0);
       ['no local server found. Or sign in to Antigravity once, so its saved Google session can be used while it is closed.', "Antigravity isn't running"],
       ['HTTP 429: rate limited; next attempt in 5m', 'Too many requests'],
       ['HTTP 503: service unavailable', 'Provider is unavailable'],
+      // A server failure whose page asks to sign in is still an outage.
+      ['HTTP 503: please sign in again later', 'Provider is unavailable'],
       ['network transport error: timed out', "Can't reach the server"],
       ['usage response did not contain valid JSON', "Couldn't read usage data"],
       ['grokbot cache belongs to a different sign-in; refetching', "Couldn't update"],

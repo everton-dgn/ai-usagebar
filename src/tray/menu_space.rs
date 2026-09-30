@@ -28,56 +28,127 @@ pub fn request_access(changed: impl Fn() + 'static) {
     accessibility_prompt::show(Box::new(changed));
 }
 
-/// Where the frontmost app's menus end, in screen points from the left, or
-/// `None` without the permission, for this app itself, or on any failure.
-pub fn app_menu_end() -> Option<f64> {
+/// Where the menus shown in the menu bar end, as Accessibility reports them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MenuEnd {
+    /// The right edge of the last menu that has a size, in screen points
+    /// from the left.
+    pub x: Option<f64>,
+    /// Whether the last menu has one. Right after an app comes to the front,
+    /// the menu bar can still be laying out its menus.
+    pub laid_out: bool,
+}
+
+/// Where the menus shown in the menu bar end, or `None` without the
+/// permission or when Accessibility cannot read them, as for a hung app.
+pub fn app_menu_end() -> Option<MenuEnd> {
     if !trusted() {
         return None;
     }
-    let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+    // An accessory app in front, such as this one or a launcher, leaves the
+    // menu bar to the last regular app; its own menus are never on screen.
+    let app = NSWorkspace::sharedWorkspace().menuBarOwningApplication()?;
     let pid = app.processIdentifier();
     if pid == std::process::id() as i32 {
         return None;
     }
     // SAFETY: any pid is accepted; a gone process makes later calls fail.
     let element = unsafe { AXUIElement::new_application(pid) };
-    // A hung app must not stall the menu bar.
     // SAFETY: a plain setter on a live element.
-    unsafe { element.set_messaging_timeout(0.25) };
-    let bar = attribute(&element, "AXMenuBar")?
+    unsafe { element.set_messaging_timeout(MENUS_TIMEOUT) };
+    let bar = attribute(&element, "AXMenuBar")
+        .ok()?
         .downcast::<AXUIElement>()
         .ok()?;
-    let last = children(&bar)?.iter().rev().find_map(|item| frame(item))?;
-    Some(last.origin.x + last.size.width)
+    menu_end(
+        children(&bar, MENUS_TIMEOUT)?
+            .iter()
+            .map(|item| frame(item)),
+    )
 }
 
-fn children(element: &AXUIElement) -> Option<Vec<CFRetained<AXUIElement>>> {
-    let array = attribute(element, "AXChildren")?
+/// How long Accessibility waits for each answer from an app, so a hung one
+/// cannot stall the menu bar.
+const MENUS_TIMEOUT: f32 = 0.25;
+/// The same for asking every running app whether it has status items.
+const EXTRAS_TIMEOUT: f32 = 0.1;
+
+/// Where menus with these frames, left to right, end, or `None` once the app
+/// stops answering. `Ok(None)` stands for a menu without a size. Only the
+/// frames up to the last menu that has one, from the right, are read.
+fn menu_end(
+    frames: impl DoubleEndedIterator<Item = Result<Option<CGRect>, AXError>>,
+) -> Option<MenuEnd> {
+    let mut frames = frames.rev();
+    let last = frames.next().transpose().ok()?.flatten();
+    let drawn = match last {
+        Some(rect) => Some(rect),
+        None => frames.find_map(Result::transpose).transpose().ok()?,
+    };
+    Some(MenuEnd {
+        x: drawn.map(|rect| rect.origin.x + rect.size.width),
+        laid_out: last.is_some(),
+    })
+}
+
+/// `element`'s children, asked for and then read within `timeout`, which
+/// Accessibility keeps only on the element it was set on.
+fn children(element: &AXUIElement, timeout: f32) -> Option<Vec<CFRetained<AXUIElement>>> {
+    // SAFETY: a plain setter on a live element.
+    unsafe { element.set_messaging_timeout(timeout) };
+    let array = attribute(element, "AXChildren")
+        .ok()?
         .downcast::<CFArray>()
         .ok()?;
     // SAFETY: an AXChildren value is an array of AXUIElements.
     let array: CFRetained<CFArray<AXUIElement>> = unsafe { CFRetained::cast_unchecked(array) };
-    Some(array.iter().collect())
+    Some(
+        array
+            .iter()
+            // SAFETY: a plain setter on a live element.
+            .inspect(|child| unsafe {
+                child.set_messaging_timeout(timeout);
+            })
+            .collect(),
+    )
 }
 
-fn attribute(element: &AXUIElement, name: &'static str) -> Option<CFRetained<CFType>> {
+/// `element`'s attribute `name`, or the error Accessibility answered with.
+fn attribute(element: &AXUIElement, name: &'static str) -> Result<CFRetained<CFType>, AXError> {
     let name = CFString::from_static_str(name);
     let mut value: *const CFType = std::ptr::null();
     // SAFETY: `value` is a valid out-pointer for a +1 reference.
     let error = unsafe { element.copy_attribute_value(&name, NonNull::from(&mut value)) };
     if error != AXError::Success {
-        return None;
+        return Err(error);
     }
     // SAFETY: on success the value is a +1 reference we now own.
-    NonNull::new(value.cast_mut()).map(|value| unsafe { CFRetained::from_raw(value) })
+    NonNull::new(value.cast_mut())
+        .map(|value| unsafe { CFRetained::from_raw(value) })
+        .ok_or(AXError::NoValue)
 }
 
-fn frame(element: &AXUIElement) -> Option<CGRect> {
-    let value = attribute(element, "AXFrame")?.downcast::<AXValue>().ok()?;
-    let mut rect = CGRect::default();
-    // SAFETY: an AXFrame value holds a CGRect, written into `rect`.
-    let ok = unsafe { value.value(AXValueType::CGRect, NonNull::from(&mut rect).cast()) };
-    ok.then_some(rect)
+/// `element`'s frame when Accessibility reports it drawn, or the error when
+/// the app did not answer in time.
+fn frame(element: &AXUIElement) -> Result<Option<CGRect>, AXError> {
+    let value = match attribute(element, "AXFrame") {
+        Ok(value) => value.downcast::<AXValue>().ok(),
+        Err(AXError::CannotComplete) => return Err(AXError::CannotComplete),
+        Err(_) => None,
+    };
+    Ok(value.and_then(|value| {
+        let mut rect = CGRect::default();
+        // SAFETY: an AXFrame value holds a CGRect, written into `rect`.
+        let ok = unsafe { value.value(AXValueType::CGRect, NonNull::from(&mut rect).cast()) };
+        ok.then_some(rect).filter(on_screen)
+    }))
+}
+
+/// Whether Accessibility reports `rect` as drawn. A menu that is not, such as
+/// an accessory app's or one the menu bar has yet to lay out, sits at the
+/// bar's bottom-left corner, less than a point wide or tall.
+fn on_screen(rect: &CGRect) -> bool {
+    rect.size.width >= 1.0 && rect.size.height >= 1.0
 }
 
 /// The left edge of the leftmost status item, from every other app's menu
@@ -98,18 +169,34 @@ pub fn status_items_start(own: Option<f64>, bar_height: f64) -> Option<f64> {
             // SAFETY: any pid is accepted; a gone process makes later calls fail.
             let element = unsafe { AXUIElement::new_application(pid) };
             // SAFETY: a plain setter on a live element.
-            unsafe { element.set_messaging_timeout(0.1) };
-            let extras = attribute(&element, "AXExtrasMenuBar")?
+            unsafe { element.set_messaging_timeout(EXTRAS_TIMEOUT) };
+            let extras = attribute(&element, "AXExtrasMenuBar")
+                .ok()?
                 .downcast::<AXUIElement>()
                 .ok()?;
-            children(&extras)?
-                .iter()
-                .filter_map(|item| frame(item))
-                .filter(|rect| rect.origin.y < bar_height)
-                .map(|rect| rect.origin.x)
-                .reduce(f64::min)
+            leftmost(
+                children(&extras, MENUS_TIMEOUT)?
+                    .iter()
+                    .map(|item| frame(item)),
+                bar_height,
+            )
         })
         .chain(own)
+        .reduce(f64::min)
+}
+
+/// The left edge of the leftmost status item with these frames that sits in
+/// the menu bar. Items not drawn are skipped; once the app stops answering,
+/// the items read so far count.
+fn leftmost(
+    frames: impl Iterator<Item = Result<Option<CGRect>, AXError>>,
+    bar_height: f64,
+) -> Option<f64> {
+    frames
+        .map_while(Result::ok)
+        .flatten()
+        .filter(|rect| rect.origin.y < bar_height)
+        .map(|rect| rect.origin.x)
         .reduce(f64::min)
 }
 
@@ -129,6 +216,80 @@ pub fn centered_x(width: f64, screen: (f64, f64), left: Option<f64>, right: Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objc2_core_foundation::{CGPoint, CGSize};
+
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> CGRect {
+        CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
+    }
+
+    #[test]
+    fn a_menu_without_a_size_is_not_on_screen() {
+        // A menu the menu bar has not drawn and ChatGPT's Help menu, as
+        // macOS 27 reports them.
+        assert!(!on_screen(&rect(0.0, 30.0, 0.0, 0.0)));
+        assert!(on_screen(&rect(323.0, 0.0, 49.0, 30.0)));
+        assert!(!on_screen(&rect(-1.0, 30.0, 1.0, 0.0)));
+    }
+
+    #[test]
+    fn the_menus_are_laid_out_once_the_last_one_is() {
+        let apple = Ok(Some(rect(10.0, 0.0, 34.0, 30.0)));
+        let help = Ok(Some(rect(323.0, 0.0, 49.0, 30.0)));
+        let hidden = Ok(None);
+        let end = |x, laid_out| Some(MenuEnd { x, laid_out });
+        // ChatGPT's menus while the menu bar redrew the first ones.
+        assert_eq!(
+            menu_end([apple, hidden, hidden, help].into_iter()),
+            end(Some(372.0), true)
+        );
+        // Those of an app that has just come to the front, or has none yet.
+        assert_eq!(menu_end([hidden, hidden].into_iter()), end(None, false));
+        assert_eq!(menu_end(std::iter::empty()), end(None, false));
+        // Only the first ones laid out: where they end is not the end yet.
+        assert_eq!(
+            menu_end([apple, hidden].into_iter()),
+            end(Some(44.0), false)
+        );
+    }
+
+    #[test]
+    fn menus_of_an_app_that_stops_answering_have_no_end() {
+        let apple = Ok(Some(rect(10.0, 0.0, 34.0, 30.0)));
+        let timeout = Err(AXError::CannotComplete);
+        assert_eq!(menu_end([apple, timeout].into_iter()), None);
+        assert_eq!(menu_end([timeout, Ok(None)].into_iter()), None);
+        // A menu left of the last one is not read once that has a size.
+        assert_eq!(
+            menu_end([timeout, apple].into_iter()),
+            Some(MenuEnd {
+                x: Some(44.0),
+                laid_out: true
+            })
+        );
+    }
+
+    #[test]
+    fn status_items_not_drawn_do_not_hide_the_next_ones() {
+        let item = |x| Ok(Some(rect(x, 0.0, 24.0, 30.0)));
+        let hidden = Ok(None);
+        assert_eq!(
+            leftmost([item(1200.0), hidden, item(1100.0)].into_iter(), 30.0),
+            Some(1100.0)
+        );
+        // Items outside the menu bar do not count.
+        let below = Ok(Some(rect(900.0, 40.0, 24.0, 30.0)));
+        assert_eq!(
+            leftmost([item(1200.0), below].into_iter(), 30.0),
+            Some(1200.0)
+        );
+        // Once the app stops answering, the items read so far count.
+        let timeout = Err(AXError::CannotComplete);
+        assert_eq!(
+            leftmost([item(1200.0), timeout, item(1100.0)].into_iter(), 30.0),
+            Some(1200.0)
+        );
+        assert_eq!(leftmost([hidden].into_iter(), 30.0), None);
+    }
 
     #[test]
     fn the_strip_centers_in_the_free_stretch() {

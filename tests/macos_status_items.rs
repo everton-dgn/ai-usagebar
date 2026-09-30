@@ -24,6 +24,10 @@ mod menu_bar {
     }
 }
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
+#[path = "../src/tray/center_bar.rs"]
+mod center_bar;
+#[cfg(target_os = "macos")]
 #[allow(dead_code, unused_imports)]
 #[path = "../src/tray/menu_space.rs"]
 mod menu_space;
@@ -568,6 +572,74 @@ fn main() {
             assert!(capsule.backgroundColor().is_some(), "open provider capsule");
         }
     }
+    // An open provider holds the panel: a wider title moves it only once the
+    // provider closes, so its popover stays where it opened.
+    let panel = app
+        .windows()
+        .into_iter()
+        .find(|window| {
+            window.level() == objc2_app_kit::NSStatusWindowLevel
+                && window
+                    .contentView()
+                    .is_some_and(|view| view.downcast_ref::<objc2_app_kit::NSStackView>().is_some())
+        })
+        .expect("centered providers' panel");
+    items.highlight(Some(0));
+    let held = panel.frame();
+    let wider: Vec<_> = chips
+        .iter()
+        .map(|chip| menu_bar::Chip {
+            id: chip.id.clone(),
+            name: chip.name.clone(),
+            value: Some("100% · 100%".into()),
+            stale: false,
+            level: None,
+            active_account: false,
+            mark: None,
+        })
+        .collect();
+    let wider_tips = wider
+        .iter()
+        .map(status_items::tooltip_line)
+        .collect::<Vec<_>>();
+    items.sync(&wider, &wider_tips, true, None);
+    assert_eq!(
+        panel.frame(),
+        held,
+        "an open provider's panel must stay put"
+    );
+    // Nor does a rebuild, as when a provider comes or goes.
+    let more: Vec<_> = ["anthropic", "openai", "zai"]
+        .into_iter()
+        .map(|id| menu_bar::Chip {
+            id: id.into(),
+            name: id.into(),
+            value: Some("0%".into()),
+            stale: false,
+            level: None,
+            active_account: false,
+            mark: None,
+        })
+        .collect();
+    let more_tips = more
+        .iter()
+        .map(status_items::tooltip_line)
+        .collect::<Vec<_>>();
+    items.sync(&more, &more_tips, true, None);
+    assert_eq!(
+        panel.frame(),
+        held,
+        "a rebuild must not move an open provider's panel"
+    );
+    assert!(
+        panel.isVisible(),
+        "the panel stays on screen through a rebuild"
+    );
+    items.highlight(None);
+    assert!(
+        panel.frame().size.width > held.size.width,
+        "the panel fits its providers again once none is open"
+    );
     items.clear();
     // Providers in their own status items: where the menu bar tracks their
     // sessions, highlighting one must neither fail nor invent an open session.

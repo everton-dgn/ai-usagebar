@@ -724,6 +724,7 @@ export function projectCards(payload, nowMs) {
       error: joinError(explained),
       errorTitle: explained.title,
       errorHint: explained.hint,
+      errorAction: explained.action,
       errorDetail: entry.error || "",
       rows,
       warning,
@@ -1515,13 +1516,18 @@ export function initialsGlyph(title) {
 //
 // Several of those hints still name a command-line step. This app has no
 // terminal flow, so any hint that does falls back to the generic sentence.
-const TERMINAL_HINT = /`|\bterminal\b|\brun\b|\bCLI\b|\bconfig\b/i;
+const TERMINAL_HINT = /`|\bterminal\b|\brun\b|\bconfig\b/i;
+// A bare "CLI" ("use the CLI", "the gh CLI") points at a terminal. After a
+// capitalized product name it is part of that name ("GitHub CLI", "Kiro CLI"),
+// and those hints only ask for a saved sign-in. Case-sensitive on purpose: an
+// /i flag would let the lookbehind accept "the " as a product name.
+const BARE_CLI = /(?<![A-Z][A-Za-z0-9.-]*\s)\b(?:CLI|[Cc]li)\b/;
 const SIGN_IN_FALLBACK = "This app needs a saved provider session. Signing in is not available here yet.";
 
 function signInHint(entry) {
   const raw = entry && typeof entry === "object" ? entry.signIn : undefined;
   const hint = typeof raw === "string" ? raw.trim() : "";
-  return hint && !TERMINAL_HINT.test(hint) ? hint : SIGN_IN_FALLBACK;
+  return hint && !TERMINAL_HINT.test(hint) && !BARE_CLI.test(hint) ? hint : SIGN_IN_FALLBACK;
 }
 
 function joinError(explained) {
@@ -1547,6 +1553,15 @@ function shortenDiagnostic(raw) {
   if (text.length <= 400) return text;
   return text.slice(0, 399) + "…";
 }
+
+// Errors whose fix is a sign-in in the provider's own app. The Rust messages
+// share two shapes: refreshed credentials that could not be saved ("refreshed
+// token", "the refreshed Kimi Code credentials", …) and an explicit request
+// to sign in ("a new … sign-in is needed", "a … sign-in with Copilot access
+// is needed", "sign in to … again"). The `run \`claude\``/`run \`codex`
+// alternations only match `.last_error` files written by older builds.
+const SIGN_IN_NEEDED =
+  /HTTP 401|HTTP 403|authentication rejected|not signed in|token refresh failed|refresh token is lost|refreshed [^;]{0,40}could not be saved|sign-in(?: [^.;]{0,40})? is needed|\bsign in\b|re-auth|run `claude`|run `codex/i;
 
 const DETECT = { cmd: "detect", label: "Detect Providers" };
 const REFRESH = { cmd: "refresh", label: "Refresh" };
@@ -1580,7 +1595,8 @@ export function explainError(text, entry) {
       hint: retry ? "Retrying automatically in " + retry[1] + "." : "Try Refresh in a minute.",
     };
   }
-  if (/HTTP 401|HTTP 403|authentication rejected|not signed in|token refresh failed|re-auth|run `claude`|run `codex/i.test(raw)) {
+  // A server failure stays an outage even when its page says "sign in".
+  if (SIGN_IN_NEEDED.test(raw) && !/HTTP 5\d\d/i.test(raw)) {
     return { title: "Sign-in expired", hint: signInHint(entry) };
   }
   if (/HTTP 5\d\d|schema mismatch/i.test(raw)) {

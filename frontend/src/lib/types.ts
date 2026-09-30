@@ -147,6 +147,8 @@ export interface Card {
   /** The report's name when the user renamed the card. */
   defaultTitle?: string;
   error: string;
+  /** The action `explainError` chose for this entry, kept with its title and hint. */
+  errorAction?: ErrorAction;
   errorDetail: string;
   errorHint: string;
   errorTitle: string;

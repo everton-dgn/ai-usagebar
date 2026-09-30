@@ -120,11 +120,7 @@ pub async fn fetch_snapshot(
                 if let Err(e) = creds::write_back_to(&creds_source, &creds.claude_ai_oauth)
                     && rotated
                 {
-                    let msg = format!(
-                        "refreshed token could not be saved ({e}); the rotated \
-                         refresh token is lost — re-run `claude` to log in again"
-                    );
-                    cache.write_last_error(0, &msg);
+                    cache.write_last_error(0, &rotated_token_lost_message(&e));
                     return with_oauth_plan(
                         &plan_label,
                         handle_auth_failure(cache, plan_label.clone(), false),
@@ -262,9 +258,20 @@ fn fallback_to_cache_silent(
     })
 }
 
+/// Recorded when the server rotated the refresh token and the write-back
+/// failed. Like every sign-in message, it names no terminal command: this app
+/// has no terminal flow, and the popover classifies it by "refresh token is
+/// lost".
+fn rotated_token_lost_message(err: &AppError) -> String {
+    format!(
+        "refreshed token could not be saved ({err}); the rotated refresh token is \
+         lost, so a new Claude Code sign-in is needed, which this app cannot do"
+    )
+}
+
 /// The one place a *synthesized* error beats the original: the refresh failed,
-/// and "run `claude` to re-auth" tells the user what to do about it, which the
-/// underlying OAuth error does not.
+/// and saying a new Claude Code sign-in is needed tells the user what to do
+/// about it, which the underlying OAuth error does not.
 fn handle_auth_failure(cache: &Cache, plan_label: String, transient: bool) -> Result<FetchOutcome> {
     let original = if transient {
         AppError::Transport("no cache and refresh failed transiently".into())
@@ -336,6 +343,21 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
+
+    /// The message lands in `.last_error` and reaches the popover as the
+    /// card's warning. The app has no terminal flow, so it may not tell the
+    /// user to run anything, and it must keep the phrase the popover uses to
+    /// file it under "Sign-in expired".
+    #[test]
+    fn rotated_token_lost_message_names_no_terminal_command() {
+        let msg = rotated_token_lost_message(&AppError::Other("disk full".into()));
+        for forbidden in ["`", "Run ", "run ", "terminal", "login --", "config.toml"] {
+            assert!(!msg.contains(forbidden), "{msg:?} contains {forbidden:?}");
+        }
+        assert!(msg.contains("disk full"), "{msg}");
+        assert!(msg.contains("refresh token is lost"), "{msg}");
+        assert!(msg.contains("Claude Code sign-in"), "{msg}");
+    }
 
     fn future_creds() -> NamedTempFile {
         let mut f = NamedTempFile::new().unwrap();

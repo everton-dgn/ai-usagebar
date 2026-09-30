@@ -88,8 +88,8 @@ fn parse(raw: &[u8]) -> Result<Credentials> {
 
 fn malformed() -> AppError {
     AppError::Credentials(
-        "Model Studio: the bl CLI's config.json carries no console token; \
-         run `bl auth login --console` to re-auth"
+        "Model Studio: the bl CLI's config.json carries no console token; a new Model \
+         Studio console sign-in is needed, which this app cannot do"
             .into(),
     )
 }
@@ -154,7 +154,8 @@ mod tests {
         assert_eq!(creds.region, ConsoleRegion::CnBeijing);
     }
 
-    /// A missing token is the re-auth error, naming the CLI's own command.
+    /// A missing token is the re-auth error. The app has no terminal flow, so
+    /// it asks for a new sign-in without naming the CLI's own command.
     #[test]
     fn a_missing_token_names_the_fix() {
         let td = TempDir::new().unwrap();
@@ -167,10 +168,14 @@ mod tests {
             let path = write_config(&td, contents);
             let err = read_from(&path).unwrap_err();
             assert!(matches!(err, AppError::Credentials(_)), "{name}: {err:?}");
-            assert!(
-                err.to_string().contains("bl auth login --console"),
-                "{name}: {err}"
-            );
+            let msg = err.to_string();
+            assert!(msg.contains("sign-in is needed"), "{name}: {err}");
+            for forbidden in ["`", "run ", "terminal", "login --", "re-auth"] {
+                assert!(
+                    !msg.contains(forbidden),
+                    "{name}: {msg:?} has {forbidden:?}"
+                );
+            }
             // Fixed strings only: nothing from the file leaks into the error.
             assert!(!err.to_string().contains("console_site"), "{name}: {err}");
         }

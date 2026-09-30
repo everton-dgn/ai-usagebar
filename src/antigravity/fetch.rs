@@ -459,12 +459,12 @@ fn session_expired() -> AppError {
 
 /// The saved session can only be renewed with Antigravity's OAuth client,
 /// which this program does not ship (a secret-shaped literal in source trips
-/// every secret scanner); the config names the two keys that provide it.
+/// every secret scanner). The `[antigravity]` config keys still provide one,
+/// but the app has no file-editing flow, so the message points at the app.
 fn refresh_unconfigured() -> AppError {
     AppError::Credentials(
-        "Antigravity's saved Google session expired and ai-usagebar has no OAuth client to \
-         refresh it; open Antigravity to sign in again, or set [antigravity] oauth_client_id \
-         and oauth_client_secret in config.toml"
+        "Antigravity's saved Google session expired and this app cannot refresh it; open \
+         Antigravity to sign in again"
             .into(),
     )
 }
@@ -1236,6 +1236,24 @@ pub fn snap_to_json(snap: &AntigravitySnapshot) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The app has no file-editing or terminal flow, so the expired-session
+    /// message only sends the user to Antigravity.
+    #[test]
+    fn refresh_unconfigured_names_no_config_edit() {
+        let msg = refresh_unconfigured().to_string();
+        for forbidden in [
+            "`",
+            "config.toml",
+            "oauth_client",
+            "ai-usagebar",
+            "run ",
+            "terminal",
+        ] {
+            assert!(!msg.contains(forbidden), "{msg:?} contains {forbidden:?}");
+        }
+        assert!(msg.contains("open Antigravity to sign in again"), "{msg}");
+    }
 
     /// Captured from a real `RetrieveUserQuotaSummary` response on 2026-07-22
     /// (Antigravity 2.0 build 2.3.1, `agy` 1.1.5), then trimmed. Percentages

@@ -608,6 +608,33 @@ fn main() {
         held,
         "an open provider's panel must stay put"
     );
+    // Nor does a rebuild, as when a provider comes or goes.
+    let more: Vec<_> = ["anthropic", "openai", "zai"]
+        .into_iter()
+        .map(|id| menu_bar::Chip {
+            id: id.into(),
+            name: id.into(),
+            value: Some("0%".into()),
+            stale: false,
+            level: None,
+            active_account: false,
+            mark: None,
+        })
+        .collect();
+    let more_tips = more
+        .iter()
+        .map(status_items::tooltip_line)
+        .collect::<Vec<_>>();
+    items.sync(&more, &more_tips, true, None);
+    assert_eq!(
+        panel.frame(),
+        held,
+        "a rebuild must not move an open provider's panel"
+    );
+    assert!(
+        panel.isVisible(),
+        "the panel stays on screen through a rebuild"
+    );
     items.highlight(None);
     assert!(
         panel.frame().size.width > held.size.width,

@@ -210,7 +210,7 @@ impl Drop for CenterBar {
 }
 
 /// Whether the panel may move: not while one of its providers is open, unless
-/// it is off screen, as right after its providers are rebuilt.
+/// it is off screen and has to be shown.
 fn movable(panel: &NSPanel, held: &Cell<bool>) -> bool {
     !held.get() || !panel.isVisible()
 }

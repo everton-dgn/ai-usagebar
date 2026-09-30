@@ -210,7 +210,9 @@ impl ProviderItems {
                 .zip(chips)
                 .all(|((id, _), chip)| *id == chip.id);
         if !same && centered {
-            self.clear();
+            // The panel stays on screen while its providers are replaced: one
+            // of them may be open under it.
+            self.remove_items();
             let center = self.center.get_or_insert_with(|| CenterBar::new(mtm));
             for (index, chip) in chips.iter().enumerate() {
                 // SAFETY: NSButton's init takes no arguments and returns the object.
@@ -325,6 +327,14 @@ impl ProviderItems {
 
     /// Remove every provider item from the menu bar.
     pub fn clear(&mut self) {
+        self.remove_items();
+        if let Some(center) = &self.center {
+            center.panel.orderOut(None);
+        }
+    }
+
+    /// Remove the provider items and the rules between them.
+    fn remove_items(&mut self) {
         let bar = NSStatusBar::systemStatusBar();
         for (_, slot) in self.items.drain(..) {
             match slot {
@@ -337,9 +347,6 @@ impl ProviderItems {
                 Rule::Status(item) => bar.removeStatusItem(&item),
                 Rule::Center(view) => view.removeFromSuperview(),
             }
-        }
-        if let Some(center) = &self.center {
-            center.panel.orderOut(None);
         }
     }
 

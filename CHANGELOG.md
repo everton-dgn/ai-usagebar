@@ -23,6 +23,9 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 
 ### Corrigido
 
+- Reposicionamento automático da barra central após religar o monitor,
+  retornar da suspensão ou mudar as telas, usando a posição atual do ícone
+  nativo e novas tentativas enquanto a barra de menus termina de se acomodar.
 - Identidade automática da conta transportada pelos conectores que fornecem
   e-mail autenticado, sem misturar contas nem gravar endereços no cache de uso.
 - Indicação explícita quando a conexão não disponibiliza e-mail.

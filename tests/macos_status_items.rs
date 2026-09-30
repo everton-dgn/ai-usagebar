@@ -30,7 +30,33 @@ mod center_bar;
 #[cfg(target_os = "macos")]
 #[allow(dead_code, unused_imports)]
 #[path = "../src/tray/menu_space.rs"]
-mod menu_space;
+mod native_menu_space;
+// Keep placement deterministic and independent of other apps' changing titles
+// or Accessibility permission. AppKit geometry/events remain real; the menu
+// measurements are injected and never inspect another process's menu bar.
+#[cfg(target_os = "macos")]
+mod menu_space {
+    pub(crate) use super::native_menu_space::{MenuEnd, accessibility_prompt, centered_x};
+    use std::cell::Cell;
+
+    thread_local! {
+        pub static TRUSTED: Cell<bool> = const { Cell::new(false) };
+        pub static MENU_END: Cell<Option<MenuEnd>> = const { Cell::new(None) };
+        pub static EXTRAS_START: Cell<Option<f64>> = const { Cell::new(None) };
+    }
+
+    pub fn trusted() -> bool {
+        TRUSTED.get()
+    }
+
+    pub fn app_menu_end() -> Option<MenuEnd> {
+        MENU_END.get()
+    }
+
+    pub fn status_items_start(own: Option<f64>, _bar_height: f64) -> Option<f64> {
+        own.into_iter().chain(EXTRAS_START.get()).reduce(f64::min)
+    }
+}
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
 #[path = "../src/tray/status_items.rs"]
@@ -640,10 +666,226 @@ fn main() {
         panel.frame().size.width > held.size.width,
         "the panel fits its providers again once none is open"
     );
+    // A display transition can move the panel before the menu bar has finished
+    // laying out. Recovery must not require a click or a different menu end.
+    let placed = panel.frame();
+    let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace().notificationCenter();
+    let notifications = unsafe {
+        [
+            (
+                workspace.clone(),
+                objc2_app_kit::NSWorkspaceScreensDidWakeNotification,
+            ),
+            (
+                workspace.clone(),
+                objc2_app_kit::NSWorkspaceDidWakeNotification,
+            ),
+            (
+                objc2_foundation::NSNotificationCenter::defaultCenter(),
+                objc2_app_kit::NSApplicationDidChangeScreenParametersNotification,
+            ),
+        ]
+    };
+    for (center, name) in &notifications {
+        let displaced = objc2_foundation::NSRect::new(
+            NSPoint::new(placed.origin.x + 80.0, placed.origin.y),
+            placed.size,
+        );
+        panel.setFrame_display(displaced, true);
+        // SAFETY: these notifications have no object-specific contract here;
+        // every observer runs synchronously on this main thread.
+        unsafe { center.postNotificationName_object(name, None) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while panel.frame() != placed && std::time::Instant::now() < deadline {
+            NSRunLoop::mainRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.01));
+        }
+        assert_eq!(
+            panel.frame(),
+            placed,
+            "{name}: display recovery must recenter without user interaction"
+        );
+        // Simulate a layout arriving after the synchronous notification. The
+        // menus have not changed, but the panel still needs another placement.
+        panel.setFrame_display(displaced, true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while panel.frame() != placed && std::time::Instant::now() < deadline {
+            NSRunLoop::mainRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.01));
+        }
+        assert_eq!(
+            panel.frame(),
+            placed,
+            "{name}: retry placement even when the menu end has not changed"
+        );
+    }
+    // Activation often follows wake. It must not cancel display settling just
+    // because the newly active app's menus can already be read.
+    unsafe {
+        workspace.postNotificationName_object(
+            objc2_app_kit::NSWorkspaceScreensDidWakeNotification,
+            None,
+        );
+        workspace.postNotificationName_object(
+            objc2_app_kit::NSWorkspaceDidActivateApplicationNotification,
+            None,
+        );
+    }
+    panel.setFrame_display(
+        objc2_foundation::NSRect::new(
+            NSPoint::new(placed.origin.x + 80.0, placed.origin.y),
+            placed.size,
+        ),
+        true,
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while panel.frame() != placed && std::time::Instant::now() < deadline {
+        NSRunLoop::mainRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.01));
+    }
+    assert_eq!(
+        panel.frame(),
+        placed,
+        "application activation must not cancel display recovery"
+    );
+    // Keep the popover anchor while it is still in the primary menu bar.
+    items.highlight(Some(0));
+    let held_after_wake = objc2_foundation::NSRect::new(
+        NSPoint::new(placed.origin.x + 40.0, placed.origin.y),
+        placed.size,
+    );
+    panel.setFrame_display(held_after_wake, true);
+    unsafe {
+        workspace.postNotificationName_object(
+            objc2_app_kit::NSWorkspaceScreensDidWakeNotification,
+            None,
+        );
+    }
+    NSRunLoop::mainRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.6));
+    assert_eq!(
+        panel.frame(),
+        held_after_wake,
+        "wake keeps an open provider anchored"
+    );
+    // But a panel still marked visible on the previous display must recover.
+    panel.setFrame_display(
+        objc2_foundation::NSRect::new(
+            NSPoint::new(placed.origin.x, placed.origin.y - 100.0),
+            placed.size,
+        ),
+        true,
+    );
+    unsafe {
+        workspace.postNotificationName_object(
+            objc2_app_kit::NSWorkspaceScreensDidWakeNotification,
+            None,
+        );
+    }
+    assert_eq!(
+        panel.frame(),
+        placed,
+        "wake recovers an off-bar open provider"
+    );
+    items.highlight(None);
+    // A late app activation still gets its own menu retries after the display
+    // settling deadline expires. All AX readings here are fictitious.
+    let primary = objc2_app_kit::NSScreen::screens(mtm)
+        .firstObject()
+        .expect("primary display")
+        .frame();
+    let wake_at = std::time::Instant::now();
+    unsafe {
+        workspace.postNotificationName_object(
+            objc2_app_kit::NSWorkspaceScreensDidWakeNotification,
+            None,
+        );
+    }
+    NSRunLoop::mainRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(2.7));
+    assert!(
+        wake_at.elapsed() < std::time::Duration::from_secs(3),
+        "the late-activation fixture must still be inside display settling"
+    );
+    menu_space::TRUSTED.set(true);
+    menu_space::MENU_END.set(Some(menu_space::MenuEnd {
+        x: None,
+        laid_out: false,
+    }));
+    let right = primary.max().x - 600.0;
+    menu_space::EXTRAS_START.set(Some(right));
+    unsafe {
+        workspace.postNotificationName_object(
+            objc2_app_kit::NSWorkspaceDidActivateApplicationNotification,
+            None,
+        );
+    }
+    NSRunLoop::mainRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.65));
+    let left = primary.origin.x + 200.0;
+    menu_space::MENU_END.set(Some(menu_space::MenuEnd {
+        x: Some(left),
+        laid_out: true,
+    }));
+    let expected_x = left + (right - left - panel.frame().size.width) / 2.0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while panel.frame().origin.x != expected_x && std::time::Instant::now() < deadline {
+        NSRunLoop::mainRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.01));
+    }
+    assert_eq!(
+        panel.frame().origin.x,
+        expected_x,
+        "display settling must not shorten a late application's menu retries"
+    );
+    menu_space::TRUSTED.set(false);
+    menu_space::MENU_END.set(None);
+    menu_space::EXTRAS_START.set(None);
+    // Move only this harness's chart window. The host does not sync again:
+    // wake must resolve the item's live frame instead of its old coordinate.
+    let chart_item = chart.ns_status_item().expect("native chart item");
+    let chart_window = chart_item
+        .button(mtm)
+        .and_then(|button| button.window())
+        .expect("native chart window");
+    let original_chart = chart_window.frame();
+    items.sync(&more, &more_tips, true, Some(chart_item));
+    let shifted_chart = objc2_foundation::NSRect::new(
+        NSPoint::new(
+            primary.origin.x + panel.frame().size.width + 40.0,
+            original_chart.origin.y,
+        ),
+        original_chart.size,
+    );
+    chart_window.setFrame_display(shifted_chart, true);
+    assert_eq!(
+        chart_window.frame(),
+        shifted_chart,
+        "fixture chart has moved"
+    );
+    unsafe {
+        workspace.postNotificationName_object(
+            objc2_app_kit::NSWorkspaceScreensDidWakeNotification,
+            None,
+        );
+    }
+    assert!(
+        panel.frame().max().x <= shifted_chart.origin.x,
+        "wake must clear the chart's live position without another host sync"
+    );
+    chart_window.setFrame_display(original_chart, true);
     items.clear();
     // Providers in their own status items: where the menu bar tracks their
     // sessions, highlighting one must neither fail nor invent an open session.
     items.sync(&chips, &tips, false, None);
+    NSRunLoop::mainRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.6));
+    assert!(
+        !panel.isVisible(),
+        "dropping centering must cancel its pending display timer"
+    );
+    unsafe {
+        workspace.postNotificationName_object(
+            objc2_app_kit::NSWorkspaceScreensDidWakeNotification,
+            None,
+        );
+    }
+    assert!(
+        !panel.isVisible(),
+        "dropping centering must remove wake observers"
+    );
     assert_eq!(items.frames().len(), 2);
     for index in 0..2 {
         items.highlight(Some(index));
@@ -655,7 +897,9 @@ fn main() {
     }
     items.highlight(None);
     items.clear();
-    println!("PASS: main button and both providers accept top, middle and bottom clicks");
+    println!(
+        "PASS: native hit areas and display recovery (wake, late layout, activation, live anchor, hold, cleanup)"
+    );
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -190,14 +190,14 @@ impl ProviderItems {
     /// providers, their order or the placement change; otherwise each one's
     /// title is redrawn in place.
     ///
-    /// `chart_left` is where the chart item starts, the right edge centered
-    /// providers keep clear of.
+    /// `chart_item` supplies its current window, the right edge centered
+    /// providers keep clear of even after a display transition.
     pub fn sync(
         &mut self,
         chips: &[Chip],
         tooltips: &[String],
         centered: bool,
-        chart_left: Option<f64>,
+        chart_item: Option<Retained<NSStatusItem>>,
     ) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
@@ -320,7 +320,7 @@ impl ProviderItems {
             }
         }
         if let Some(center) = &self.center {
-            center.chart_left.set(chart_left);
+            *center.chart_item.borrow_mut() = chart_item;
             center.place();
         }
     }

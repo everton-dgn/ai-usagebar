@@ -105,7 +105,12 @@ impl CenterBar {
             let (remeasure, held) = (remeasure.clone(), held.clone());
             RcBlock::new(move |notification: NonNull<NSNotification>| {
                 // SAFETY: AppKit passes a live notification for the call.
-                if !activates_this_app(unsafe { notification.as_ref() }) {
+                let notification = unsafe { notification.as_ref() };
+                if activates_this_app(notification) {
+                    if movable(&panel, &held) {
+                        place(&panel, &stack, menu_end.get(), chart_left.get());
+                    }
+                } else if !quits_another_app(notification) {
                     measure(
                         &panel,
                         &stack,
@@ -115,8 +120,6 @@ impl CenterBar {
                         &remeasure,
                         true,
                     );
-                } else if movable(&panel, &held) {
-                    place(&panel, &stack, menu_end.get(), chart_left.get());
                 }
             })
         };
@@ -239,16 +242,38 @@ fn place(panel: &NSPanel, stack: &NSStackView, menu_end: Option<f64>, chart_left
     panel.orderFrontRegardless();
 }
 
-/// Whether `notification` reports this app coming to the front. It shows no
-/// menus, so the providers stay where they are while its popover opens.
-fn activates_this_app(notification: &NSNotification) -> bool {
+/// The app `notification` reports on.
+fn app_of(notification: &NSNotification) -> Option<Retained<NSRunningApplication>> {
     // SAFETY: an immutable AppKit constant.
     let key: &AnyObject = unsafe { NSWorkspaceApplicationKey }.as_ref();
     notification
         .userInfo()
         .and_then(|info| info.objectForKey(key))
         .and_then(|app| app.downcast::<NSRunningApplication>().ok())
-        .is_some_and(|app| app.processIdentifier() == std::process::id() as i32)
+}
+
+/// Whether `notification` reports this app coming to the front. It shows no
+/// menus, so the providers stay where they are while its popover opens.
+fn activates_this_app(notification: &NSNotification) -> bool {
+    app_of(notification).is_some_and(|app| app.processIdentifier() == std::process::id() as i32)
+}
+
+/// Whether `notification` reports an app quitting that does not own the menu
+/// bar: its menus were not the ones shown. The one that does is still named
+/// its owner when it quits, until another app comes to the front.
+fn quits_another_app(notification: &NSNotification) -> bool {
+    // SAFETY: an immutable AppKit constant.
+    let quit = unsafe { NSWorkspaceDidTerminateApplicationNotification };
+    if !notification.name().isEqualToString(quit) {
+        return false;
+    }
+    match (
+        app_of(notification),
+        NSWorkspace::sharedWorkspace().menuBarOwningApplication(),
+    ) {
+        (Some(app), Some(owner)) => app.processIdentifier() != owner.processIdentifier(),
+        _ => false,
+    }
 }
 
 /// Where the menus end over one round of measurements, until the menu bar

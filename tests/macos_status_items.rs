@@ -790,6 +790,46 @@ fn main() {
         .firstObject()
         .expect("primary display")
         .frame();
+    // A complete wake-time reading can still move as the display settles.
+    // Change only the injected boundary, without another notification or sync.
+    menu_space::TRUSTED.set(true);
+    let right = primary.max().x - 600.0;
+    let initial_left = primary.origin.x + 100.0;
+    menu_space::EXTRAS_START.set(Some(right));
+    menu_space::MENU_END.set(Some(menu_space::MenuEnd {
+        x: Some(initial_left),
+        laid_out: true,
+    }));
+    unsafe {
+        workspace.postNotificationName_object(
+            objc2_app_kit::NSWorkspaceScreensDidWakeNotification,
+            None,
+        );
+    }
+    let initial_x = initial_left + (right - initial_left - panel.frame().size.width) / 2.0;
+    assert_eq!(
+        panel.frame().origin.x,
+        initial_x,
+        "wake reads the complete boundary"
+    );
+    let settled_left = initial_left + 100.0;
+    menu_space::MENU_END.set(Some(menu_space::MenuEnd {
+        x: Some(settled_left),
+        laid_out: true,
+    }));
+    let settled_x = settled_left + (right - settled_left - panel.frame().size.width) / 2.0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while panel.frame().origin.x != settled_x && std::time::Instant::now() < deadline {
+        NSRunLoop::mainRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.01));
+    }
+    assert_eq!(
+        panel.frame().origin.x,
+        settled_x,
+        "later display ticks must read a changed complete menu boundary"
+    );
+    menu_space::TRUSTED.set(false);
+    menu_space::MENU_END.set(None);
+    menu_space::EXTRAS_START.set(None);
     let wake_at = std::time::Instant::now();
     unsafe {
         workspace.postNotificationName_object(

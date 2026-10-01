@@ -507,6 +507,10 @@ fn remeasure_menus(
                 menu_space::app_menu_end(),
                 menu_tries.get() == REMEASURE_TRIES,
             );
+        } else if place_display {
+            // A complete menu boundary can still move while the display settles.
+            // Read at the display cadence without reopening fast menu retries.
+            now.retake(menu_space::app_menu_end(), true);
         }
         reading.set(now);
         let changed = menu_end.get() != now.x;

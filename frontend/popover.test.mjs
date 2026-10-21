@@ -542,6 +542,17 @@ assert.equal(loaded.collapsed.cursor, true);
 assert.deepEqual(loaded.cardOrder, ['cursor', 'openai']);
 const synced = syncLayout(loaded, ['anthropic', 'openai', 'cursor']);
 assert.deepEqual(synced.cardOrder, ['cursor', 'openai', 'anthropic']);
+// A new account joins its provider's other accounts instead of the end.
+assert.deepEqual(
+  syncLayout(
+    { cardOrder: ['anthropic@a', 'anthropic@b', 'openai@a', 'zai'] },
+    ['anthropic@a', 'anthropic@b', 'openai@a', 'zai', 'anthropic@c', 'openai@b', 'cursor'],
+  ).cardOrder,
+  ['anthropic@a', 'anthropic@b', 'anthropic@c', 'openai@a', 'openai@b', 'zai', 'cursor'],
+);
+// A full order keeps every saved id rather than evicting the last one.
+const fullOrder = ['anthropic@a', ...Array.from({ length: 95 }, (_, i) => `custom@${i}`)];
+assert.deepEqual(syncLayout({ cardOrder: fullOrder }, ['anthropic@new']).cardOrder, fullOrder);
 assert.ok(store.getItem(LAYOUT_KEY).includes('cursor'));
 assert.deepEqual(emptyLayout().cardOrder, []);
 

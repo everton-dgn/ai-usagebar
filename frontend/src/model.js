@@ -1143,8 +1143,17 @@ export function syncLayout(layout, cardIds) {
   // cannot silently reset them. Explicit customization resets own deletion.
   const saved = normalizeLayout(layout);
   const order = saved.cardOrder.slice();
+  const vendor = (id) => String(id).split("@")[0];
   for (const id of ids) {
-    if (order.indexOf(id) < 0) order.push(id);
+    if (order.indexOf(id) >= 0) continue;
+    // A new account joins the last card of its provider, not the end. A full
+    // list appends instead, so cleanIdList drops the new id, not a saved one.
+    let last = -1;
+    order.forEach((other, i) => {
+      if (vendor(other) === vendor(id)) last = i;
+    });
+    if (last < 0 || order.length >= 96) order.push(id);
+    else order.splice(last + 1, 0, id);
   }
   return {
     ...saved,

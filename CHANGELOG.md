@@ -23,6 +23,9 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 
 ### Corrigido
 
+- Conta nova de um provedor entra logo depois das outras contas dele no painel
+  e na barra, em vez de ir para o fim da ordem salva.
+
 - Reposicionamento automático da barra central após religar o monitor,
   retornar da suspensão ou mudar as telas, usando a posição atual do ícone
   nativo e novas tentativas enquanto a barra de menus termina de se acomodar.

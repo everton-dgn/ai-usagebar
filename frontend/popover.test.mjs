@@ -550,6 +550,9 @@ assert.deepEqual(
   ).cardOrder,
   ['anthropic@a', 'anthropic@b', 'anthropic@c', 'openai@a', 'openai@b', 'zai', 'cursor'],
 );
+// A full order keeps every saved id rather than evicting the last one.
+const fullOrder = ['anthropic@a', ...Array.from({ length: 95 }, (_, i) => `custom@${i}`)];
+assert.deepEqual(syncLayout({ cardOrder: fullOrder }, ['anthropic@new']).cardOrder, fullOrder);
 assert.ok(store.getItem(LAYOUT_KEY).includes('cursor'));
 assert.deepEqual(emptyLayout().cardOrder, []);
 

@@ -92,7 +92,7 @@ pub async fn fetch_snapshot(
         // back to cache.
         cache.clear_last_error();
     } else if stale_token {
-        match tokio::time::timeout(
+        let refreshed = tokio::time::timeout(
             REFRESH_TIMEOUT,
             oauth::refresh(
                 client,
@@ -100,8 +100,9 @@ pub async fn fetch_snapshot(
                 &creds.claude_ai_oauth.refresh_token,
             ),
         )
-        .await
-        {
+        .await;
+        let grant_refused = matches!(&refreshed, Ok(Err(e)) if e.grant_refused());
+        match refreshed.map(|r| r.map_err(oauth::RefreshError::into_app_error)) {
             Ok(Ok(rr)) => {
                 creds.claude_ai_oauth.access_token = rr.access_token;
                 // A rotated refresh token exists *only* in memory until it is
@@ -121,6 +122,7 @@ pub async fn fetch_snapshot(
                     && rotated
                 {
                     cache.write_last_error(0, &rotated_token_lost_message(&e));
+                    note_refused_snapshot(cache, &creds_source);
                     return with_oauth_plan(
                         &plan_label,
                         handle_auth_failure(cache, plan_label.clone(), false),
@@ -129,6 +131,9 @@ pub async fn fetch_snapshot(
             }
             Ok(Err(AppError::Http { status, body })) => {
                 cache.write_last_error(status, &body);
+                if grant_refused {
+                    note_refused_snapshot(cache, &creds_source);
+                }
                 return with_oauth_plan(
                     &plan_label,
                     handle_auth_failure(cache, plan_label.clone(), false),
@@ -267,6 +272,18 @@ fn rotated_token_lost_message(err: &AppError) -> String {
         "refreshed token could not be saved ({err}); the rotated refresh token is \
          lost, so a new Claude Code sign-in is needed, which this app cannot do"
     )
+}
+
+/// Record that this Desktop snapshot's refresh token is spent, so a colliding
+/// CLI entry can take its label back (`core::entries`). Keyed by the blob that
+/// was read: a recapture that lands meanwhile is a different generation and is
+/// not condemned. Other credential sources have no such fallback.
+fn note_refused_snapshot(cache: &Cache, source: &creds::CredsSource) {
+    if let creds::CredsSource::Desktop(writeback) = source
+        && let Some(fingerprint) = writeback.snapshot_fingerprint()
+    {
+        cache.mark_auth_rejected(fingerprint);
+    }
 }
 
 /// The one place a *synthesized* error beats the original: the refresh failed,
@@ -424,6 +441,151 @@ mod tests {
 
         drop(held);
         assert!(waiter.await.unwrap());
+    }
+
+    /// A Desktop snapshot whose access token has expired, so the fetch must
+    /// refresh it first.
+    fn expired_desktop_snapshot(root: &std::path::Path) -> creds::CredsTarget {
+        let key = crate::safe_storage::derive_key(b"test-secret");
+        let plain = serde_json::json!({
+            "client:org:https://api.anthropic.com:user:inference user:profile": {
+                "token": "access-token-fixture",
+                "refreshToken": "refresh-token-fixture",
+                "expiresAt": Utc::now().timestamp_millis() - 3_600_000,
+            }
+        });
+        let profile = root.join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(
+            profile.join("config-tokenCacheV2"),
+            crate::safe_storage::encrypt(&key, &serde_json::to_vec(&plain).unwrap()),
+        )
+        .unwrap();
+        creds::CredsTarget::Desktop(crate::anthropic::desktop_creds::source_for(
+            &root.join("config.json"),
+            &profile,
+            false,
+            key,
+        ))
+    }
+
+    fn the_fingerprint(target: &creds::CredsTarget) -> String {
+        let creds::CredsTarget::Desktop(source) = target else {
+            unreachable!()
+        };
+        let (_, writeback) = source.read().unwrap();
+        writeback.snapshot_fingerprint().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn only_a_refused_grant_marks_the_desktop_snapshot() {
+        let refused = r#"{"error":"invalid_grant","error_description":"Refresh token expired"}"#;
+        for (status, body, marks) in [
+            (400, refused, true),
+            (401, refused, true),
+            (
+                400,
+                r#"{"error":"invalid_request","error_description":"Invalid request format"}"#,
+                false,
+            ),
+            (403, "<html>Forbidden</html>", false),
+            (429, refused, false),
+            (503, "upstream unavailable", false),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            server
+                .mock("POST", "/token")
+                .with_status(status)
+                .with_body(body)
+                .create_async()
+                .await;
+            let tmp = TempDir::new().unwrap();
+            let target = expired_desktop_snapshot(tmp.path());
+            let (_td, cache) = cache_fixture();
+            let endpoints = Endpoints {
+                usage: format!("{}/api/oauth/usage", server.url()),
+                token: format!("{}/token", server.url()),
+            };
+
+            let result = fetch_snapshot(
+                &reqwest::Client::new(),
+                &target,
+                &cache,
+                &endpoints,
+                Duration::from_secs(60),
+            )
+            .await;
+
+            assert!(
+                result.is_err(),
+                "{status}: no cache, so the failure surfaces"
+            );
+            let expected = marks.then(|| the_fingerprint(&target));
+            assert_eq!(
+                cache.auth_rejected_fingerprint(),
+                expected,
+                "{status} {body}"
+            );
+        }
+    }
+
+    /// The server rotated the refresh token but the snapshot could not be
+    /// rewritten: the token still on disk is spent. Without a rotation the
+    /// old token stays good, so the same write failure must not mark it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_lost_rotated_token_marks_the_snapshot_and_an_unrotated_one_does_not() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for (rotated, marks) in [(true, true), (false, false)] {
+            let refresh_body = if rotated {
+                r#"{"access_token":"new-at","refresh_token":"new-rt","expires_in":3600}"#
+            } else {
+                r#"{"access_token":"new-at","expires_in":3600}"#
+            };
+            let mut server = mockito::Server::new_async().await;
+            server
+                .mock("POST", "/token")
+                .with_status(200)
+                .with_body(refresh_body)
+                .create_async()
+                .await;
+            server
+                .mock("GET", "/api/oauth/usage")
+                .with_status(200)
+                .with_body(r#"{"five_hour":{"utilization":7},"seven_day":{"utilization":3}}"#)
+                .create_async()
+                .await;
+            let tmp = TempDir::new().unwrap();
+            let target = expired_desktop_snapshot(tmp.path());
+            let before = the_fingerprint(&target);
+            let expected = marks.then(|| before.clone());
+            let profile = tmp.path().join("profile");
+            std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let (_td, cache) = cache_fixture();
+            let endpoints = Endpoints {
+                usage: format!("{}/api/oauth/usage", server.url()),
+                token: format!("{}/token", server.url()),
+            };
+
+            let result = fetch_snapshot(
+                &reqwest::Client::new(),
+                &target,
+                &cache,
+                &endpoints,
+                Duration::from_secs(60),
+            )
+            .await;
+            std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            assert_eq!(the_fingerprint(&target), before, "the write-back must fail");
+            assert_eq!(result.is_ok(), !rotated, "rotated={rotated}");
+            assert_eq!(
+                cache.auth_rejected_fingerprint(),
+                expected,
+                "rotated={rotated}"
+            );
+        }
     }
 
     #[tokio::test]

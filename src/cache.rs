@@ -6,6 +6,7 @@
 //!   `~/.cache/ai-usagebar/<vendor>/.stale`             marker (cache is stale)
 //!   `~/.cache/ai-usagebar/<vendor>/.last_error`        HTTP code\nmessage
 //!   `~/.cache/ai-usagebar/<vendor>/.retry_after`       unix seconds; no network before this
+//!   `~/.cache/ai-usagebar/<vendor>/.auth_rejected`     fingerprint of a refused credential
 //!   `~/.cache/ai-usagebar/<vendor>/.fetch.lock`        flock target
 //!
 //! Multi-monitor safety: callers should `acquire_lock()` before the refresh+
@@ -95,6 +96,12 @@ impl Cache {
     /// before which no request should be made to this vendor.
     pub fn retry_after_path(&self) -> PathBuf {
         self.dir.join(".retry_after")
+    }
+    /// The credential generation whose refresh token the server refused.
+    /// Kept apart from `.last_error`, which also records usage-endpoint and
+    /// transient failures and is cleared before a request has succeeded.
+    pub fn auth_rejected_path(&self) -> PathBuf {
+        self.dir.join(".auth_rejected")
     }
 
     /// Age of the payload (`None` if it doesn't exist). Used by the widget to
@@ -244,6 +251,7 @@ impl Cache {
         // response is proof the rate limit has lifted.
         let _ = fs::remove_file(self.stale_path());
         let _ = fs::remove_file(self.last_error_path());
+        let _ = fs::remove_file(self.auth_rejected_path());
         self.clear_backoff();
         Ok(())
     }
@@ -265,6 +273,7 @@ impl Cache {
         let _ = fs::remove_file(self.payload_path());
         let _ = fs::remove_file(self.stale_path());
         let _ = fs::remove_file(self.last_error_path());
+        let _ = fs::remove_file(self.auth_rejected_path());
         self.clear_backoff();
     }
 
@@ -314,6 +323,20 @@ impl Cache {
     pub fn clear_last_error(&self) {
         let _ = fs::remove_file(self.last_error_path());
         self.clear_backoff();
+    }
+
+    /// Record that the server refused the refresh token of the credential
+    /// generation `fingerprint`. Best-effort, like the other markers.
+    pub fn mark_auth_rejected(&self, fingerprint: &str) {
+        let _ = self.ensure_dir();
+        let _ = atomic_write(&self.auth_rejected_path(), fingerprint.as_bytes());
+    }
+
+    /// The fingerprint recorded by [`Cache::mark_auth_rejected`], if any.
+    pub fn auth_rejected_fingerprint(&self) -> Option<String> {
+        let raw = fs::read_to_string(self.auth_rejected_path()).ok()?;
+        let fingerprint = raw.trim();
+        (!fingerprint.is_empty()).then(|| fingerprint.to_string())
     }
 
     pub fn read_last_error(&self) -> Option<(u16, String)> {
@@ -546,6 +569,26 @@ mod tests {
         cache.write_payload(b"fresh").unwrap();
         assert!(!cache.is_stale());
         assert!(cache.read_last_error().is_none());
+    }
+
+    /// The refusal outlives a diagnostic reset, because that reset happens
+    /// before any request has succeeded; only a good payload or a change of
+    /// login retires it.
+    #[test]
+    fn an_auth_rejection_survives_until_success_or_forget() {
+        let (_td, cache) = fixture();
+        assert_eq!(cache.auth_rejected_fingerprint(), None);
+
+        cache.mark_auth_rejected("abc123");
+        cache.clear_last_error();
+        assert_eq!(cache.auth_rejected_fingerprint().as_deref(), Some("abc123"));
+
+        cache.write_payload(b"fresh").unwrap();
+        assert_eq!(cache.auth_rejected_fingerprint(), None);
+
+        cache.mark_auth_rejected("def456");
+        cache.forget();
+        assert_eq!(cache.auth_rejected_fingerprint(), None);
     }
 
     // ---- rate-limit backoff ------------------------------------------------

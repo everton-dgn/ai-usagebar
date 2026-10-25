@@ -356,7 +356,9 @@ export function MacDashboard({ cards, layout, nowMs, payload, focusId, onOpenCus
               ) : (
                 <div className="mac-empty-state">{t(selected.rows.length ? "No visible metrics. Adjust this provider in Settings." : "No usage or balance data yet.")}</div>
               )}
-              {selected.error && rows.length ? <p className="mac-cached-note">{t(selected.errorTitle)}: {t(selected.errorHint)}</p> : null}
+              {selected.error && rows.length ? <p className="mac-cached-note">{t(selected.errorTitle)}: {t(selected.errorHint)}</p>
+                : selected.warning && rows.length ? <p className="mac-cached-note" title={selected.warning.raw}>{t(selected.warning.title)}{selected.warning.hint ? `: ${t(selected.warning.hint)}` : ""}</p>
+                : null}
               {(hasExtras || links.length > 0) && onToggleCollapse ? (
                 <button type="button" className="plain-btn flex w-full justify-center py-[5px] text-label-2" aria-expanded={expanded} aria-label={t(expanded ? "Show less" : "Show more")} onClick={() => onToggleCollapse(selected.id)}>
                   {expanded ? <MdiChevronUp /> : <MdiChevronDown />}

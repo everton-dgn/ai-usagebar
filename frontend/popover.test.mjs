@@ -1283,6 +1283,40 @@ assert.equal(quotaAlternate(null, 'left'), '');
   assert.equal(explainError('Antigravity must be running', 'antigravity').title, "Antigravity isn't running");
 }
 
+// --- a cached HTTP failure is the card's warning; an OAuth refusal is a sign-in -
+
+{
+  // ARRANGE: cached readings plus the Rust footer the panel builds from last_error
+  const cached = parseHostPayload({
+    entries: [
+      { id: 'anthropic@conta2', display_name: 'Claude', stale: true, sections: [
+        { type: 'metric', label: 'Weekly', percent: 0, severity: 'low' },
+        { type: 'spacer' },
+        { type: 'text', label: 'HTTP 400', value: 'Refresh token expired' },
+      ] },
+      { id: 'zai', display_name: 'Z.AI', sections: [
+        { type: 'metric', label: 'Session', percent: 5, severity: 'low' },
+        { type: 'text', label: 'HTTP 503', value: 'service unavailable' },
+      ] },
+      { id: 'x', display_name: 'X', sections: [
+        { type: 'text', label: 'HTTP 400', value: '' },
+      ] },
+    ],
+  });
+
+  // ACT
+  const [claude, zai, bare] = projectCards(cached, 0);
+
+  // ASSERT: the footer leaves the rows and is classified like any other error
+  assert.deepEqual(claude.rows.map((r) => r.label), ['Weekly']);
+  assert.equal(claude.warning.title, 'Sign-in expired');
+  assert.equal(claude.warning.raw, 'Refresh token expired');
+  assert.deepEqual(zai.rows.map((r) => r.label), ['Session']);
+  assert.equal(zai.warning.title, 'Provider is unavailable');
+  assert.equal(bare.warning, null);
+  assert.equal(explainError('HTTP 400: {"error":"invalid_grant"}').title, 'Sign-in expired');
+}
+
 // --- 429 backoff hint --------------------------------------------------------
 
 assert.equal(

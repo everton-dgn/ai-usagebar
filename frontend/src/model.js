@@ -667,8 +667,9 @@ export function projectCards(payload, nowMs) {
     let warning = null;
     for (const section of entry.sections || []) {
       if (isWarningSection(section)) {
-        const explained = explainError(section.value || section.label, entry);
-        warning = { title: explained.title, hint: explained.hint, raw: shortenDiagnostic(section.value || section.label) };
+        const text = warningText(section);
+        const explained = explainError(text, entry);
+        warning = { title: explained.title, hint: explained.hint, raw: shortenDiagnostic(text) };
         continue;
       }
       if (section.type === "text" && section.label && !section.value) {
@@ -1567,10 +1568,12 @@ function shortenDiagnostic(raw) {
 // share two shapes: refreshed credentials that could not be saved ("refreshed
 // token", "the refreshed Kimi Code credentials", …) and an explicit request
 // to sign in ("a new … sign-in is needed", "a … sign-in with Copilot access
-// is needed", "sign in to … again"). The `run \`claude\``/`run \`codex`
-// alternations only match `.last_error` files written by older builds.
+// is needed", "sign in to … again"). A cached OAuth refusal keeps the token
+// endpoint's own words ("Refresh token expired", `invalid_grant`). The
+// `run \`claude\``/`run \`codex` alternations only match `.last_error` files
+// written by older builds.
 const SIGN_IN_NEEDED =
-  /HTTP 401|HTTP 403|authentication rejected|not signed in|token refresh failed|refresh token is lost|refreshed [^;]{0,40}could not be saved|sign-in(?: [^.;]{0,40})? is needed|\bsign in\b|re-auth|run `claude`|run `codex/i;
+  /HTTP 401|HTTP 403|authentication rejected|not signed in|token refresh failed|refresh token is lost|refresh token expired|invalid_grant|refreshed [^;]{0,40}could not be saved|sign-in(?: [^.;]{0,40})? is needed|\bsign in\b|re-auth|run `claude`|run `codex/i;
 
 const DETECT = { cmd: "detect", label: "Detect Providers" };
 const REFRESH = { cmd: "refresh", label: "Refresh" };
@@ -1624,7 +1627,11 @@ export function explainError(text, entry) {
 }
 
 // A vendor's "Warning" text section (the cached-data note built from
-// last_error in the Rust panels; Kimi labels its schema warning itself).
+// last_error in the Rust panels; Kimi labels its schema warning itself). An
+// HTTP failure arrives as the same note labelled with its status instead
+// ("HTTP 400" / "Refresh token expired").
+const HTTP_WARNING_LABEL = /^HTTP \d{3}$/;
+
 /**
  * The Rust report appends a "Resets" text section. Each popover meter already prints its own countdown
  * from `resetAt`, so that section only repeats a value on screen. It stays when
@@ -1641,7 +1648,15 @@ function dropRedundantResetRows(rows) {
 }
 
 function isWarningSection(section) {
-  return section.type === "text" && (section.label === "Warning" || /schema drift/i.test(section.label));
+  if (section.type !== "text") return false;
+  if (HTTP_WARNING_LABEL.test(section.label || "")) return Boolean(section.value);
+  return section.label === "Warning" || /schema drift/i.test(section.label);
+}
+
+// The text `explainError` classifies, in the "HTTP 400: …" form other errors use.
+function warningText(section) {
+  if (HTTP_WARNING_LABEL.test(section.label || "")) return section.label + ": " + section.value;
+  return section.value || section.label;
 }
 
 export function friendlyError(text, entry) {

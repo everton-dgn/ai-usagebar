@@ -312,6 +312,24 @@ try {
   assert.match(kiroHtml, /Sign-in expired/);
   assert.match(kiroHtml, /Needs a saved Kiro CLI sign-in\. Signing in is not available in this app\./);
   assert.doesNotMatch(kiroHtml, /This app needs a saved provider session/);
+  // A cached reading whose refresh failed says so under the meters; before,
+  // the popover dropped the card's warning and showed the bare HTTP footer.
+  const [frozenCard] = projectCards(parseHostPayload({
+    entries: [{
+      id: 'anthropic', display_name: 'Claude', stale: true, sections: [
+        { type: 'metric', label: 'Session', percent: 0, severity: 'low' },
+        { type: 'text', label: 'HTTP 400', value: 'Refresh token expired' },
+      ],
+    }],
+  }), nowMs);
+  const frozen = renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
+    React.createElement(MacDashboard, { cards: [frozenCard], layout: emptyLayout(), nowMs, payload, focusId: 'anthropic', onOpenCustomize() {} })));
+  assert.match(frozen, /Em cache/);
+  assert.match(frozen, /class="mac-cached-note" title="Refresh token expired">Sessão expirada: /);
+  assert.doesNotMatch(frozen, /HTTP 400/);
+  const fresh = renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
+    React.createElement(MacDashboard, { cards: [card], layout: emptyLayout(), nowMs, payload, focusId: 'anthropic', onOpenCustomize() {} })));
+  assert.doesNotMatch(fresh, /mac-cached-note/);
   console.log('macOS dashboard reset display: ok');
 } finally {
   await server.close();

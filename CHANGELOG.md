@@ -29,6 +29,11 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
   cache, por exemplo 0%, e escondia o login do Claude Code. O card mantém a
   posição salva, e o Desktop volta a ser usado quando o perfil é recapturado.
 
+- Leitura em cache após falha de atualização avisa embaixo dos medidores no
+  painel da barra de menus, por exemplo "Sessão expirada", em vez de uma linha
+  solta como "HTTP 400 · Refresh token expired". A recusa da renovação pelo
+  servidor passa a ser classificada como sessão expirada.
+
 - Conta nova de um provedor entra logo depois das outras contas dele no painel
   e na barra, em vez de ir para o fim da ordem salva.
 

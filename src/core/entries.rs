@@ -281,13 +281,14 @@ fn desktop_credential_usable(config: &Config, label: &str) -> bool {
 /// there cannot report usage. A present refresh token is not proof the server
 /// still accepts it, and proving that here would rotate the token this check
 /// exists to protect. So the first refusal is learned at fetch time: on an
-/// OAuth `invalid_grant` the fetch records the refused blob in `cache`, and
-/// from then on that exact snapshot yields to the CLI entry. Only a new blob
-/// brings it back, from a claude-acc recapture or from the account becoming
-/// the active one (read-only, never marked); the yielding Desktop tab is not
-/// fetched, so no good payload can clear the mark meanwhile. Without this, a
-/// snapshot refused once kept serving its last cached numbers for a week while
-/// the working CLI login stayed hidden.
+/// OAuth `invalid_grant`, or when a rotated refresh token could not be saved,
+/// the fetch records the spent blob in `cache`, and from then on that exact
+/// snapshot yields to the CLI entry. Only a new blob brings it back, from a
+/// claude-acc recapture or from the account becoming the active one
+/// (read-only, never marked); the yielding Desktop tab is not fetched, so no
+/// good payload can clear the mark meanwhile. Without this, a snapshot refused
+/// once kept serving its last cached numbers for a week while the working CLI
+/// login stayed hidden.
 fn desktop_source_usable(
     source: &crate::anthropic::desktop_creds::DesktopCreds,
     cache: &crate::cache::Cache,

@@ -558,7 +558,8 @@ mod tests {
                 .await;
             let tmp = TempDir::new().unwrap();
             let target = expired_desktop_snapshot(tmp.path());
-            let expected = marks.then(|| the_fingerprint(&target));
+            let before = the_fingerprint(&target);
+            let expected = marks.then(|| before.clone());
             let profile = tmp.path().join("profile");
             std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o555)).unwrap();
             let (_td, cache) = cache_fixture();
@@ -577,6 +578,7 @@ mod tests {
             .await;
             std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o755)).unwrap();
 
+            assert_eq!(the_fingerprint(&target), before, "the write-back must fail");
             assert_eq!(result.is_ok(), !rotated, "rotated={rotated}");
             assert_eq!(
                 cache.auth_rejected_fingerprint(),

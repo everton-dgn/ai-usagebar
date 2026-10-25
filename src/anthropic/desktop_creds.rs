@@ -537,7 +537,6 @@ mod tests {
         let (_, wb) = snapshot.read().unwrap();
         let first = wb.snapshot_fingerprint().unwrap().to_string();
         assert_eq!(first, sha1_hex(legacy.as_bytes()));
-        assert!(!first.contains("rt"));
 
         // Re-reading the same blob names the same generation; a recapture
         // into the preferred slot names a new one.

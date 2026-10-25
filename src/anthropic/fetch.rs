@@ -92,7 +92,7 @@ pub async fn fetch_snapshot(
         // back to cache.
         cache.clear_last_error();
     } else if stale_token {
-        match tokio::time::timeout(
+        let refreshed = tokio::time::timeout(
             REFRESH_TIMEOUT,
             oauth::refresh(
                 client,
@@ -100,8 +100,9 @@ pub async fn fetch_snapshot(
                 &creds.claude_ai_oauth.refresh_token,
             ),
         )
-        .await
-        {
+        .await;
+        let grant_refused = matches!(&refreshed, Ok(Err(e)) if e.grant_refused());
+        match refreshed.map(|r| r.map_err(oauth::RefreshError::into_app_error)) {
             Ok(Ok(rr)) => {
                 creds.claude_ai_oauth.access_token = rr.access_token;
                 // A rotated refresh token exists *only* in memory until it is
@@ -130,7 +131,7 @@ pub async fn fetch_snapshot(
             }
             Ok(Err(AppError::Http { status, body })) => {
                 cache.write_last_error(status, &body);
-                if refresh_refused(status) {
+                if grant_refused {
                     note_refused_snapshot(cache, &creds_source);
                 }
                 return with_oauth_plan(
@@ -271,14 +272,6 @@ fn rotated_token_lost_message(err: &AppError) -> String {
         "refreshed token could not be saved ({err}); the rotated refresh token is \
          lost, so a new Claude Code sign-in is needed, which this app cannot do"
     )
-}
-
-/// Whether a token-endpoint status refuses the refresh grant itself, as
-/// opposed to throttling (429) or failing upstream (5xx). Only meaningful for
-/// the refresh call: the usage endpoint's statuses say nothing about the
-/// refresh token.
-fn refresh_refused(status: u16) -> bool {
-    matches!(status, 400 | 401 | 403)
 }
 
 /// Record that this Desktop snapshot's refresh token is spent, so a colliding
@@ -476,22 +469,34 @@ mod tests {
         ))
     }
 
+    fn the_fingerprint(target: &creds::CredsTarget) -> String {
+        let creds::CredsTarget::Desktop(source) = target else {
+            unreachable!()
+        };
+        let (_, writeback) = source.read().unwrap();
+        writeback.snapshot_fingerprint().unwrap().to_string()
+    }
+
     #[tokio::test]
-    async fn only_a_refused_refresh_marks_the_desktop_snapshot() {
-        for (status, refused) in [
-            (400, true),
-            (401, true),
-            (403, true),
-            (429, false),
-            (503, false),
+    async fn only_a_refused_grant_marks_the_desktop_snapshot() {
+        let refused = r#"{"error":"invalid_grant","error_description":"Refresh token expired"}"#;
+        for (status, body, marks) in [
+            (400, refused, true),
+            (401, refused, true),
+            (
+                400,
+                r#"{"error":"invalid_request","error_description":"Invalid request format"}"#,
+                false,
+            ),
+            (403, "<html>Forbidden</html>", false),
+            (429, refused, false),
+            (503, "upstream unavailable", false),
         ] {
             let mut server = mockito::Server::new_async().await;
             server
                 .mock("POST", "/token")
                 .with_status(status)
-                .with_body(
-                    r#"{"error":"invalid_grant","error_description":"Refresh token expired"}"#,
-                )
+                .with_body(body)
                 .create_async()
                 .await;
             let tmp = TempDir::new().unwrap();
@@ -515,15 +520,68 @@ mod tests {
                 result.is_err(),
                 "{status}: no cache, so the failure surfaces"
             );
-            let creds::CredsTarget::Desktop(source) = &target else {
-                unreachable!()
-            };
-            let (_, writeback) = source.read().unwrap();
-            let expected = refused.then(|| writeback.snapshot_fingerprint().unwrap().to_string());
+            let expected = marks.then(|| the_fingerprint(&target));
             assert_eq!(
                 cache.auth_rejected_fingerprint(),
                 expected,
-                "status {status}"
+                "{status} {body}"
+            );
+        }
+    }
+
+    /// The server rotated the refresh token but the snapshot could not be
+    /// rewritten: the token still on disk is spent. Without a rotation the
+    /// old token stays good, so the same write failure must not mark it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_lost_rotated_token_marks_the_snapshot_and_an_unrotated_one_does_not() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for (rotated, marks) in [(true, true), (false, false)] {
+            let refresh_body = if rotated {
+                r#"{"access_token":"new-at","refresh_token":"new-rt","expires_in":3600}"#
+            } else {
+                r#"{"access_token":"new-at","expires_in":3600}"#
+            };
+            let mut server = mockito::Server::new_async().await;
+            server
+                .mock("POST", "/token")
+                .with_status(200)
+                .with_body(refresh_body)
+                .create_async()
+                .await;
+            server
+                .mock("GET", "/api/oauth/usage")
+                .with_status(200)
+                .with_body(r#"{"five_hour":{"utilization":7},"seven_day":{"utilization":3}}"#)
+                .create_async()
+                .await;
+            let tmp = TempDir::new().unwrap();
+            let target = expired_desktop_snapshot(tmp.path());
+            let expected = marks.then(|| the_fingerprint(&target));
+            let profile = tmp.path().join("profile");
+            std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let (_td, cache) = cache_fixture();
+            let endpoints = Endpoints {
+                usage: format!("{}/api/oauth/usage", server.url()),
+                token: format!("{}/token", server.url()),
+            };
+
+            let result = fetch_snapshot(
+                &reqwest::Client::new(),
+                &target,
+                &cache,
+                &endpoints,
+                Duration::from_secs(60),
+            )
+            .await;
+            std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            assert_eq!(result.is_ok(), !rotated, "rotated={rotated}");
+            assert_eq!(
+                cache.auth_rejected_fingerprint(),
+                expected,
+                "rotated={rotated}"
             );
         }
     }

@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{AppError, Result};
+use crate::error::AppError;
 
 pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -67,13 +67,40 @@ where
     }
 }
 
+/// Why a refresh failed. `GrantRefused` is the OAuth `invalid_grant` answer:
+/// this refresh token will not work again. Everything else (throttling, a 5xx,
+/// a malformed request, a proxy page) says nothing about the token itself.
+#[derive(Debug)]
+pub enum RefreshError {
+    GrantRefused(AppError),
+    Other(AppError),
+}
+
+impl RefreshError {
+    pub fn grant_refused(&self) -> bool {
+        matches!(self, Self::GrantRefused(_))
+    }
+
+    pub fn into_app_error(self) -> AppError {
+        match self {
+            Self::GrantRefused(e) | Self::Other(e) => e,
+        }
+    }
+}
+
+impl From<AppError> for RefreshError {
+    fn from(e: AppError) -> Self {
+        Self::Other(e)
+    }
+}
+
 /// Try to refresh the access token. The `endpoint` arg is parameterized for
 /// tests (defaults to [`TOKEN_URL`] in production).
 pub async fn refresh(
     client: &reqwest::Client,
     endpoint: &str,
     refresh_token: &str,
-) -> Result<RefreshResponse> {
+) -> Result<RefreshResponse, RefreshError> {
     let req = RefreshRequest {
         grant_type: "refresh_token",
         client_id: CLIENT_ID,
@@ -87,7 +114,8 @@ pub async fn refresh(
         .header("User-Agent", USER_AGENT)
         .json(&req)
         .send()
-        .await?;
+        .await
+        .map_err(AppError::from)?;
 
     let status = resp.status();
     let body = crate::vendor::read_body_capped(resp, crate::vendor::MAX_BODY_BYTES).await?;
@@ -103,14 +131,29 @@ pub async fn refresh(
                 "Invalid refresh response".into()
             }
         });
-        return Err(AppError::Http {
+        let error = AppError::Http {
             status: status.as_u16(),
             body: msg,
+        };
+        return Err(if refuses_grant(status.as_u16(), &body) {
+            RefreshError::GrantRefused(error)
+        } else {
+            RefreshError::Other(error)
         });
     }
 
     serde_json::from_str(&body)
-        .map_err(|e| AppError::Schema(format!("token refresh response: {e}")))
+        .map_err(|e| AppError::Schema(format!("token refresh response: {e}")).into())
+}
+
+/// RFC 6749 §5.2: a refused refresh token is `invalid_grant`, sent as 400
+/// (401 is tolerated for servers that fold it into client authentication).
+fn refuses_grant(status: u16, body: &str) -> bool {
+    matches!(status, 400 | 401)
+        && serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v.get("error")?.as_str().map(|code| code == "invalid_grant"))
+            .unwrap_or(false)
 }
 
 /// Extract a human-readable error message from a non-2xx refresh body.
@@ -288,6 +331,7 @@ mod tests {
         let error = refresh(&client, &format!("{}/v1/oauth/token", server.url()), "old")
             .await
             .unwrap_err()
+            .into_app_error()
             .to_string();
 
         assert!(error.contains("token refresh response"));
@@ -308,12 +352,33 @@ mod tests {
         let err = refresh(&client, &format!("{}/v1/oauth/token", server.url()), "x")
             .await
             .unwrap_err();
-        match err {
+        assert!(err.grant_refused());
+        match err.into_app_error() {
             AppError::Http { status, body } => {
                 assert_eq!(status, 400);
                 assert_eq!(body, "Refresh token expired");
             }
             other => panic!("expected Http error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn only_invalid_grant_refuses_the_grant() {
+        let refused = r#"{"error":"invalid_grant","error_description":"Refresh token expired"}"#;
+        assert!(refuses_grant(400, refused));
+        assert!(refuses_grant(401, refused));
+        // Same body, but throttling or an upstream failure is not a verdict
+        // on the token.
+        assert!(!refuses_grant(429, refused));
+        assert!(!refuses_grant(503, refused));
+        assert!(!refuses_grant(
+            400,
+            r#"{"error":"invalid_request","error_description":"Invalid request format"}"#
+        ));
+        assert!(!refuses_grant(403, "<html>Forbidden</html>"));
+        assert!(!refuses_grant(
+            400,
+            r#"{"error":{"message":"invalid_grant"}}"#
+        ));
     }
 }

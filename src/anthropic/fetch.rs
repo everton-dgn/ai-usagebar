@@ -121,6 +121,7 @@ pub async fn fetch_snapshot(
                     && rotated
                 {
                     cache.write_last_error(0, &rotated_token_lost_message(&e));
+                    note_refused_snapshot(cache, &creds_source);
                     return with_oauth_plan(
                         &plan_label,
                         handle_auth_failure(cache, plan_label.clone(), false),
@@ -129,6 +130,9 @@ pub async fn fetch_snapshot(
             }
             Ok(Err(AppError::Http { status, body })) => {
                 cache.write_last_error(status, &body);
+                if refresh_refused(status) {
+                    note_refused_snapshot(cache, &creds_source);
+                }
                 return with_oauth_plan(
                     &plan_label,
                     handle_auth_failure(cache, plan_label.clone(), false),
@@ -267,6 +271,26 @@ fn rotated_token_lost_message(err: &AppError) -> String {
         "refreshed token could not be saved ({err}); the rotated refresh token is \
          lost, so a new Claude Code sign-in is needed, which this app cannot do"
     )
+}
+
+/// Whether a token-endpoint status refuses the refresh grant itself, as
+/// opposed to throttling (429) or failing upstream (5xx). Only meaningful for
+/// the refresh call: the usage endpoint's statuses say nothing about the
+/// refresh token.
+fn refresh_refused(status: u16) -> bool {
+    matches!(status, 400 | 401 | 403)
+}
+
+/// Record that this Desktop snapshot's refresh token is spent, so a colliding
+/// CLI entry can take its label back (`core::entries`). Keyed by the blob that
+/// was read: a recapture that lands meanwhile is a different generation and is
+/// not condemned. Other credential sources have no such fallback.
+fn note_refused_snapshot(cache: &Cache, source: &creds::CredsSource) {
+    if let creds::CredsSource::Desktop(writeback) = source
+        && let Some(fingerprint) = writeback.snapshot_fingerprint()
+    {
+        cache.mark_auth_rejected(fingerprint);
+    }
 }
 
 /// The one place a *synthesized* error beats the original: the refresh failed,
@@ -424,6 +448,84 @@ mod tests {
 
         drop(held);
         assert!(waiter.await.unwrap());
+    }
+
+    /// A Desktop snapshot whose access token has expired, so the fetch must
+    /// refresh it first.
+    fn expired_desktop_snapshot(root: &std::path::Path) -> creds::CredsTarget {
+        let key = crate::safe_storage::derive_key(b"test-secret");
+        let plain = serde_json::json!({
+            "client:org:https://api.anthropic.com:user:inference user:profile": {
+                "token": "access-token-fixture",
+                "refreshToken": "refresh-token-fixture",
+                "expiresAt": Utc::now().timestamp_millis() - 3_600_000,
+            }
+        });
+        let profile = root.join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(
+            profile.join("config-tokenCacheV2"),
+            crate::safe_storage::encrypt(&key, &serde_json::to_vec(&plain).unwrap()),
+        )
+        .unwrap();
+        creds::CredsTarget::Desktop(crate::anthropic::desktop_creds::source_for(
+            &root.join("config.json"),
+            &profile,
+            false,
+            key,
+        ))
+    }
+
+    #[tokio::test]
+    async fn only_a_refused_refresh_marks_the_desktop_snapshot() {
+        for (status, refused) in [
+            (400, true),
+            (401, true),
+            (403, true),
+            (429, false),
+            (503, false),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            server
+                .mock("POST", "/token")
+                .with_status(status)
+                .with_body(
+                    r#"{"error":"invalid_grant","error_description":"Refresh token expired"}"#,
+                )
+                .create_async()
+                .await;
+            let tmp = TempDir::new().unwrap();
+            let target = expired_desktop_snapshot(tmp.path());
+            let (_td, cache) = cache_fixture();
+            let endpoints = Endpoints {
+                usage: format!("{}/api/oauth/usage", server.url()),
+                token: format!("{}/token", server.url()),
+            };
+
+            let result = fetch_snapshot(
+                &reqwest::Client::new(),
+                &target,
+                &cache,
+                &endpoints,
+                Duration::from_secs(60),
+            )
+            .await;
+
+            assert!(
+                result.is_err(),
+                "{status}: no cache, so the failure surfaces"
+            );
+            let creds::CredsTarget::Desktop(source) = &target else {
+                unreachable!()
+            };
+            let (_, writeback) = source.read().unwrap();
+            let expected = refused.then(|| writeback.snapshot_fingerprint().unwrap().to_string());
+            assert_eq!(
+                cache.auth_rejected_fingerprint(),
+                expected,
+                "status {status}"
+            );
+        }
     }
 
     #[tokio::test]

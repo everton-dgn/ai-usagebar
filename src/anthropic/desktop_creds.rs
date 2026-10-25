@@ -76,6 +76,9 @@ pub struct Writeback {
     /// The `<clientId>:…:<scopes>` entry within the decrypted object.
     entry_key: String,
     allow_refresh: bool,
+    /// SHA-1 of the encrypted blob as read, never of a token: names this
+    /// credential generation without persisting anything usable.
+    fingerprint: String,
 }
 
 /// Resolve a saved Desktop account label to a fetchable target + its cache.
@@ -142,7 +145,11 @@ pub(crate) fn source_for(
 /// Stable, path-safe cache identity. SHA-1 is already required by Chromium's
 /// PBKDF2 format here; this use is namespacing, not a security signature.
 fn desktop_cache_key(account_uuid: &str) -> String {
-    let digest = Sha1::digest(account_uuid.as_bytes());
+    sha1_hex(account_uuid.as_bytes())
+}
+
+fn sha1_hex(bytes: &[u8]) -> String {
+    let digest = Sha1::digest(bytes);
     let mut encoded = String::with_capacity(digest.len() * 2);
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for byte in digest {
@@ -195,6 +202,7 @@ impl DesktopCreds {
             slot,
             entry_key: entry_key.clone(),
             allow_refresh: self.allow_refresh,
+            fingerprint: sha1_hex(blob.as_bytes()),
         };
         Ok((
             CredentialsFile {
@@ -237,6 +245,14 @@ impl DesktopCreds {
 }
 
 impl Writeback {
+    /// The generation of a refreshable snapshot, for recording that the server
+    /// refused its refresh token. `None` for the read-only active account: it
+    /// never refreshes here, and the app rewrites its `config.json` for
+    /// reasons unrelated to the token.
+    pub fn snapshot_fingerprint(&self) -> Option<&str> {
+        self.allow_refresh.then_some(self.fingerprint.as_str())
+    }
+
     /// Persist a refreshed token back into the same blob it was read from.
     /// A read-only source (active account, app running) is a no-op — but the
     /// fetch path never refreshes such a source, so this is only defence.
@@ -502,6 +518,41 @@ mod tests {
         assert_eq!(after["lastKnownAccountUuid"], "keep-me");
         let (creds2, _) = d.read().unwrap();
         assert_eq!(creds2.claude_ai_oauth.access_token, "rotated");
+    }
+
+    #[test]
+    fn snapshot_fingerprint_names_the_blob_that_was_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let k = key();
+        let legacy = safe_storage::encrypt(&k, &cache_json("at", "rt", 1));
+        std::fs::write(tmp.path().join("config-tokenCache"), &legacy).unwrap();
+        let snapshot = DesktopCreds {
+            source: BlobSource::ProfileDir(tmp.path().to_path_buf()),
+            key: k,
+            allow_refresh: true,
+            coordination_lock: None,
+        };
+
+        // Only the legacy slot exists, so that is the blob the token came from.
+        let (_, wb) = snapshot.read().unwrap();
+        let first = wb.snapshot_fingerprint().unwrap().to_string();
+        assert_eq!(first, sha1_hex(legacy.as_bytes()));
+        assert!(!first.contains("rt"));
+
+        // Re-reading the same blob names the same generation; a recapture
+        // into the preferred slot names a new one.
+        let (_, same) = snapshot.read().unwrap();
+        assert_eq!(same.snapshot_fingerprint(), Some(first.as_str()));
+        profile_with(tmp.path(), &cache_json("at2", "rt2", 2), &k);
+        let (_, recaptured) = snapshot.read().unwrap();
+        assert_ne!(recaptured.snapshot_fingerprint(), Some(first.as_str()));
+
+        let read_only = DesktopCreds {
+            allow_refresh: false,
+            ..snapshot
+        };
+        let (_, wb) = read_only.read().unwrap();
+        assert_eq!(wb.snapshot_fingerprint(), None);
     }
 
     #[test]

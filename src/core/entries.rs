@@ -268,8 +268,8 @@ fn desktop_profile_labels(config: &Config) -> Vec<String> {
 /// keeps the CLI entry.
 fn desktop_credential_usable(config: &Config, label: &str) -> bool {
     match crate::anthropic::desktop_creds::account_target(config, label) {
-        Ok((crate::anthropic::creds::CredsTarget::Desktop(source), _)) => {
-            desktop_source_usable(&source, chrono::Utc::now().timestamp())
+        Ok((crate::anthropic::creds::CredsTarget::Desktop(source), cache)) => {
+            desktop_source_usable(&source, &cache, chrono::Utc::now().timestamp())
         }
         _ => false,
     }
@@ -278,18 +278,26 @@ fn desktop_credential_usable(config: &Config, label: &str) -> bool {
 /// Pure half of [`desktop_credential_usable`]: the blob decrypts to an
 /// inference-scoped token that is unexpired or that the fetch may refresh.
 /// A read-only source (the active account) cannot refresh, so an expired token
-/// there cannot report usage. Limit: a present refresh token is not proof the
-/// server still accepts it; proving that would mean refreshing here, rotating
-/// the token this check exists to protect, so a revoked one still wins and
-/// fails at fetch time.
+/// there cannot report usage. A present refresh token is not proof the server
+/// still accepts it, and proving that here would rotate the token this check
+/// exists to protect. So the first refusal is learned at fetch time: the fetch
+/// records the refused blob in `cache`, and from then on that exact snapshot
+/// yields until a recapture or a good payload replaces it. Without that, a
+/// snapshot refused once would keep serving its last cached numbers for a week
+/// while the working CLI login stayed hidden.
 fn desktop_source_usable(
     source: &crate::anthropic::desktop_creds::DesktopCreds,
+    cache: &crate::cache::Cache,
     now_secs: i64,
 ) -> bool {
-    source.read().is_ok_and(|(creds, _)| {
+    source.read().is_ok_and(|(creds, writeback)| {
         let oauth = creds.claude_ai_oauth;
-        crate::anthropic::oauth::can_refresh(&oauth.refresh_token)
-            || oauth.expires_at_secs() > now_secs
+        let live = crate::anthropic::oauth::can_refresh(&oauth.refresh_token)
+            || oauth.expires_at_secs() > now_secs;
+        let refused = writeback.snapshot_fingerprint().is_some_and(|fingerprint| {
+            cache.auth_rejected_fingerprint().as_deref() == Some(fingerprint)
+        });
+        live && !refused
     })
 }
 
@@ -569,6 +577,7 @@ pub(crate) mod tests {
     mod desktop_probe {
         use super::super::desktop_source_usable;
         use crate::anthropic::desktop_creds::source_for;
+        use crate::cache::Cache;
         use crate::safe_storage;
 
         const NOW: i64 = 1_800_000_000;
@@ -608,14 +617,34 @@ pub(crate) mod tests {
             root
         }
 
-        fn usable(root: &tempfile::TempDir, is_active: bool, k: [u8; 16]) -> bool {
-            let source = source_for(
+        fn source(
+            root: &tempfile::TempDir,
+            is_active: bool,
+            k: [u8; 16],
+        ) -> crate::anthropic::desktop_creds::DesktopCreds {
+            source_for(
                 &root.path().join("config.json"),
                 &root.path().join("profile"),
                 is_active,
                 k,
-            );
-            desktop_source_usable(&source, NOW)
+            )
+        }
+
+        fn cache(root: &tempfile::TempDir) -> Cache {
+            Cache::at(root.path().join("cache"))
+        }
+
+        fn usable(root: &tempfile::TempDir, is_active: bool, k: [u8; 16]) -> bool {
+            desktop_source_usable(&source(root, is_active, k), &cache(root), NOW)
+        }
+
+        /// The fingerprint a fetch would record for this source's blob.
+        fn fingerprint(root: &tempfile::TempDir, is_active: bool) -> String {
+            let (_, writeback) = source(root, is_active, key()).read().unwrap();
+            writeback
+                .snapshot_fingerprint()
+                .unwrap_or("none")
+                .to_string()
         }
 
         const FUTURE_MS: i64 = (NOW + 3600) * 1000;
@@ -657,6 +686,38 @@ pub(crate) mod tests {
             // An inactive snapshot may refresh an expired token at fetch time.
             let root = fixture(&inference_entry("refresh", Some(PAST_MS)), &key());
             assert!(usable(&root, false, key()));
+        }
+
+        #[test]
+        fn a_snapshot_whose_refresh_was_refused_yields_until_recaptured() {
+            let root = fixture(&inference_entry("refresh", Some(PAST_MS)), &key());
+            cache(&root).mark_auth_rejected(&fingerprint(&root, false));
+            assert!(!usable(&root, false, key()));
+
+            // A recapture writes a new blob: a new generation gets its chance.
+            let blob = safe_storage::encrypt(
+                &key(),
+                &serde_json::to_vec(&inference_entry("recaptured", Some(PAST_MS))).unwrap(),
+            );
+            std::fs::write(root.path().join("profile/config-tokenCacheV2"), blob).unwrap();
+            assert!(usable(&root, false, key()));
+        }
+
+        #[test]
+        fn a_refusal_recorded_for_another_blob_changes_nothing() {
+            let root = fixture(&inference_entry("refresh", Some(PAST_MS)), &key());
+            cache(&root).mark_auth_rejected("0000000000000000000000000000000000000000");
+            assert!(usable(&root, false, key()));
+        }
+
+        #[test]
+        fn the_read_only_active_account_ignores_the_refusal_marker() {
+            // The active account never refreshes here, so no refusal can be
+            // about its blob; `config.json` also churns for unrelated reasons.
+            let root = fixture(&inference_entry("", Some(FUTURE_MS)), &key());
+            cache(&root).mark_auth_rejected(&fingerprint(&root, false));
+            assert_eq!(fingerprint(&root, true), "none");
+            assert!(usable(&root, true, key()));
         }
     }
 

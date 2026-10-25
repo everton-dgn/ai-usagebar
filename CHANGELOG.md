@@ -23,6 +23,12 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 
 ### Corrigido
 
+- Conta Claude salva com o mesmo rótulo no Claude Desktop e no Claude Code
+  volta a mostrar o consumo real quando o servidor recusa a renovação do
+  perfil do Desktop. Antes, o card ficava até 7 dias com a última leitura em
+  cache, por exemplo 0%, e escondia o login do Claude Code. O card mantém a
+  posição salva, e o Desktop volta a ser usado quando o perfil é recapturado.
+
 - Conta nova de um provedor entra logo depois das outras contas dele no painel
   e na barra, em vez de ir para o fim da ordem salva.
 

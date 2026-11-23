@@ -39,6 +39,34 @@ contínua.
 O filtro da barra **Só a conta em uso** altera quais itens aparecem. Ele
 não cadastra nem ativa contas.
 
+### De quem é cada sessão do Claude
+
+A conta em uso é a dona da sessão guardada no item padrão do Chaves, lida do
+identificador de conta que o Claude Code grava junto do token
+(`claudeAiOauth.accountUuid`). O arquivo `~/.claude.json` não decide isso: toda
+sessão aberta do Claude Code regrava esse arquivo, e ele já apontou uma conta
+enquanto os terminais usavam outra. O aplicativo só escreve nele depois de uma
+troca.
+
+Cada conta cadastrada guarda, na própria pasta, o registro
+`.ai-usagebar-identity.json` com a conta a que o rótulo pertence. O registro é
+criado uma vez, a partir da primeira identidade conhecida da pasta, e não muda
+quando um login posterior naquela pasta é autorizado por outra conta no
+navegador. O navegador escolhe qual conta assina o token; quem define a qual
+rótulo o token pertence é o identificador gravado nele.
+
+| Situação | O que acontece |
+| --- | --- |
+| A sessão em uso pertence a outra conta cadastrada | A troca guarda essa sessão na conta dona dela, nunca na que o arquivo apontava |
+| Uma sessão salva está na pasta de outra conta | Na próxima troca ela volta para a conta dona, desde que essa conta esteja sem sessão |
+| A sessão salva de uma conta pertence a outra e não tem para onde ir | O cartão informa que a sessão é de outra conta e não mostra consumo; a troca para essa conta é recusada |
+| A sessão em uso não informa a conta | A estrela não aparece e a troca é cancelada, sem alterar nada |
+| Dois rótulos apontam a mesma conta | Nenhum dos dois é tratado como dono até a duplicidade ser desfeita |
+
+Uma conta sem sessão própria precisa de um novo login no Claude Code. Para um
+rótulo passar a representar outra conta, cadastre um rótulo novo: o registro
+existente mantém o rótulo antigo na conta original.
+
 ## Tipos de fonte
 
 Os conectores podem aproveitar sessões de aplicativos, arquivos de autenticação
@@ -58,7 +86,8 @@ automática quando a fonte autenticada fornece um e-mail válido:
 
 | Provedor | Fonte de identidade |
 | --- | --- |
-| Claude e Codex | Metadados da sessão local correspondente à conta |
+| Claude | Identificador de conta gravado na própria sessão e registro da conta na pasta dela |
+| Codex | Metadados da sessão local correspondente à conta |
 | Kimi | Perfil `/coding/v1/me`, com o mesmo token usado na consulta de consumo |
 | Antigravity | `userStatus.email` da sessão local; o fallback remoto não herda esse endereço |
 | GitHub Copilot | Perfil GitHub; lista de e-mails somente quando o token já tem permissão, escolhendo o principal verificado |

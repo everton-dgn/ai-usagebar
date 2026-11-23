@@ -23,6 +23,20 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 
 ### Corrigido
 
+- A conta Claude em uso passa a ser a dona da sessão guardada no Chaves, lida
+  do identificador de conta gravado no próprio token. Antes valia o arquivo
+  `~/.claude.json`, que as sessões abertas do Claude Code regravam: a estrela
+  apontava uma conta enquanto os terminais usavam outra, e a troca seguinte
+  guardava a sessão no rótulo errado e deixava a conta dona sem sessão.
+- Cada conta Claude ganha um registro próprio da conta a que o rótulo pertence
+  (`.ai-usagebar-identity.json`). Um login autorizado por outra conta no
+  navegador não muda mais a conta do rótulo: a sessão volta para a conta dona
+  na próxima troca ou o cartão avisa que ela é de outra conta, sem mostrar o
+  consumo alheio.
+- A renovação de token feita pelo aplicativo preserva o identificador de conta
+  da sessão. Antes ele era apagado a cada renovação.
+- A troca recusa guardar uma sessão que não informa a conta e recusa ativar uma
+  conta cuja sessão salva pertence a outra, com o motivo no cartão.
 - Falha na troca de conta pela estrela do card mostra o motivo dentro do
   próprio card, nas vistas de lista e de abas. Antes, a estrela só ficava
   vermelha e o motivo aparecia apenas ao passar o cursor. Para uma conta sem

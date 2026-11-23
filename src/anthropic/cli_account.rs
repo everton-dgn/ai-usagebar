@@ -22,6 +22,12 @@
 //! whichever label is *currently* active to the default slot, so only one copy
 //! is ever live.
 //!
+//! Who a credential belongs to is read from the credential: Claude Code keeps
+//! the account uuid beside the tokens. The `oauthAccount` marker in
+//! `~/.claude.json` is written here but never trusted, because every running
+//! Claude Code session rewrites that file. Which account a *label* is comes
+//! from this app's own record ([`IDENTITY_FILE`]); see `docs/accounts.md`.
+//!
 //! Everything except [`KeychainStore`] is platform-agnostic and unit-tested
 //! against a fake store, so the logic stays under CI's linter on Linux.
 
@@ -81,23 +87,127 @@ pub fn account_email_in(claude_json: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Which managed label the live CLI login belongs to.
+/// This app's record of which account a label is, beside the account's
+/// `.claude.json`.
+const IDENTITY_FILE: &str = ".ai-usagebar-identity.json";
+
+/// Where the identity record of the account in `config_dir` lives.
+pub fn identity_path(config_dir: &Path) -> std::path::PathBuf {
+    config_dir.join(IDENTITY_FILE)
+}
+
+/// The account a stored credential was issued to. `None` for a blob that does
+/// not say: such a credential names nobody, and is never assumed to be the
+/// slot's.
+pub fn blob_account_uuid(blob: &str) -> Option<String> {
+    let document: Value = serde_json::from_str(blob).ok()?;
+    document
+        .get("claudeAiOauth")?
+        .get("accountUuid")?
+        .as_str()
+        .filter(|uuid| !uuid.is_empty())
+        .map(str::to_string)
+}
+
+/// The recorded `oauthAccount` of the account in `config_dir`.
+fn recorded_identity(config_dir: &Path) -> Option<Value> {
+    let bytes = std::fs::read(identity_path(config_dir)).ok()?;
+    let record: Value = serde_json::from_slice(&bytes).ok()?;
+    let oauth_account = record.get("oauth_account")?;
+    uuid_of(oauth_account)
+        .is_some()
+        .then(|| oauth_account.clone())
+}
+
+fn uuid_of(oauth_account: &Value) -> Option<&str> {
+    oauth_account
+        .get("accountUuid")?
+        .as_str()
+        .filter(|uuid| !uuid.is_empty())
+}
+
+/// The `oauthAccount` that describes `account`: this app's record, or, until
+/// one is written, the marker Claude Code left in the account's directory.
+fn account_marker(account: &AnthropicAccount) -> Option<Value> {
+    let dir = account.config_dir();
+    recorded_identity(&dir)
+        .or_else(|| oauth_account_in(&marker_path(&dir)).filter(|marker| uuid_of(marker).is_some()))
+}
+
+/// Which account `account` is.
+pub fn account_identity(account: &AnthropicAccount) -> Option<String> {
+    uuid_of(&account_marker(account)?).map(str::to_string)
+}
+
+/// The e-mail of the account `account` is, for display only.
+pub fn account_email(account: &AnthropicAccount) -> Option<String> {
+    account_marker(account)?
+        .get("emailAddress")?
+        .as_str()
+        .filter(|email| !email.is_empty())
+        .map(str::to_string)
+}
+
+/// Record the identity of every account that has none yet, from the marker in
+/// its directory.
+///
+/// WHY: a later sign-in in that directory rewrites the marker to whichever
+/// account the browser authorized. The record keeps the label on the account
+/// it was set up for, so a credential issued to anyone else is recognised as
+/// foreign. Best-effort: an unrecorded account keeps resolving through its
+/// marker.
+pub fn record_identities(accounts: &[AnthropicAccount]) {
+    for account in accounts {
+        let dir = account.config_dir();
+        if recorded_identity(&dir).is_some() {
+            continue;
+        }
+        let Some(marker) = account_marker(account) else {
+            continue;
+        };
+        // Two labels on one account: recording either would settle an
+        // ambiguity nobody has resolved.
+        if owner_of(uuid_of(&marker).unwrap_or_default(), accounts).is_none() {
+            continue;
+        }
+        if let Ok(bytes) =
+            serde_json::to_vec_pretty(&serde_json::json!({ "oauth_account": marker }))
+        {
+            let _ = crate::cache::atomic_write(&identity_path(&dir), &bytes);
+        }
+    }
+}
+
+/// The managed account `uuid` belongs to. `None` when no label or more than
+/// one claims it, since either answer could be wrong.
+pub fn owner_of<'a>(uuid: &str, accounts: &'a [AnthropicAccount]) -> Option<&'a AnthropicAccount> {
+    let mut owners = accounts
+        .iter()
+        .filter(|account| account_identity(account).as_deref() == Some(uuid));
+    let owner = owners.next()?;
+    owners.next().is_none().then_some(owner)
+}
+
+/// Which managed label the login in the default slot belongs to, given that
+/// slot's credential.
 ///
 /// `None` when the CLI is signed into something we do not manage — a plain
-/// `claude` login done by hand, say. Callers surface that as "unknown" rather
-/// than hiding it: it is exactly the case where the named copies may have gone
-/// stale behind our back.
+/// `claude` login done by hand, say — or into a credential that does not say
+/// whose it is. Callers surface that as "unknown" rather than guessing: it is
+/// exactly the case where the named copies may have gone stale behind our back.
 pub fn resolve_active_label(
-    home_claude_json: &Path,
+    default_blob: Option<&str>,
     accounts: &[AnthropicAccount],
 ) -> Option<String> {
-    let live = account_uuid_in(home_claude_json)?;
-    accounts
-        .iter()
-        .find(|account| {
-            account_uuid_in(&account.config_dir().join(CLAUDE_JSON)) == Some(live.clone())
-        })
-        .map(|account| account.label.clone())
+    let live = blob_account_uuid(default_blob?)?;
+    owner_of(&live, accounts).map(|account| account.label.clone())
+}
+
+/// [`resolve_active_label`] against the real default slot. An unreadable
+/// Keychain is "unknown", like a login nobody manages.
+pub fn active_label(accounts: &[AnthropicAccount]) -> Option<String> {
+    let blob = KeychainStore.read_default().ok().flatten();
+    resolve_active_label(blob.as_deref(), accounts)
 }
 
 /// Set (or clear) the `oauthAccount` marker in a `.claude.json`, preserving
@@ -188,42 +298,76 @@ pub fn switch_cli_account(
             ))
         })?;
 
-    let active = resolve_active_label(home_claude_json, accounts);
+    let storage = |error: AppError| error.for_account(AccountFailure::StorageUnavailable);
+
+    // Who the target is must be known, and known to be one label only, before
+    // any credential can be matched against it.
+    let oauth_account = account_marker(target)
+        .filter(|marker| {
+            uuid_of(marker)
+                .and_then(|uuid| owner_of(uuid, accounts))
+                .is_some()
+        })
+        .ok_or_else(|| {
+            AppError::Credentials(format!(
+                "the identity marker for {label:?} is missing, invalid or shared with another \
+                 account; that account needs a new sign-in before switching"
+            ))
+            .for_account(AccountFailure::InvalidState)
+        })?;
+    let target_uuid = uuid_of(&oauth_account).unwrap_or_default().to_string();
 
     // Read every piece needed for both the move and its rollback before the
     // first write. An empty default slot is safe to populate without --force;
     // an unrecognised *existing* login is the destructive case.
-    let original_default = store
-        .read_default()
-        .map_err(|error| error.for_account(AccountFailure::StorageUnavailable))?;
-    if active.as_deref() == Some(label) && original_default.is_some() {
-        if store
-            .read_named(&target.config_dir())
-            .map_err(|error| error.for_account(AccountFailure::StorageUnavailable))?
-            .is_none()
-        {
+    let original_default = store.read_default().map_err(storage)?;
+    // The login being replaced is whoever its credential says it is. The home
+    // marker is not asked: it named one account while this slot held another,
+    // and the outgoing login was saved under the wrong label.
+    let default_uuid = original_default.as_deref().and_then(blob_account_uuid);
+    let outgoing_account = default_uuid
+        .as_deref()
+        .and_then(|uuid| owner_of(uuid, accounts));
+    let active = outgoing_account.map(|account| account.label.clone());
+
+    if !opts.dry_run {
+        rehome_misfiled(accounts, store, active.as_deref())?;
+    }
+
+    if active.as_deref() == Some(label) {
+        let Some(named) = store.read_named(&target.config_dir()).map_err(storage)? else {
+            return Ok(CliSwitchOutcome::AlreadyActive);
+        };
+        // Only a copy of this same login is redundant. A credential issued to
+        // someone else stays where it is; the account's card reports it.
+        if blob_account_uuid(&named).is_some_and(|uuid| uuid != target_uuid) {
             return Ok(CliSwitchOutcome::AlreadyActive);
         }
         if opts.dry_run {
             return Ok(CliSwitchOutcome::WouldRemoveDuplicate);
         }
-        store
-            .delete_named(&target.config_dir())
-            .map_err(|error| error.for_account(AccountFailure::StorageUnavailable))?;
+        store.delete_named(&target.config_dir()).map_err(storage)?;
         return Ok(CliSwitchOutcome::RemovedDuplicate);
     }
     if active.is_none() && original_default.is_some() && !opts.force {
-        return Err(AppError::Credentials(format!(
-            "Claude Code is signed into an account that is not managed here, so \
-             switching to {label:?} would overwrite a login that cannot be saved first."
-        ))
-        .for_account(AccountFailure::UnmanagedLogin));
+        return Err(match default_uuid {
+            Some(_) => AppError::Credentials(format!(
+                "Claude Code is signed into an account that is not managed here, so \
+                 switching to {label:?} would overwrite a login that cannot be saved first."
+            ))
+            .for_account(AccountFailure::UnmanagedLogin),
+            None => AppError::Credentials(format!(
+                "the live Claude Code login does not say which account it belongs to, so \
+                 switching to {label:?} could not save it under the right account first."
+            ))
+            .for_account(AccountFailure::UnidentifiedLogin),
+        });
     }
 
     // Fail before touching anything if the target has never been signed in.
     let target_blob = store
         .read_named(&target.config_dir())
-        .map_err(|error| error.for_account(AccountFailure::StorageUnavailable))?
+        .map_err(storage)?
         .ok_or_else(|| {
             AppError::Credentials(format!(
                 "no stored credential for {label:?}; that account has never been signed in \
@@ -231,27 +375,25 @@ pub fn switch_cli_account(
             ))
             .for_account(AccountFailure::MissingLogin)
         })?;
-    let oauth_account =
-        oauth_account_in(&target.config_dir().join(CLAUDE_JSON)).ok_or_else(|| {
-            AppError::Credentials(format!(
-                "the identity marker for {label:?} is missing or invalid; that account needs a \
-             new sign-in before switching"
-            ))
-            .for_account(AccountFailure::InvalidState)
-        })?;
+    if blob_account_uuid(&target_blob).is_some_and(|uuid| uuid != target_uuid) {
+        return Err(AppError::Credentials(format!(
+            "the credential saved for {label:?} was issued to another account; that account \
+             needs a new sign-in before switching"
+        ))
+        .for_account(AccountFailure::WrongAccount));
+    }
     let original_marker = read_optional(home_claude_json)?;
+    // Only names the outcome: with an empty default slot there is no login to
+    // misattribute.
+    let marker_named_target = original_default.is_none()
+        && account_uuid_in(home_claude_json).as_deref() == Some(target_uuid.as_str());
     let merged_marker = merge_oauth_account(
         original_marker.as_deref().unwrap_or_default(),
         Some(&oauth_account),
     )?;
 
-    let outgoing_account = active
-        .as_deref()
-        .and_then(|outgoing| accounts.iter().find(|account| account.label == outgoing));
     let original_outgoing_named = match outgoing_account {
-        Some(account) => store
-            .read_named(&account.config_dir())
-            .map_err(|error| error.for_account(AccountFailure::StorageUnavailable))?,
+        Some(account) => store.read_named(&account.config_dir()).map_err(storage)?,
         None => None,
     };
 
@@ -285,11 +427,54 @@ pub fn switch_cli_account(
         return Err(with_rollback(error, rollback_switch(store, &rollback)));
     }
 
-    if active.as_deref() == Some(label) {
+    if marker_named_target {
         Ok(CliSwitchOutcome::RepairedActive)
     } else {
         Ok(CliSwitchOutcome::Switched { outgoing: active })
     }
+}
+
+/// Move each saved credential that sits in another account's slot to the slot
+/// of the account it was issued to.
+///
+/// The owner must have no login anywhere, saved or live (`live_owner`):
+/// a second copy would put one rotating refresh token in two places. Anything
+/// else stays put and the holder's card reports it.
+fn rehome_misfiled(
+    accounts: &[AnthropicAccount],
+    store: &dyn CredentialStore,
+    live_owner: Option<&str>,
+) -> Result<()> {
+    let storage = |error: AppError| error.for_account(AccountFailure::StorageUnavailable);
+    for holder in accounts {
+        let holder_dir = holder.config_dir();
+        let Some(blob) = store.read_named(&holder_dir).map_err(storage)? else {
+            continue;
+        };
+        let Some(owner) = blob_account_uuid(&blob)
+            .as_deref()
+            .and_then(|uuid| owner_of(uuid, accounts))
+        else {
+            continue;
+        };
+        let owner_dir = owner.config_dir();
+        if owner.label == holder.label
+            || live_owner == Some(owner.label.as_str())
+            || store.read_named(&owner_dir).map_err(storage)?.is_some()
+        {
+            continue;
+        }
+        store.write_named(&owner_dir, &blob).map_err(storage)?;
+        if let Err(error) = store.delete_named(&holder_dir) {
+            // Back to exactly one copy, in the slot it was read from. Rewritten
+            // unconditionally: a failed delete can still have removed the item.
+            let undo = store
+                .delete_named(&owner_dir)
+                .and_then(|()| store.write_named(&holder_dir, &blob));
+            return Err(with_rollback(error, undo));
+        }
+    }
+    Ok(())
 }
 
 /// Register the login plain `claude` is signed into as `account`, without a
@@ -314,24 +499,22 @@ pub fn adopt_current(
         .join(".ai-usagebar-account-switch.lock");
     let _lock = crate::cache::acquire_lock(&lock_path, Duration::from_secs(2))?;
 
-    // One read: the identity checked is the identity written.
-    let live = oauth_account_in(home_claude_json).ok_or_else(|| {
-        AppError::Credentials(
-            "Claude Code is not signed in, so there is no login to adopt; a Claude Code sign-in is needed, which this app cannot do"
-                .into(),
-        )
-    })?;
-    let live_uuid = live
-        .get("accountUuid")
-        .and_then(Value::as_str)
-        .filter(|uuid| !uuid.is_empty())
-        .map(str::to_string)
+    // The login adopted is the one in the default slot, named by its own
+    // credential.
+    let live_uuid = store
+        .read_default()?
         .ok_or_else(|| {
-            AppError::Credentials("the live `claude` login records no account uuid".into())
+            AppError::Credentials(
+                "the default Claude Code credential slot is empty; a Claude Code sign-in is needed, which this app cannot do".into(),
+            )
+        })
+        .and_then(|blob| {
+            blob_account_uuid(&blob).ok_or_else(|| {
+                AppError::Credentials("the live `claude` login records no account uuid".into())
+            })
         })?;
     if let Some(owner) = accounts.iter().find(|other| {
-        other.label != account.label
-            && account_uuid_in(&marker_path(&other.config_dir())).as_deref() == Some(&live_uuid)
+        other.label != account.label && account_identity(other).as_deref() == Some(&live_uuid)
     }) {
         return Err(AppError::Credentials(format!(
             "the live `claude` login already belongs to account {:?}",
@@ -345,11 +528,11 @@ pub fn adopt_current(
             account.label
         )));
     }
-    if store.read_default()?.is_none() {
-        return Err(AppError::Credentials(
-            "the default Claude Code credential slot is empty; a Claude Code sign-in is needed, which this app cannot do".into(),
-        ));
-    }
+    // The home marker only adds display fields, and only while it describes
+    // this same login.
+    let live = oauth_account_in(home_claude_json)
+        .filter(|marker| uuid_of(marker) == Some(live_uuid.as_str()))
+        .unwrap_or_else(|| serde_json::json!({ "accountUuid": live_uuid }));
     let marker = marker_path(&account.config_dir());
     let existing = read_optional(&marker)?;
     let merged = merge_oauth_account(existing.as_deref().unwrap_or_default(), Some(&live))?;
@@ -478,6 +661,13 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
+    const WORK_SAVED: &str =
+        r#"{"claudeAiOauth":{"accessToken":"work-saved","accountUuid":"uuid-work"}}"#;
+    const PERSONAL_LIVE: &str =
+        r#"{"claudeAiOauth":{"accessToken":"personal-live","accountUuid":"uuid-personal"}}"#;
+    const PERSONAL_STALE: &str =
+        r#"{"claudeAiOauth":{"accessToken":"personal-stale","accountUuid":"uuid-personal"}}"#;
+
     #[derive(Default)]
     struct FakeStore {
         default: RefCell<Option<String>>,
@@ -559,15 +749,15 @@ mod tests {
         );
 
         let store = FakeStore::default();
-        *store.default.borrow_mut() = Some("personal-live".into());
+        *store.default.borrow_mut() = Some(PERSONAL_LIVE.into());
         store
             .named
             .borrow_mut()
-            .insert(accounts[0].config_dir(), "work-saved".into());
+            .insert(accounts[0].config_dir(), WORK_SAVED.into());
         store
             .named
             .borrow_mut()
-            .insert(accounts[1].config_dir(), "personal-stale".into());
+            .insert(accounts[1].config_dir(), PERSONAL_STALE.into());
 
         Fixture {
             _root: root,
@@ -577,15 +767,306 @@ mod tests {
         }
     }
 
+    /// A credential as Claude Code stores it: the account it was issued to
+    /// sits beside the tokens.
+    fn blob(uuid: &str, secret: &str) -> String {
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{secret}","refreshToken":"{secret}-refresh","expiresAt":1,"accountUuid":"{uuid}"}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_stale_marker_does_not_decide_whose_login_the_default_slot_holds() {
+        // The home marker still names `personal`, but the default slot holds
+        // `work`'s login and `personal`'s own credential is its saved one.
+        let f = fixture();
+        let work_live = blob("uuid-work", "work-live");
+        let personal_saved = blob("uuid-personal", "personal-saved");
+        *f.store.default.borrow_mut() = Some(work_live.clone());
+        f.store
+            .named
+            .borrow_mut()
+            .remove(&f.accounts[0].config_dir());
+        f.store
+            .named
+            .borrow_mut()
+            .insert(f.accounts[1].config_dir(), personal_saved.clone());
+
+        let outcome = switch_cli_account(
+            &f.home,
+            &f.accounts,
+            "personal",
+            CliSwitchOpts::default(),
+            &f.store,
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            CliSwitchOutcome::Switched {
+                outgoing: Some("work".into())
+            }
+        );
+        assert_eq!(f.store.default.borrow().as_deref(), Some(&*personal_saved));
+        assert_eq!(
+            f.store.named.borrow().get(&f.accounts[0].config_dir()),
+            Some(&work_live)
+        );
+        assert!(
+            !f.store
+                .named
+                .borrow()
+                .contains_key(&f.accounts[1].config_dir())
+        );
+    }
+
+    /// A third account beside the fixture's two, with its own saved login.
+    fn with_spare(f: &mut Fixture) -> AnthropicAccount {
+        let spare = AnthropicAccount {
+            label: "spare".into(),
+            credentials_path: f
+                .home
+                .parent()
+                .unwrap()
+                .join("spare")
+                .join(".credentials.json"),
+        };
+        write(
+            &spare.config_dir().join(CLAUDE_JSON),
+            &marker("uuid-spare", "me@spare.test"),
+        );
+        f.store
+            .named
+            .borrow_mut()
+            .insert(spare.config_dir(), blob("uuid-spare", "spare-saved"));
+        f.accounts.push(spare.clone());
+        spare
+    }
+
+    fn switch(f: &Fixture, label: &str) -> Result<CliSwitchOutcome> {
+        switch_cli_account(
+            &f.home,
+            &f.accounts,
+            label,
+            CliSwitchOpts::default(),
+            &f.store,
+        )
+    }
+
+    fn failure(error: &AppError) -> Option<AccountFailure> {
+        match error {
+            AppError::Account { kind, .. } => Some(*kind),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_outgoing_login_is_saved_under_the_account_it_was_issued_to() {
+        // The marker names `personal` while the default slot holds `work`'s
+        // login. Leaving for a third account must not file it under `personal`.
+        let mut f = fixture();
+        let spare = with_spare(&mut f);
+        let work_live = blob("uuid-work", "work-live");
+        *f.store.default.borrow_mut() = Some(work_live.clone());
+        f.store
+            .named
+            .borrow_mut()
+            .remove(&f.accounts[0].config_dir());
+
+        let outcome = switch(&f, "spare").unwrap();
+
+        assert_eq!(
+            outcome,
+            CliSwitchOutcome::Switched {
+                outgoing: Some("work".into())
+            }
+        );
+        let named = f.store.named.borrow();
+        assert_eq!(named.get(&f.accounts[0].config_dir()), Some(&work_live));
+        assert_eq!(named[&f.accounts[1].config_dir()], PERSONAL_STALE);
+        assert!(!named.contains_key(&spare.config_dir()));
+    }
+
+    #[test]
+    fn a_login_that_names_no_account_is_never_saved_under_a_guess() {
+        let f = fixture();
+        *f.store.default.borrow_mut() = Some("opaque-live".into());
+        let before = std::fs::read(&f.home).unwrap();
+
+        let error = switch(&f, "work").unwrap_err();
+
+        assert_eq!(
+            failure(&error),
+            Some(AccountFailure::UnidentifiedLogin),
+            "{error}"
+        );
+        assert_eq!(f.store.default.borrow().as_deref(), Some("opaque-live"));
+        let named = f.store.named.borrow();
+        assert_eq!(named[&f.accounts[0].config_dir()], WORK_SAVED);
+        assert_eq!(named[&f.accounts[1].config_dir()], PERSONAL_STALE);
+        assert_eq!(std::fs::read(&f.home).unwrap(), before);
+    }
+
+    /// `personal`'s slot holds `work`'s login and `work` has none, with `spare`
+    /// live: what a switch that believed a stale marker left behind.
+    fn stray_work_login(f: &mut Fixture) -> String {
+        with_spare(f);
+        let work_login = blob("uuid-work", "work-login");
+        *f.store.default.borrow_mut() = Some(blob("uuid-spare", "spare-live"));
+        let mut named = f.store.named.borrow_mut();
+        named.remove(&f.accounts[0].config_dir());
+        named.remove(&f.accounts[2].config_dir());
+        named.insert(f.accounts[1].config_dir(), work_login.clone());
+        work_login
+    }
+
+    #[test]
+    fn a_credential_saved_in_another_accounts_slot_goes_back_to_its_owner() {
+        let mut f = fixture();
+        let work_login = stray_work_login(&mut f);
+
+        // Asking for the account already in use changes no login, and still
+        // puts the stray credential back.
+        assert_eq!(
+            switch(&f, "spare").unwrap(),
+            CliSwitchOutcome::AlreadyActive
+        );
+        {
+            let named = f.store.named.borrow();
+            assert_eq!(named.get(&f.accounts[0].config_dir()), Some(&work_login));
+            assert!(!named.contains_key(&f.accounts[1].config_dir()));
+        }
+
+        assert_eq!(
+            switch(&f, "work").unwrap(),
+            CliSwitchOutcome::Switched {
+                outgoing: Some("spare".into())
+            }
+        );
+        assert_eq!(f.store.default.borrow().as_deref(), Some(&*work_login));
+    }
+
+    #[test]
+    fn a_failed_move_leaves_the_stray_credential_where_it_was() {
+        let mut f = fixture();
+        let work_login = stray_work_login(&mut f);
+        *f.store.fail_delete_named.borrow_mut() = Some(f.accounts[1].config_dir());
+
+        let error = switch(&f, "spare").unwrap_err();
+
+        assert!(
+            error.to_string().contains("injected delete failure"),
+            "{error}"
+        );
+        let named = f.store.named.borrow();
+        assert_eq!(named.get(&f.accounts[1].config_dir()), Some(&work_login));
+        assert!(!named.contains_key(&f.accounts[0].config_dir()));
+    }
+
+    #[test]
+    fn a_target_slot_holding_another_accounts_login_is_refused() {
+        // `personal` is live, so its copy in `work`'s slot has nowhere to go.
+        let f = fixture();
+        let stray = blob("uuid-personal", "personal-copy");
+        f.store
+            .named
+            .borrow_mut()
+            .insert(f.accounts[0].config_dir(), stray.clone());
+        let before = std::fs::read(&f.home).unwrap();
+
+        let error = switch(&f, "work").unwrap_err();
+
+        assert_eq!(
+            failure(&error),
+            Some(AccountFailure::WrongAccount),
+            "{error}"
+        );
+        assert_eq!(f.store.default.borrow().as_deref(), Some(PERSONAL_LIVE));
+        let named = f.store.named.borrow();
+        assert_eq!(named[&f.accounts[0].config_dir()], stray);
+        assert_eq!(named[&f.accounts[1].config_dir()], PERSONAL_STALE);
+        assert_eq!(std::fs::read(&f.home).unwrap(), before);
+    }
+
+    #[test]
+    fn a_foreign_credential_in_the_active_accounts_slot_is_not_a_duplicate() {
+        let f = fixture();
+        let stranger = blob("uuid-stranger", "stranger-saved");
+        f.store
+            .named
+            .borrow_mut()
+            .insert(f.accounts[1].config_dir(), stranger.clone());
+
+        assert_eq!(
+            switch(&f, "personal").unwrap(),
+            CliSwitchOutcome::AlreadyActive
+        );
+        assert_eq!(
+            f.store.named.borrow()[&f.accounts[1].config_dir()],
+            stranger
+        );
+    }
+
+    #[test]
+    fn a_label_keeps_its_account_after_a_sign_in_rewrites_its_marker() {
+        let f = fixture();
+        record_identities(&f.accounts);
+        // A sign-in in `work`'s directory that the browser authorized as
+        // `personal`.
+        write(
+            &f.accounts[0].config_dir().join(CLAUDE_JSON),
+            &marker("uuid-personal", "me@personal.test"),
+        );
+
+        assert_eq!(
+            account_identity(&f.accounts[0]).as_deref(),
+            Some("uuid-work")
+        );
+        assert_eq!(
+            account_email(&f.accounts[0]).as_deref(),
+            Some("me@work.test")
+        );
+        assert_eq!(
+            resolve_active_label(Some(PERSONAL_LIVE), &f.accounts).as_deref(),
+            Some("personal")
+        );
+        // The home marker written by a switch names the recorded account too.
+        assert_eq!(
+            switch(&f, "work").unwrap(),
+            CliSwitchOutcome::Switched {
+                outgoing: Some("personal".into())
+            }
+        );
+        assert_eq!(account_uuid_in(&f.home).as_deref(), Some("uuid-work"));
+    }
+
+    #[test]
+    fn two_labels_on_one_account_resolve_to_neither() {
+        let f = fixture();
+        write(
+            &f.accounts[0].config_dir().join(CLAUDE_JSON),
+            &marker("uuid-personal", "me@personal.test"),
+        );
+
+        assert_eq!(resolve_active_label(Some(PERSONAL_LIVE), &f.accounts), None);
+        record_identities(&f.accounts);
+        assert!(!identity_path(&f.accounts[0].config_dir()).exists());
+        assert!(!identity_path(&f.accounts[1].config_dir()).exists());
+        assert_eq!(
+            failure(&switch(&f, "work").unwrap_err()),
+            Some(AccountFailure::InvalidState)
+        );
+    }
+
     #[test]
     fn the_live_login_resolves_to_its_label() {
         let f = fixture();
         assert_eq!(
-            resolve_active_label(&f.home, &f.accounts).as_deref(),
+            resolve_active_label(Some(PERSONAL_LIVE), &f.accounts).as_deref(),
             Some("personal")
         );
         assert_eq!(
-            account_email_in(&f.home).as_deref(),
+            account_email(&f.accounts[1]).as_deref(),
             Some("me@personal.test")
         );
     }
@@ -594,6 +1075,8 @@ mod tests {
     fn adopting_marks_the_live_login_and_leaves_the_credential_alone() {
         let f = fixture();
         write(&f.home, &marker("uuid-main", "me@main.test"));
+        let main_live = blob("uuid-main", "main-live");
+        *f.store.default.borrow_mut() = Some(main_live.clone());
         let main = AnthropicAccount {
             label: "main".into(),
             credentials_path: f
@@ -607,14 +1090,12 @@ mod tests {
         accounts.push(main.clone());
         adopt_current(&f.home, &accounts, &main, &f.store).unwrap();
         assert_eq!(
-            resolve_active_label(&f.home, &accounts).as_deref(),
+            resolve_active_label(Some(&main_live), &accounts).as_deref(),
             Some("main")
         );
+        assert_eq!(account_email(&main).as_deref(), Some("me@main.test"));
         assert_eq!(f.store.read_named(&main.config_dir()).unwrap(), None);
-        assert_eq!(
-            f.store.read_default().unwrap().as_deref(),
-            Some("personal-live")
-        );
+        assert_eq!(f.store.read_default().unwrap(), Some(main_live));
     }
 
     #[test]
@@ -636,7 +1117,7 @@ mod tests {
     #[test]
     fn adopting_refuses_an_account_with_its_own_login() {
         let f = fixture();
-        write(&f.home, &marker("uuid-main", "me@main.test"));
+        *f.store.default.borrow_mut() = Some(blob("uuid-main", "main-live"));
         let error = adopt_current(&f.home, &f.accounts, &f.accounts[0], &f.store).unwrap_err();
         assert!(error.to_string().contains("two copies"), "{error}");
     }
@@ -644,15 +1125,23 @@ mod tests {
     #[test]
     fn an_unmanaged_login_resolves_to_nothing() {
         let f = fixture();
-        write(&f.home, &marker("uuid-stranger", "who@example.test"));
-        assert_eq!(resolve_active_label(&f.home, &f.accounts), None);
+        let stranger = blob("uuid-stranger", "stranger-live");
+        assert_eq!(resolve_active_label(Some(&stranger), &f.accounts), None);
+    }
+
+    #[test]
+    fn an_empty_or_unidentified_default_slot_resolves_to_nothing() {
+        let f = fixture();
+        assert_eq!(resolve_active_label(None, &f.accounts), None);
+        assert_eq!(resolve_active_label(Some("opaque"), &f.accounts), None);
+        let unnamed = r#"{"claudeAiOauth":{"accessToken":"x"}}"#;
+        assert_eq!(resolve_active_label(Some(unnamed), &f.accounts), None);
     }
 
     #[test]
     fn a_missing_marker_file_is_not_an_error() {
         let f = fixture();
         std::fs::remove_file(&f.home).unwrap();
-        assert_eq!(resolve_active_label(&f.home, &f.accounts), None);
         assert_eq!(account_uuid_in(&f.home), None);
     }
 
@@ -679,9 +1168,9 @@ mod tests {
         // the default slot was overwritten.
         assert_eq!(
             f.store.named.borrow()[&f.accounts[1].config_dir()],
-            "personal-live"
+            PERSONAL_LIVE
         );
-        assert_eq!(f.store.default.borrow().as_deref(), Some("work-saved"));
+        assert_eq!(f.store.default.borrow().as_deref(), Some(WORK_SAVED));
         assert!(
             !f.store
                 .named
@@ -690,9 +1179,10 @@ mod tests {
             "the active credential must be moved, not left as a rotating-token copy"
         );
         assert_eq!(
-            resolve_active_label(&f.home, &f.accounts).as_deref(),
+            resolve_active_label(f.store.default.borrow().as_deref(), &f.accounts).as_deref(),
             Some("work")
         );
+        assert_eq!(account_uuid_in(&f.home).as_deref(), Some("uuid-work"));
     }
 
     #[test]
@@ -707,7 +1197,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(outcome, CliSwitchOutcome::RemovedDuplicate);
-        assert_eq!(f.store.default.borrow().as_deref(), Some("personal-live"));
+        assert_eq!(f.store.default.borrow().as_deref(), Some(PERSONAL_LIVE));
         assert!(
             !f.store
                 .named
@@ -741,7 +1231,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome, CliSwitchOutcome::RepairedActive);
-        assert_eq!(f.store.default.borrow().as_deref(), Some("personal-stale"));
+        assert_eq!(f.store.default.borrow().as_deref(), Some(PERSONAL_STALE));
         assert!(
             !f.store
                 .named
@@ -773,14 +1263,15 @@ mod tests {
                 outgoing: Some("personal".into())
             }
         );
-        assert_eq!(f.store.default.borrow().as_deref(), Some("personal-live"));
+        assert_eq!(f.store.default.borrow().as_deref(), Some(PERSONAL_LIVE));
         assert_eq!(std::fs::read(&f.home).unwrap(), before);
     }
 
     #[test]
     fn an_unmanaged_live_login_is_refused_without_force() {
         let f = fixture();
-        write(&f.home, &marker("uuid-stranger", "who@example.test"));
+        let stranger = blob("uuid-stranger", "stranger-live");
+        *f.store.default.borrow_mut() = Some(stranger.clone());
 
         let error = switch_cli_account(
             &f.home,
@@ -791,7 +1282,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("not managed here"), "{error}");
-        assert_eq!(f.store.default.borrow().as_deref(), Some("personal-live"));
+        assert_eq!(f.store.default.borrow().as_deref(), Some(&*stranger));
 
         switch_cli_account(
             &f.home,
@@ -804,7 +1295,7 @@ mod tests {
             &f.store,
         )
         .unwrap();
-        assert_eq!(f.store.default.borrow().as_deref(), Some("work-saved"));
+        assert_eq!(f.store.default.borrow().as_deref(), Some(WORK_SAVED));
         assert!(
             !f.store
                 .named
@@ -828,11 +1319,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(f.store.default.borrow().as_deref(), Some("work-saved"));
-        assert_eq!(
-            resolve_active_label(&f.home, &f.accounts).as_deref(),
-            Some("work")
-        );
+        assert_eq!(f.store.default.borrow().as_deref(), Some(WORK_SAVED));
+        assert_eq!(account_uuid_in(&f.home).as_deref(), Some("uuid-work"));
     }
 
     #[test]
@@ -851,7 +1339,7 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("identity marker"), "{error}");
-        assert_eq!(f.store.default.borrow().as_deref(), Some("personal-live"));
+        assert_eq!(f.store.default.borrow().as_deref(), Some(PERSONAL_LIVE));
         assert_eq!(std::fs::read(&f.home).unwrap(), before);
     }
 
@@ -874,14 +1362,14 @@ mod tests {
             error.to_string().contains("injected delete failure"),
             "{error}"
         );
-        assert_eq!(f.store.default.borrow().as_deref(), Some("personal-live"));
+        assert_eq!(f.store.default.borrow().as_deref(), Some(PERSONAL_LIVE));
         assert_eq!(
             f.store.named.borrow()[&f.accounts[0].config_dir()],
-            "work-saved"
+            WORK_SAVED
         );
         assert_eq!(
             f.store.named.borrow()[&f.accounts[1].config_dir()],
-            "personal-stale"
+            PERSONAL_STALE
         );
         assert_eq!(std::fs::read(&f.home).unwrap(), before_marker);
     }
@@ -906,7 +1394,7 @@ mod tests {
             error.to_string().contains("never been signed in"),
             "{error}"
         );
-        assert_eq!(f.store.default.borrow().as_deref(), Some("personal-live"));
+        assert_eq!(f.store.default.borrow().as_deref(), Some(PERSONAL_LIVE));
     }
 
     #[test]

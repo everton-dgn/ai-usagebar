@@ -296,6 +296,15 @@ assert.equal(claudeCards[0].rows.length, 0);
       signIn,
     );
   }
+  // A working login filed under the wrong account is not an expired one.
+  {
+    const error = 'credentials error: the Claude Code login saved for this account belongs to another account';
+    const explained = explainError(error, { signIn: 'unused' });
+    assert.equal(explained.title, 'Saved sign-in is for another account');
+    assert.match(explained.hint, /needs its own Claude Code sign-in/);
+    assert.equal(explained.action, undefined);
+    assert.doesNotMatch(explained.hint, TERMINAL);
+  }
   // The rotated-token messages from anthropic::fetch and openai::fetch reach
   // the card as a warning. They name no command and still read as a sign-in.
   for (const [signIn, error] of [

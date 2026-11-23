@@ -14,6 +14,10 @@ pub enum AccountFailure {
     UnmanagedLogin,
     MissingLogin,
     InvalidState,
+    /// The credential saved for the account was issued to another one.
+    WrongAccount,
+    /// The live login does not say which account it belongs to.
+    UnidentifiedLogin,
     StorageUnavailable,
     LockUnavailable,
 }

@@ -12,4 +12,4 @@ pub mod keychain;
 pub mod oauth;
 pub mod types;
 
-pub use fetch::{FetchOutcome, fetch_snapshot};
+pub use fetch::{FetchOutcome, fetch_snapshot, fetch_snapshot_as};

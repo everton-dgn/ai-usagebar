@@ -55,6 +55,26 @@ pub async fn fetch_snapshot(
     endpoints: &Endpoints,
     cache_ttl: Duration,
 ) -> Result<FetchOutcome> {
+    fetch_snapshot_as(client, creds_target, None, cache, endpoints, cache_ttl).await
+}
+
+/// What a managed account's entry reports when the credential in its slot was
+/// issued to someone else. The popover classifies it by "belongs to another
+/// account".
+pub const WRONG_ACCOUNT_MESSAGE: &str =
+    "the Claude Code login saved for this account belongs to another account";
+
+/// [`fetch_snapshot`] for an entry that is one known account (`account_uuid`).
+/// A credential that names anyone else is refused before the cache is read or
+/// the token refreshed, so the entry never shows another account's usage.
+pub async fn fetch_snapshot_as(
+    client: &reqwest::Client,
+    creds_target: &creds::CredsTarget,
+    account_uuid: Option<&str>,
+    cache: &Cache,
+    endpoints: &Endpoints,
+    cache_ttl: Duration,
+) -> Result<FetchOutcome> {
     cache.ensure_dir()?;
     let _lock = acquire_lock_async(&cache.lock_path(), LOCK_TIMEOUT).await?;
     // Desktop snapshots and account switching can mutate the same rotating
@@ -68,6 +88,12 @@ pub async fn fetch_snapshot(
     // the creds actually came from (file vs macOS Keychain) so the refresh
     // write-back follows the same source instead of forking a stale copy.
     let (mut creds, creds_source) = creds::resolve(creds_target)?;
+    if let (Some(expected), Some(actual)) =
+        (account_uuid, creds.claude_ai_oauth.account_uuid.as_deref())
+        && expected != actual
+    {
+        return Err(AppError::Credentials(WRONG_ACCOUNT_MESSAGE.into()));
+    }
     let plan_label = creds.claude_ai_oauth.plan_label();
 
     // Corrupt fresh cache falls through to a live fetch rather than returning
@@ -623,6 +649,49 @@ mod tests {
         assert_eq!(outcome.snapshot.session.utilization_pct, 42);
         assert_ne!(outcome.snapshot.plan, "Unknown");
         assert!(!outcome.stale);
+    }
+
+    #[tokio::test]
+    async fn a_credential_issued_to_another_account_reports_no_usage() {
+        // The entry is `uuid-work`; its slot holds `uuid-personal`'s login and
+        // its cache holds a fresh reading. Neither may be shown as `work`'s.
+        let (_td, cache) = cache_fixture();
+        cache
+            .write_payload(br#"{"five_hour":{"utilization":42},"seven_day":{"utilization":15}}"#)
+            .unwrap();
+        let mut creds = NamedTempFile::new().unwrap();
+        creds
+            .write_all(
+                br#"{"claudeAiOauth":{"accessToken":"AT","refreshToken":"RT",
+                    "expiresAt":99999999999999,"accountUuid":"uuid-personal"}}"#,
+            )
+            .unwrap();
+        creds.flush().unwrap();
+        let target = creds::CredsTarget::Explicit(creds.path().to_path_buf());
+        let client = reqwest::Client::new();
+        let endpoints = Endpoints {
+            usage: "http://localhost:1/should-not-be-called".into(),
+            token: "http://localhost:1/should-not-be-called".into(),
+        };
+        let fetch = |account: Option<&'static str>| {
+            fetch_snapshot_as(
+                &client,
+                &target,
+                account,
+                &cache,
+                &endpoints,
+                Duration::from_secs(3600),
+            )
+        };
+
+        let error = fetch(Some("uuid-work")).await.unwrap_err();
+        assert!(error.to_string().contains(WRONG_ACCOUNT_MESSAGE), "{error}");
+
+        // Its own account, and an entry tied to no account, read as before.
+        for account in [Some("uuid-personal"), None] {
+            let outcome = fetch(account).await.unwrap();
+            assert_eq!(outcome.snapshot.session.utilization_pct, 42);
+        }
     }
 
     #[tokio::test]

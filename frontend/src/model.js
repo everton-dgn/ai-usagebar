@@ -1607,6 +1607,14 @@ export function explainError(text, entry) {
       hint: retry ? "Retrying automatically in " + retry[1] + "." : "Try Refresh in a minute.",
     };
   }
+  // The slot holds a working login, just not this account's: "expired" would
+  // send the user to renew the wrong thing.
+  if (/belongs to another account/i.test(raw)) {
+    return {
+      title: "Saved sign-in is for another account",
+      hint: "This account needs its own Claude Code sign-in. Signing in is not available in this app.",
+    };
+  }
   // A server failure stays an outage even when its page says "sign in".
   if (SIGN_IN_NEEDED.test(raw) && !/HTTP 5\d\d/i.test(raw)) {
     return { title: "Sign-in expired", hint: signInHint(entry) };

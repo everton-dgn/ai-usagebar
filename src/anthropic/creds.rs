@@ -41,6 +41,21 @@ pub struct OauthCreds {
     /// drop information when we write back after a refresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<serde_json::Value>,
+    /// The account this credential was issued to, as Claude Code records it.
+    /// WHY: it is the only proof of whose login a slot holds; dropping it on a
+    /// refresh write-back left the credential naming nobody.
+    #[serde(
+        rename = "accountUuid",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub account_uuid: Option<String>,
+    #[serde(
+        rename = "organizationUuid",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub organization_uuid: Option<String>,
 }
 
 fn de_ms_epoch<'de, D>(d: D) -> std::result::Result<i64, D::Error>
@@ -648,6 +663,8 @@ mod tests {
             subscription_type: "max".into(),
             rate_limit_tier: "".into(),
             scopes: None,
+            account_uuid: None,
+            organization_uuid: None,
         };
         let doc = merge_oauth(Some(existing), &new_oauth).unwrap();
         assert_eq!(doc["mcpOAuth"]["x"], 1);
@@ -664,6 +681,8 @@ mod tests {
             subscription_type: "pro".into(),
             rate_limit_tier: "".into(),
             scopes: None,
+            account_uuid: None,
+            organization_uuid: None,
         };
         // None → fresh object.
         let doc = merge_oauth(None, &new_oauth).unwrap();
@@ -691,6 +710,8 @@ mod tests {
             subscription_type: "pro".into(),
             rate_limit_tier: "".into(),
             scopes: creds.claude_ai_oauth.scopes.clone(),
+            account_uuid: None,
+            organization_uuid: None,
         };
         write_back(&path, &new_oauth).unwrap();
         // Re-read & verify the unknown field survived.
@@ -699,5 +720,30 @@ mod tests {
         assert_eq!(v["someOtherField"], "keep me");
         assert_eq!(v["claudeAiOauth"]["accessToken"], "NEW");
         assert_eq!(v["claudeAiOauth"]["expiresAt"], 1234);
+    }
+
+    #[test]
+    fn a_refresh_write_back_keeps_the_account_the_credential_names() {
+        let (_dir, path) = write_creds_closed(
+            r#"{"claudeAiOauth":{
+                "accessToken":"OLD","refreshToken":"OLD","expiresAt": 0,
+                "accountUuid":"uuid-work","organizationUuid":"org-work"
+            }}"#,
+        );
+        // What the fetch does after a refresh: new tokens into the creds it
+        // read, then the whole struct back to where it came from.
+        let mut oauth = read_from(&path).unwrap().claude_ai_oauth;
+        oauth.access_token = "NEW".into();
+        oauth.refresh_token = "NEW_RT".into();
+        write_back(&path, &oauth).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            crate::anthropic::cli_account::blob_account_uuid(&raw).as_deref(),
+            Some("uuid-work")
+        );
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["claudeAiOauth"]["organizationUuid"], "org-work");
+        assert_eq!(v["claudeAiOauth"]["refreshToken"], "NEW_RT");
     }
 }

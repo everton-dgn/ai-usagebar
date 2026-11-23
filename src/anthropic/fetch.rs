@@ -21,7 +21,7 @@ pub const USAGE_BETA_HEADER: &str = "oauth-2025-04-20";
 /// `claude-code/<version>` (what the official client sends) is fine.
 pub const USAGE_USER_AGENT: &str = "claude-code/2.1.183";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
-const REFRESH_TIMEOUT: Duration = Duration::from_secs(25);
+pub(super) const REFRESH_TIMEOUT: Duration = Duration::from_secs(25);
 const LOCK_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Endpoints (parameterized for tests).

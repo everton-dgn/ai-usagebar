@@ -72,8 +72,11 @@ criado a partir de um login já errado, remova o arquivo
 recriado com a identidade que a pasta tiver naquele momento.
 
 A renovação de token e a troca de conta usam o mesmo bloqueio. Uma troca pedida
-enquanto um token é renovado pode responder que o acesso às contas está
-reservado; basta repetir em seguida.
+enquanto um token é renovado espera a renovação terminar, por até 30 segundos,
+com a estrela girando.
+
+Uma conta sem nenhuma sessão salva, no Chaves ou em arquivo, aparece como
+sessão expirada, com o aviso de que precisa de uma sessão do Claude Code.
 
 ## Tipos de fonte
 

@@ -43,6 +43,15 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
   conta escolhida sem sessão.
 - A troca relê o arquivo `~/.claude.json` imediatamente antes de gravá-lo, para
   não descartar o que as sessões abertas do Claude Code gravaram no intervalo.
+- A renovação de token preserva os campos da sessão que o aplicativo não usa,
+  como a data de validade do login (`refreshTokenExpiresAt`). Antes, cada
+  renovação apagava esses campos.
+- A troca de conta espera uma renovação de token em andamento terminar, por
+  até 30 segundos. Antes, desistia em 2 segundos com o aviso de acesso
+  reservado.
+- Conta Claude sem nenhuma sessão salva mostra que precisa de uma sessão do
+  Claude Code. Antes, o cartão dizia que não foi possível ler os arquivos
+  locais.
 - Falha na troca de conta pela estrela do card mostra o motivo dentro do
   próprio card, nas vistas de lista e de abas. Antes, a estrela só ficava
   vermelha e o motivo aparecia apenas ao passar o cursor. Para uma conta sem

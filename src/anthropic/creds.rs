@@ -251,8 +251,13 @@ fn read_default_with(
 /// |----------------------------|------------------|--------------------|
 /// | usable                     | (not consulted)  | keychain           |
 /// | absent/unusable/unparsable | readable         | file               |
-/// | absent/unusable/unparsable | missing/broken   | the file's error   |
+/// | absent/unusable/unparsable | missing          | sign-in is needed  |
+/// | absent/unusable/unparsable | broken           | the file's error   |
 /// | **unreadable** (locked/ACL)| any              | the Keychain error |
+///
+/// The missing row is its own answer because on macOS the file is never
+/// written: "no such file" named a path the user has no reason to know, for
+/// an account that simply has no login here.
 ///
 /// The unreadable row follows [`read_default_with`]'s reasoning: a locked
 /// Keychain is not "no credentials", and silently dropping to a stale file
@@ -272,8 +277,18 @@ fn read_named_with(
     {
         return Ok((kc, CredsSource::NamedKeychain(config_dir.to_path_buf())));
     }
-    Ok((read_from(path)?, CredsSource::File(path.to_path_buf())))
+    match read_from(path) {
+        Ok(file) => Ok((file, CredsSource::File(path.to_path_buf()))),
+        Err(AppError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            Err(AppError::Credentials(NO_SAVED_LOGIN_MESSAGE.into()))
+        }
+        Err(error) => Err(error),
+    }
 }
+
+/// A named account with no usable login in the Keychain or on disk. The
+/// popover classifies it by "sign-in is needed".
+pub const NO_SAVED_LOGIN_MESSAGE: &str = "no saved Claude Code login for this account; a Claude Code sign-in is needed, which this app cannot do";
 
 /// Parse a credentials JSON blob from any source (`source` only labels errors).
 fn parse(raw: &str, source: &str) -> Result<CredentialsFile> {
@@ -285,9 +300,15 @@ fn parse(raw: &str, source: &str) -> Result<CredentialsFile> {
 }
 
 /// Merge a refreshed `claudeAiOauth` into an existing credentials document
-/// (or a fresh `{}`), preserving any unknown top-level fields the Claude CLI
-/// keeps there (e.g. `mcpOAuth`). Pure so the merge is unit-testable without
+/// (or a fresh `{}`), preserving what this app does not model: unknown
+/// top-level fields the Claude CLI keeps there (e.g. `mcpOAuth`) and unknown
+/// fields of `claudeAiOauth` itself (`refreshTokenExpiresAt`,
+/// `subscriptionTypeSource`, …). Pure so the merge is unit-testable without
 /// touching disk or the Keychain.
+///
+/// WHY: `refreshTokenExpiresAt` is the end of the whole sign-in. Claude Code
+/// keeps the earlier of the stored and the new value on a refresh and never
+/// extends it, so the stored value stays right and dropping it lost the date.
 fn merge_oauth(existing: Option<&str>, new_oauth: &OauthCreds) -> Result<serde_json::Value> {
     let mut doc: serde_json::Value = existing
         .and_then(|s| serde_json::from_str(s).ok())
@@ -295,10 +316,22 @@ fn merge_oauth(existing: Option<&str>, new_oauth: &OauthCreds) -> Result<serde_j
     if !doc.is_object() {
         doc = serde_json::json!({});
     }
-    doc.as_object_mut().expect("just ensured object").insert(
-        "claudeAiOauth".into(),
-        serde_json::to_value(new_oauth).map_err(AppError::Json)?,
-    );
+    let root = doc.as_object_mut().expect("just ensured object");
+    let mut oauth = match root.remove("claudeAiOauth") {
+        Some(serde_json::Value::Object(stored)) => stored,
+        _ => serde_json::Map::new(),
+    };
+    // WHY: who a credential belongs to comes from the credential that was
+    // read. What is stored now may be another login, and inheriting its
+    // account would label tokens of an unknown owner as that account's.
+    oauth.remove("accountUuid");
+    oauth.remove("organizationUuid");
+    if let serde_json::Value::Object(refreshed) =
+        serde_json::to_value(new_oauth).map_err(AppError::Json)?
+    {
+        oauth.extend(refreshed);
+    }
+    root.insert("claudeAiOauth".into(), serde_json::Value::Object(oauth));
     Ok(doc)
 }
 
@@ -329,14 +362,18 @@ fn refreshed_slot(existing: Option<&str>, new_oauth: &OauthCreds) -> Result<Stri
 }
 
 /// A Keychain slot can change hands between a read and its write-back: an
-/// account switch, or a sign-in. Refreshed tokens are never written over a
-/// credential that names a different account than the one they were issued to.
+/// account switch, or a sign-in. Refreshed tokens are written only over a
+/// slot that is empty, names nobody, or names the account they were issued to.
 fn refuse_another_accounts_slot(existing: Option<&str>, new_oauth: &OauthCreds) -> Result<()> {
     let in_slot = existing.and_then(super::cli_account::blob_account_uuid);
-    match (in_slot.as_deref(), new_oauth.account_uuid.as_deref()) {
-        (Some(slot), Some(ours)) if slot != ours => Err(AppError::Credentials(
-            "the credential slot now holds another account's login, so the refreshed token \
-             was not written over it"
+    let ours = new_oauth
+        .account_uuid
+        .as_deref()
+        .filter(|uuid| !uuid.is_empty());
+    match in_slot.as_deref() {
+        Some(slot) if ours != Some(slot) => Err(AppError::Credentials(
+            "the credential slot now holds a different login, so the refreshed token was not \
+             written over it"
                 .into(),
         )),
         _ => Ok(()),
@@ -628,11 +665,29 @@ mod tests {
     }
 
     #[test]
-    fn named_read_both_missing_surfaces_the_file_error() {
+    fn named_read_without_any_login_asks_for_a_sign_in() {
+        // No usable Keychain item and no file: the account has no login here.
+        // "No such file" would name a file macOS never writes.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("missing.json");
+        for keychain in [None, Some(UNUSABLE), Some("not json")] {
+            let err = read_named_with(&path, dir.path(), |_| Ok(keychain.map(str::to_string)))
+                .unwrap_err();
+            assert!(
+                matches!(err, AppError::Credentials(ref m) if m == NO_SAVED_LOGIN_MESSAGE),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_read_unreadable_file_keeps_its_own_error() {
+        // A file that is there and cannot be read is not "never signed in".
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("a-directory");
+        std::fs::create_dir(&path).unwrap();
         let err = read_named_with(&path, dir.path(), |_| Ok(None)).unwrap_err();
-        assert!(matches!(err, AppError::Io { .. }));
+        assert!(matches!(err, AppError::Io { .. }), "{err}");
     }
 
     #[test]
@@ -739,6 +794,54 @@ mod tests {
         assert_eq!(v["claudeAiOauth"]["expiresAt"], 1234);
     }
 
+    /// A credential as Claude Code stores it: ten OAuth fields beside the MCP
+    /// state.
+    const REAL_SHAPED: &str = r#"{"claudeAiOauth":{
+        "accessToken":"OLD","refreshToken":"OLD_RT","expiresAt":1000,
+        "refreshTokenExpiresAt":9000,"scopes":["user:inference","user:profile"],
+        "subscriptionType":"max","subscriptionTypeSource":"sign_in",
+        "rateLimitTier":"default_claude_max_20x",
+        "accountUuid":"uuid-work","organizationUuid":"org-work"
+    },"mcpOAuth":{"server":{"accessToken":"mcp"}}}"#;
+
+    #[test]
+    fn a_refresh_keeps_the_fields_this_app_does_not_model() {
+        let mut oauth = parse(REAL_SHAPED, "fixture").unwrap().claude_ai_oauth;
+        oauth.access_token = "NEW".into();
+        oauth.refresh_token = "NEW_RT".into();
+        oauth.expires_at_ms = 2000;
+
+        let written = refreshed_slot(Some(REAL_SHAPED), &oauth).unwrap();
+
+        let written: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let mut expected: serde_json::Value = serde_json::from_str(REAL_SHAPED).unwrap();
+        expected["claudeAiOauth"]["accessToken"] = "NEW".into();
+        expected["claudeAiOauth"]["refreshToken"] = "NEW_RT".into();
+        expected["claudeAiOauth"]["expiresAt"] = 2000.into();
+        assert_eq!(written, expected);
+    }
+
+    #[test]
+    fn a_refresh_never_takes_the_account_from_what_the_slot_holds() {
+        // The credential that was read named nobody; what is stored now names
+        // an account. The refreshed tokens are not proven to be that account's.
+        let mut unnamed = parse(REAL_SHAPED, "fixture").unwrap().claude_ai_oauth;
+        unnamed.refresh_token = "NEW_RT".into();
+        unnamed.account_uuid = None;
+        unnamed.organization_uuid = None;
+
+        // A Keychain slot is not written at all.
+        let error = refreshed_slot(Some(REAL_SHAPED), &unnamed).unwrap_err();
+        assert!(error.to_string().contains("a different login"), "{error}");
+
+        // A file is, without the account it used to name.
+        let doc = merge_oauth(Some(REAL_SHAPED), &unnamed).unwrap();
+        assert_eq!(doc["claudeAiOauth"]["refreshToken"], "NEW_RT");
+        assert!(doc["claudeAiOauth"].get("accountUuid").is_none());
+        assert!(doc["claudeAiOauth"].get("organizationUuid").is_none());
+        assert_eq!(doc["claudeAiOauth"]["refreshTokenExpiresAt"], 9000);
+    }
+
     #[test]
     fn refreshed_tokens_are_not_written_over_another_accounts_login() {
         let work = OauthCreds {
@@ -756,10 +859,7 @@ mod tests {
         };
 
         let error = refreshed_slot(Some(&slot("uuid-personal")), &work).unwrap_err();
-        assert!(
-            error.to_string().contains("another account's login"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("a different login"), "{error}");
 
         // Its own slot, an emptied one, and one that names nobody are
         // rewritten with the new tokens, still naming the account.

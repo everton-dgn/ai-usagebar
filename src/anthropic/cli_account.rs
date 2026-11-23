@@ -43,6 +43,13 @@ use crate::error::{AccountFailure, AppError, Result};
 /// `oauthAccount` identity marker (uuid, email, org) — never a token.
 const CLAUDE_JSON: &str = ".claude.json";
 
+/// How long a switch waits for the credential lock.
+///
+/// WHY: a usage fetch holds that lock while it refreshes a token. A shorter
+/// wait refused every switch asked for during a refresh.
+const SWITCH_LOCK_WAIT: Duration = Duration::from_secs(30);
+const _: () = assert!(SWITCH_LOCK_WAIT.as_secs() > super::fetch::REFRESH_TIMEOUT.as_secs());
+
 /// The lock every mutation of the CLI's credential slots holds: a switch, an
 /// adoption, and a fetch from reading a credential until its refreshed tokens
 /// are written back.
@@ -291,7 +298,7 @@ pub fn switch_cli_account(
     store: &dyn CredentialStore,
 ) -> Result<CliSwitchOutcome> {
     let lock_path = switch_lock_path(home_claude_json);
-    let _lock = crate::cache::acquire_lock(&lock_path, Duration::from_secs(2))
+    let _lock = crate::cache::acquire_lock(&lock_path, SWITCH_LOCK_WAIT)
         .map_err(|error| error.for_account(AccountFailure::LockUnavailable))?;
 
     let target = accounts
@@ -1143,6 +1150,37 @@ mod tests {
         let named = f.store.named.borrow();
         assert_eq!(named.get(&f.accounts[0].config_dir()), Some(&work_login));
         assert!(!named.contains_key(&f.accounts[1].config_dir()));
+    }
+
+    #[test]
+    fn a_switch_waits_for_a_token_refresh_holding_the_lock() {
+        // A usage fetch holds this lock while it refreshes a token. 2.2 s is
+        // longer than a switch used to wait before giving up.
+        let f = fixture();
+        let lock_path = switch_lock_path(&f.home);
+        let (held, ready) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let guard = crate::cache::acquire_lock(&lock_path, Duration::from_secs(1)).unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(2200));
+            drop(guard);
+        });
+        ready.recv().unwrap();
+        let started = std::time::Instant::now();
+
+        let outcome = switch(&f, "work");
+
+        holder.join().unwrap();
+        assert_eq!(
+            outcome.unwrap(),
+            CliSwitchOutcome::Switched {
+                outgoing: Some("personal".into())
+            }
+        );
+        assert!(
+            started.elapsed() >= Duration::from_secs(2),
+            "the switch did not wait for the lock"
+        );
     }
 
     #[test]

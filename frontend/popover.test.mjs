@@ -341,6 +341,7 @@ assert.equal(claudeCards[0].rows.length, 0);
       'credentials error: Grok Build login file not found; a new Grok Build sign-in is needed, which this app cannot do', // supergrok/direct.rs
       'credentials error: GitHub Copilot: no token. A GitHub CLI sign-in with Copilot access is needed, which this app cannot do.', // copilot/credentials.rs
       'credentials error: could not parse Keychain: bad json. A new Claude Code sign-in is needed, which this app cannot do.', // anthropic/creds.rs
+      'credentials error: no saved Claude Code login for this account; a Claude Code sign-in is needed, which this app cannot do', // anthropic/creds.rs
       'credentials error: Cursor session token is empty. Sign in to the Cursor IDE again.', // cursor/db.rs
       'credentials error: Grok Bot token refresh was rejected; sign in to the Grok Bot desktop app again', // grokbot/fetch.rs
       "credentials error: Antigravity's saved Google session expired; open Antigravity to sign in again", // antigravity/cloud.rs

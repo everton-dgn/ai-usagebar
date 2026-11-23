@@ -483,19 +483,25 @@ fn run_detection(force: bool) {
 fn host_facts(config: &Config) -> HostFacts {
     let mut facts = HostFacts::new(env!("CARGO_PKG_VERSION"), startup::is_enabled());
     facts.refresh_secs = config.tray.refresh_minutes() * 60;
-    facts.accounts = account_facts(config);
+    // WHY: this runs on the window thread, and reading the Keychain there
+    // would hang the launch behind a macOS access prompt. The refresh worker
+    // fills in the active accounts with its first report.
+    facts.accounts = account_facts(config, false);
     facts.account_emails = account_emails(config);
     facts
 }
 
 /// Which Claude CLI and Codex logins are active, for the switch control on
 /// each account's card. Read fresh on every report, so a switch made from the
-/// terminal shows up too.
-fn account_facts(config: &Config) -> Vec<AccountSwitchFact> {
+/// terminal shows up too. `live` reads the Claude login from the Keychain;
+/// without it the Claude account in use is left unknown.
+fn account_facts(config: &Config, live: bool) -> Vec<AccountSwitchFact> {
     let mut out = Vec::new();
     let claude = config.anthropic.all_accounts();
     if config.anthropic.enabled && !claude.is_empty() {
-        let active = crate::anthropic::cli_account::active_label(&claude);
+        let active = live
+            .then(|| crate::anthropic::cli_account::active_label(&claude))
+            .flatten();
         out.push(AccountSwitchFact {
             vendor: "anthropic".into(),
             active,
@@ -585,7 +591,7 @@ fn refresh_account_facts(facts: &SharedFacts) {
     if config.anthropic.enabled {
         crate::anthropic::cli_account::record_identities(&config.anthropic.all_accounts());
     }
-    let fresh = account_facts(&config);
+    let fresh = account_facts(&config, true);
     let emails = account_emails(&config);
     with_facts(facts, |f| {
         f.account_emails = emails;

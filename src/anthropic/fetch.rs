@@ -64,9 +64,15 @@ pub async fn fetch_snapshot(
 pub const WRONG_ACCOUNT_MESSAGE: &str =
     "the Claude Code login saved for this account belongs to another account";
 
+/// The same refusal for a credential that does not say whose it is. The
+/// popover classifies it by "does not say which account".
+pub const UNIDENTIFIED_ACCOUNT_MESSAGE: &str =
+    "the Claude Code login saved for this account does not say which account it belongs to";
+
 /// [`fetch_snapshot`] for an entry that is one known account (`account_uuid`).
-/// A credential that names anyone else is refused before the cache is read or
-/// the token refreshed, so the entry never shows another account's usage.
+/// A credential not proven to be that account's is refused before the cache is
+/// read or the token refreshed, so the entry never shows another account's
+/// usage.
 pub async fn fetch_snapshot_as(
     client: &reqwest::Client,
     creds_target: &creds::CredsTarget,
@@ -88,11 +94,13 @@ pub async fn fetch_snapshot_as(
     // the creds actually came from (file vs macOS Keychain) so the refresh
     // write-back follows the same source instead of forking a stale copy.
     let (mut creds, creds_source) = creds::resolve(creds_target)?;
-    if let (Some(expected), Some(actual)) =
-        (account_uuid, creds.claude_ai_oauth.account_uuid.as_deref())
-        && expected != actual
-    {
-        return Err(AppError::Credentials(WRONG_ACCOUNT_MESSAGE.into()));
+    if let Some(expected) = account_uuid {
+        let named = creds.claude_ai_oauth.account_uuid.as_deref();
+        match named.filter(|uuid| !uuid.is_empty()) {
+            Some(actual) if actual == expected => {}
+            Some(_) => return Err(AppError::Credentials(WRONG_ACCOUNT_MESSAGE.into())),
+            None => return Err(AppError::Credentials(UNIDENTIFIED_ACCOUNT_MESSAGE.into())),
+        }
     }
     let plan_label = creds.claude_ai_oauth.plan_label();
 
@@ -249,13 +257,24 @@ async fn acquire_credential_lock(
     target: &creds::CredsTarget,
     timeout: Duration,
 ) -> Result<Option<LockGuard>> {
-    let creds::CredsTarget::Desktop(desktop) = target else {
-        return Ok(None);
+    let path = match target {
+        creds::CredsTarget::Desktop(desktop) => desktop
+            .coordination_lock()
+            .map(std::path::Path::to_path_buf),
+        // The CLI's own slots. An account switch moves them under this lock;
+        // without it a refresh in flight wrote one account's new tokens into
+        // a slot the switch had just given to another.
+        creds::CredsTarget::Default(_) | creds::CredsTarget::Named { .. } => {
+            super::cli_account::home_claude_json()
+                .ok()
+                .map(|home| super::cli_account::switch_lock_path(&home))
+        }
+        creds::CredsTarget::Explicit(_) => None,
     };
-    let Some(path) = desktop.coordination_lock() else {
-        return Ok(None);
-    };
-    acquire_lock_async(path, timeout).await.map(Some)
+    match path {
+        Some(path) => acquire_lock_async(&path, timeout).await.map(Some),
+        None => Ok(None),
+    }
 }
 
 fn reuse_cache(
@@ -692,6 +711,38 @@ mod tests {
             let outcome = fetch(account).await.unwrap();
             assert_eq!(outcome.snapshot.session.utilization_pct, 42);
         }
+    }
+
+    #[tokio::test]
+    async fn a_credential_that_names_no_account_reports_no_usage_for_one() {
+        let (_td, cache) = cache_fixture();
+        cache
+            .write_payload(br#"{"five_hour":{"utilization":42},"seven_day":{"utilization":15}}"#)
+            .unwrap();
+        // `future_creds` carries no account: the shape older builds left.
+        let creds = future_creds();
+        let target = creds::CredsTarget::Explicit(creds.path().to_path_buf());
+        let client = reqwest::Client::new();
+        let endpoints = Endpoints {
+            usage: "http://localhost:1/should-not-be-called".into(),
+            token: "http://localhost:1/should-not-be-called".into(),
+        };
+
+        let error = fetch_snapshot_as(
+            &client,
+            &target,
+            Some("uuid-work"),
+            &cache,
+            &endpoints,
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains(UNIDENTIFIED_ACCOUNT_MESSAGE),
+            "{error}"
+        );
     }
 
     #[tokio::test]

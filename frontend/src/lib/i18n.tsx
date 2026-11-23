@@ -144,6 +144,7 @@ const portuguese: Record<string, string> = {
   "Session": "Sessão",
   "Sign-in expired": "Sessão expirada",
   "Saved sign-in is for another account": "A sessão salva é de outra conta",
+  "Saved sign-in names no account": "A sessão salva não informa a conta",
   "This account needs its own Claude Code sign-in. Signing in is not available in this app.": "Esta conta precisa de uma sessão própria do Claude Code. O login não está disponível neste aplicativo.",
   "Needs a saved Claude Code sign-in on this Mac. Signing in is not available in this app.": "É necessária uma sessão do Claude Code já salva neste Mac. O login não está disponível neste aplicativo.",
   "Sign in to the Codex app on this Mac, then Refresh.": "Entre no aplicativo Codex neste Mac e depois clique em Atualizar.",

@@ -312,17 +312,34 @@ pub fn write_back_to(source: &CredsSource, new_oauth: &OauthCreds) -> Result<()>
         CredsSource::File(path) => write_back(path, new_oauth),
         CredsSource::Keychain => {
             let existing = keychain::read_raw()?;
+            refuse_another_accounts_slot(existing.as_deref(), new_oauth)?;
             let doc = merge_oauth(existing.as_deref(), new_oauth)?;
             let json = serde_json::to_string(&doc).map_err(AppError::Json)?;
             keychain::write_raw(&json)
         }
         CredsSource::NamedKeychain(config_dir) => {
             let existing = keychain::read_raw_for(config_dir)?;
+            refuse_another_accounts_slot(existing.as_deref(), new_oauth)?;
             let doc = merge_oauth(existing.as_deref(), new_oauth)?;
             let json = serde_json::to_string(&doc).map_err(AppError::Json)?;
             keychain::write_raw_for(config_dir, &json)
         }
         CredsSource::Desktop(writeback) => writeback.write(new_oauth),
+    }
+}
+
+/// A Keychain slot can change hands between a read and its write-back: an
+/// account switch, or a sign-in. Refreshed tokens are never written over a
+/// credential that names a different account than the one they were issued to.
+fn refuse_another_accounts_slot(existing: Option<&str>, new_oauth: &OauthCreds) -> Result<()> {
+    let in_slot = existing.and_then(super::cli_account::blob_account_uuid);
+    match (in_slot.as_deref(), new_oauth.account_uuid.as_deref()) {
+        (Some(slot), Some(ours)) if slot != ours => Err(AppError::Credentials(
+            "the credential slot now holds another account's login, so the refreshed token \
+             was not written over it"
+                .into(),
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -720,6 +737,36 @@ mod tests {
         assert_eq!(v["someOtherField"], "keep me");
         assert_eq!(v["claudeAiOauth"]["accessToken"], "NEW");
         assert_eq!(v["claudeAiOauth"]["expiresAt"], 1234);
+    }
+
+    #[test]
+    fn refreshed_tokens_are_not_written_over_another_accounts_login() {
+        let work = OauthCreds {
+            access_token: "NEW".into(),
+            refresh_token: "NEW_RT".into(),
+            expires_at_ms: 1,
+            subscription_type: String::new(),
+            rate_limit_tier: String::new(),
+            scopes: None,
+            account_uuid: Some("uuid-work".into()),
+            organization_uuid: None,
+        };
+        let slot = |uuid: &str| {
+            format!(r#"{{"claudeAiOauth":{{"accessToken":"x","accountUuid":"{uuid}"}}}}"#)
+        };
+
+        let error = refuse_another_accounts_slot(Some(&slot("uuid-personal")), &work).unwrap_err();
+        assert!(
+            error.to_string().contains("another account's login"),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("NEW"), "{error}");
+
+        // Its own slot, an emptied one, and one that names nobody are written.
+        assert!(refuse_another_accounts_slot(Some(&slot("uuid-work")), &work).is_ok());
+        assert!(refuse_another_accounts_slot(None, &work).is_ok());
+        let unnamed = r#"{"claudeAiOauth":{"accessToken":"x"}}"#;
+        assert!(refuse_another_accounts_slot(Some(unnamed), &work).is_ok());
     }
 
     #[test]

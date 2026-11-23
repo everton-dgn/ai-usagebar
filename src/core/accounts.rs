@@ -141,7 +141,7 @@ impl Failure {
                 "A sessão salva nesta conta pertence a outra conta. Esta conta precisa de um novo login no Claude Code, e conectar contas ainda não está disponível na interface."
             }
             Self::UnidentifiedLogin => {
-                "A sessão atual do Claude Code não informa a qual conta pertence. A troca foi cancelada para não guardar essa sessão na conta errada."
+                "Uma sessão do Claude Code envolvida nesta troca não informa a qual conta pertence. A troca foi cancelada para não guardar nem ativar uma sessão na conta errada. Um novo login no Claude Code regrava essa informação."
             }
             Self::SwitchFailed => {
                 "Não foi possível concluir a troca. Confira a conta ativa e o armazenamento das contas."

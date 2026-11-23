@@ -304,6 +304,12 @@ assert.equal(claudeCards[0].rows.length, 0);
     assert.match(explained.hint, /needs its own Claude Code sign-in/);
     assert.equal(explained.action, undefined);
     assert.doesNotMatch(explained.hint, TERMINAL);
+    const unnamed = explainError(
+      'credentials error: the Claude Code login saved for this account does not say which account it belongs to',
+      { signIn: 'unused' },
+    );
+    assert.equal(unnamed.title, 'Saved sign-in names no account');
+    assert.equal(unnamed.hint, explained.hint);
   }
   // The rotated-token messages from anthropic::fetch and openai::fetch reach
   // the card as a warning. They name no command and still read as a sign-in.

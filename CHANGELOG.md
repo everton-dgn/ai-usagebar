@@ -35,8 +35,14 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
   consumo alheio.
 - A renovação de token feita pelo aplicativo preserva o identificador de conta
   da sessão. Antes ele era apagado a cada renovação.
-- A troca recusa guardar uma sessão que não informa a conta e recusa ativar uma
-  conta cuja sessão salva pertence a outra, com o motivo no cartão.
+- A troca recusa guardar ou ativar uma sessão que não informa a conta e recusa
+  ativar uma conta cuja sessão salva pertence a outra, com o motivo no cartão.
+- A renovação de token das sessões do Claude Code passa a usar o mesmo bloqueio
+  da troca de conta e não grava mais por cima de uma sessão que pertence a
+  outra conta. Antes, uma renovação em andamento durante a troca podia deixar a
+  conta escolhida sem sessão.
+- A troca relê o arquivo `~/.claude.json` imediatamente antes de gravá-lo, para
+  não descartar o que as sessões abertas do Claude Code gravaram no intervalo.
 - Falha na troca de conta pela estrela do card mostra o motivo dentro do
   próprio card, nas vistas de lista e de abas. Antes, a estrela só ficava
   vermelha e o motivo aparecia apenas ao passar o cursor. Para uma conta sem

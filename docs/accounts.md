@@ -61,11 +61,19 @@ rótulo o token pertence é o identificador gravado nele.
 | Uma sessão salva está na pasta de outra conta | Na próxima troca ela volta para a conta dona, desde que essa conta esteja sem sessão |
 | A sessão salva de uma conta pertence a outra e não tem para onde ir | O cartão informa que a sessão é de outra conta e não mostra consumo; a troca para essa conta é recusada |
 | A sessão em uso não informa a conta | A estrela não aparece e a troca é cancelada, sem alterar nada |
+| A sessão salva de uma conta não informa a conta | O cartão avisa e não mostra consumo; a troca para essa conta é recusada |
 | Dois rótulos apontam a mesma conta | Nenhum dos dois é tratado como dono até a duplicidade ser desfeita |
 
 Uma conta sem sessão própria precisa de um novo login no Claude Code. Para um
 rótulo passar a representar outra conta, cadastre um rótulo novo: o registro
-existente mantém o rótulo antigo na conta original.
+existente mantém o rótulo antigo na conta original. Se o registro tiver sido
+criado a partir de um login já errado, remova o arquivo
+`.ai-usagebar-identity.json` da pasta da conta com o aplicativo fechado; ele é
+recriado com a identidade que a pasta tiver naquele momento.
+
+A renovação de token e a troca de conta usam o mesmo bloqueio. Uma troca pedida
+enquanto um token é renovado pode responder que o acesso às contas está
+reservado; basta repetir em seguida.
 
 ## Tipos de fonte
 

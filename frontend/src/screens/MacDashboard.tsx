@@ -9,7 +9,7 @@ import MdiPinOutline from "~icons/mdi/pin-outline";
 import MdiTab from "~icons/mdi/tab";
 import MdiViewAgendaOutline from "~icons/mdi/view-agenda-outline";
 import { ProviderIcon } from "@/components/ProviderIcon";
-import { AccountControl, ProviderLinks } from "@/components/ProviderSection";
+import { AccountControl, AccountSwitchFailure, ProviderLinks } from "@/components/ProviderSection";
 import { translateUsage, useI18n } from "@/lib/i18n";
 import type { Card, Layout, MetricRow, PanelView, Payload, Row } from "@/lib/types";
 import { accountSwitchFor, cardHasExtras, headlineLabel, nextUpdateLabel, prefsForCard, providerIconId, providerLinks, resetText, sendCommand, usageColor, usageGoal, visibleRowsFor } from "../model.js";
@@ -342,6 +342,7 @@ export function MacDashboard({ cards, layout, nowMs, payload, focusId, onOpenCus
                   <MdiRefresh aria-hidden />
                 </button> : null}
               </div>
+              <AccountSwitchFailure account={selectedAccount} className="mac-switch-failure" />
 
               {rows.length ? (
                 <div className="mac-usage-section">

@@ -23,6 +23,12 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 
 ### Corrigido
 
+- Falha na troca de conta pela estrela do card mostra o motivo dentro do
+  próprio card, nas vistas de lista e de abas. Antes, a estrela só ficava
+  vermelha e o motivo aparecia apenas ao passar o cursor. Para uma conta sem
+  sessão salva, o aviso informa que conectar contas ainda não está disponível
+  na interface.
+
 - Conta Claude salva com o mesmo rótulo no Claude Desktop e no Claude Code
   volta a mostrar o consumo real quando o servidor recusa a renovação do
   perfil do Desktop. Antes, o card ficava até 7 dias com a última leitura em

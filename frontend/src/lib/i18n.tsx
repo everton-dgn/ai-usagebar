@@ -29,6 +29,7 @@ const portuguese: Record<string, string> = {
   "Back": "Voltar",
   "Balance": "Saldo",
   "Can't reach the server": "Não foi possível acessar o servidor",
+  "Couldn't switch to this account": "Não foi possível trocar para esta conta",
   "Cached": "Em cache",
   "Chart Icon Only": "Somente ícone do gráfico",
   "Only the Account in Use": "Só a conta em uso",

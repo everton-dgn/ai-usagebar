@@ -156,6 +156,10 @@ export function ProviderSection({
         onSwitchAccount={onSwitchAccount}
       />
       <div className={cn("py-[var(--card-gutter)]", lifted ? "lifted-surface" : "card-surface")}>
+        <AccountSwitchFailure
+          account={account}
+          className="mb-[2px] border-b border-border px-[var(--card-pad)] pt-[3px] pb-[7px] text-[length:var(--sz-badge)] leading-[1.35] text-label-2"
+        />
         {card.errorTitle ? (
           <ErrorRow explained={{ title: card.errorTitle, hint: card.errorHint, action: card.errorAction }} />
         ) : null}
@@ -307,7 +311,8 @@ interface AccountControlProps {
  * The account switch beside the header shortcuts, in the star language the row menu already
  * uses: the active login is a static filled star, not a button, since there is nothing to do
  * there; every other account is an outline star that makes it the active one. A running switch
- * spins in place; a failed one keeps the outline star, tinted red, with the reason as its tooltip.
+ * spins in place; a failed one keeps the outline star, tinted red, and the card shows the reason
+ * (AccountSwitchFailure).
  */
 export function AccountControl({ account, title, onSwitch }: AccountControlProps) {
   if (account.active) {
@@ -339,6 +344,29 @@ export function AccountControl({ account, title, onSwitch }: AccountControlProps
       label={label}
       onClick={onSwitch}
     />
+  );
+}
+
+interface AccountSwitchFailureProps {
+  account?: CardAccount | null;
+  className?: string;
+}
+
+/**
+ * Why the last switch to this account failed, as a line inside its card. The host sends one fixed
+ * sentence per failure category, but it is still text from another process: line breaks collapse
+ * here and React renders it as text. No sign-in exists in this app, so there is no button to offer.
+ */
+export function AccountSwitchFailure({ account, className }: AccountSwitchFailureProps) {
+  const { t } = useI18n();
+  if (!account || account.active || account.switching) return null;
+  const reason = account.error.replace(/\s+/g, " ").trim();
+  if (!reason) return null;
+  return (
+    <p className={cn("m-0 flex items-start gap-[6px]", className)} data-switch-failure="" role="alert">
+      <MdiAlert aria-hidden="true" className="mt-[1px] size-3 shrink-0 text-meter-red" />
+      <span className="min-w-0 [overflow-wrap:anywhere]">{`${t("Couldn't switch to this account")}: ${reason}`}</span>
+    </p>
   );
 }
 

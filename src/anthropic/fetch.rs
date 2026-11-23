@@ -257,7 +257,20 @@ async fn acquire_credential_lock(
     target: &creds::CredsTarget,
     timeout: Duration,
 ) -> Result<Option<LockGuard>> {
-    let path = match target {
+    let path = credential_lock_path(target, || super::cli_account::home_claude_json().ok());
+    match path {
+        Some(path) => acquire_lock_async(&path, timeout).await.map(Some),
+        None => Ok(None),
+    }
+}
+
+/// The lock that guards `target` against a concurrent account switch. `home`
+/// resolves the home `.claude.json`, beside which the CLI switch lock lives.
+fn credential_lock_path(
+    target: &creds::CredsTarget,
+    home: impl FnOnce() -> Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    match target {
         creds::CredsTarget::Desktop(desktop) => desktop
             .coordination_lock()
             .map(std::path::Path::to_path_buf),
@@ -265,15 +278,9 @@ async fn acquire_credential_lock(
         // without it a refresh in flight wrote one account's new tokens into
         // a slot the switch had just given to another.
         creds::CredsTarget::Default(_) | creds::CredsTarget::Named { .. } => {
-            super::cli_account::home_claude_json()
-                .ok()
-                .map(|home| super::cli_account::switch_lock_path(&home))
+            home().map(|home| super::cli_account::switch_lock_path(&home))
         }
         creds::CredsTarget::Explicit(_) => None,
-    };
-    match path {
-        Some(path) => acquire_lock_async(&path, timeout).await.map(Some),
-        None => Ok(None),
     }
 }
 
@@ -711,6 +718,27 @@ mod tests {
             let outcome = fetch(account).await.unwrap();
             assert_eq!(outcome.snapshot.session.utilization_pct, 42);
         }
+    }
+
+    #[test]
+    fn the_cli_slots_are_read_under_the_account_switch_lock() {
+        let home = || Some(std::path::PathBuf::from("/fixture-home/.claude.json"));
+        let switch_lock = Some(crate::anthropic::cli_account::switch_lock_path(
+            std::path::Path::new("/fixture-home/.claude.json"),
+        ));
+
+        let default = creds::CredsTarget::Default("/fixture-home/.claude/c.json".into());
+        let named = creds::CredsTarget::Named {
+            path: "/accounts/work/.credentials.json".into(),
+            config_dir: "/accounts/work".into(),
+        };
+        assert_eq!(credential_lock_path(&default, home), switch_lock);
+        assert_eq!(credential_lock_path(&named, home), switch_lock);
+        // A file the user pointed at is no slot a switch moves.
+        let explicit = creds::CredsTarget::Explicit("/elsewhere/c.json".into());
+        assert_eq!(credential_lock_path(&explicit, home), None);
+        // Without a home there is no lock to take, and the fetch goes on.
+        assert_eq!(credential_lock_path(&default, || None), None);
     }
 
     #[tokio::test]

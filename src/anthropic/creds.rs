@@ -312,20 +312,20 @@ pub fn write_back_to(source: &CredsSource, new_oauth: &OauthCreds) -> Result<()>
         CredsSource::File(path) => write_back(path, new_oauth),
         CredsSource::Keychain => {
             let existing = keychain::read_raw()?;
-            refuse_another_accounts_slot(existing.as_deref(), new_oauth)?;
-            let doc = merge_oauth(existing.as_deref(), new_oauth)?;
-            let json = serde_json::to_string(&doc).map_err(AppError::Json)?;
-            keychain::write_raw(&json)
+            keychain::write_raw(&refreshed_slot(existing.as_deref(), new_oauth)?)
         }
         CredsSource::NamedKeychain(config_dir) => {
             let existing = keychain::read_raw_for(config_dir)?;
-            refuse_another_accounts_slot(existing.as_deref(), new_oauth)?;
-            let doc = merge_oauth(existing.as_deref(), new_oauth)?;
-            let json = serde_json::to_string(&doc).map_err(AppError::Json)?;
-            keychain::write_raw_for(config_dir, &json)
+            keychain::write_raw_for(config_dir, &refreshed_slot(existing.as_deref(), new_oauth)?)
         }
         CredsSource::Desktop(writeback) => writeback.write(new_oauth),
     }
+}
+
+/// What a Keychain slot holding `existing` is rewritten to after a refresh.
+fn refreshed_slot(existing: Option<&str>, new_oauth: &OauthCreds) -> Result<String> {
+    refuse_another_accounts_slot(existing, new_oauth)?;
+    serde_json::to_string(&merge_oauth(existing, new_oauth)?).map_err(AppError::Json)
 }
 
 /// A Keychain slot can change hands between a read and its write-back: an
@@ -755,18 +755,21 @@ mod tests {
             format!(r#"{{"claudeAiOauth":{{"accessToken":"x","accountUuid":"{uuid}"}}}}"#)
         };
 
-        let error = refuse_another_accounts_slot(Some(&slot("uuid-personal")), &work).unwrap_err();
+        let error = refreshed_slot(Some(&slot("uuid-personal")), &work).unwrap_err();
         assert!(
             error.to_string().contains("another account's login"),
             "{error}"
         );
-        assert!(!error.to_string().contains("NEW"), "{error}");
 
-        // Its own slot, an emptied one, and one that names nobody are written.
-        assert!(refuse_another_accounts_slot(Some(&slot("uuid-work")), &work).is_ok());
-        assert!(refuse_another_accounts_slot(None, &work).is_ok());
-        let unnamed = r#"{"claudeAiOauth":{"accessToken":"x"}}"#;
-        assert!(refuse_another_accounts_slot(Some(unnamed), &work).is_ok());
+        // Its own slot, an emptied one, and one that names nobody are
+        // rewritten with the new tokens, still naming the account.
+        let unnamed = r#"{"claudeAiOauth":{"accessToken":"x"}}"#.to_string();
+        for existing in [Some(slot("uuid-work")), None, Some(unnamed)] {
+            let written = refreshed_slot(existing.as_deref(), &work).unwrap();
+            let doc: serde_json::Value = serde_json::from_str(&written).unwrap();
+            assert_eq!(doc["claudeAiOauth"]["refreshToken"], "NEW_RT");
+            assert_eq!(doc["claudeAiOauth"]["accountUuid"], "uuid-work");
+        }
     }
 
     #[test]

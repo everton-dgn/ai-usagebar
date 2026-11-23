@@ -463,13 +463,15 @@ pub fn switch_cli_account(
         Ok(marker) => marker,
         Err(error) => return Err(with_rollback(error, rollback_switch(store, &credentials))),
     };
+    if let Err(error) = crate::cache::atomic_write(home_claude_json, &merged_marker) {
+        // A failed atomic write left the file as it was: restoring it would
+        // fail the same way and report a recovery that is not needed.
+        return Err(with_rollback(error, rollback_switch(store, &credentials)));
+    }
     let rollback = RollbackState {
         marker: Some((home_claude_json, original_marker.as_deref())),
         ..credentials
     };
-    if let Err(error) = crate::cache::atomic_write(home_claude_json, &merged_marker) {
-        return Err(with_rollback(error, rollback_switch(store, &rollback)));
-    }
     if let Err(error) = store.delete_named(&target.config_dir()) {
         return Err(with_rollback(error, rollback_switch(store, &rollback)));
     }
@@ -487,6 +489,10 @@ pub fn switch_cli_account(
 /// The owner must have no login anywhere, saved or live (`live_owner`):
 /// a second copy would put one rotating refresh token in two places. Anything
 /// else stays put and the holder's card reports it.
+///
+/// Deleting the holder's copy is best-effort. Once the credential is with its
+/// owner, a copy that cannot be deleted must not refuse every switch; it is
+/// removed by a later switch while the owner's copy is still the same.
 fn rehome_misfiled(
     accounts: &[AnthropicAccount],
     store: &dyn CredentialStore,
@@ -510,14 +516,14 @@ fn rehome_misfiled(
         let owner_dir = owner.config_dir();
         match store.read_named(&owner_dir).map_err(storage)? {
             // The copy an earlier move could not delete.
-            Some(owned) if owned == blob => store.delete_named(&holder_dir).map_err(storage)?,
+            Some(owned) if owned == blob => {
+                let _ = store.delete_named(&holder_dir);
+            }
             Some(_) => {}
             None if live_owner == Some(owner.label.as_str()) => {}
             None => {
                 store.write_named(&owner_dir, &blob).map_err(storage)?;
-                // A failure here is not undone: the credential is already
-                // with its owner, and undoing could lose the last copy.
-                store.delete_named(&holder_dir).map_err(storage)?;
+                let _ = store.delete_named(&holder_dir);
             }
         }
     }
@@ -583,6 +589,7 @@ pub fn adopt_current(
     crate::cache::atomic_write(&marker, &merged)
 }
 
+#[derive(Clone, Copy)]
 struct RollbackState<'a> {
     target: &'a AnthropicAccount,
     target_blob: &'a str,
@@ -718,7 +725,10 @@ mod tests {
     struct FakeStore {
         default: RefCell<Option<String>>,
         named: RefCell<BTreeMap<PathBuf, String>>,
+        /// Deleting this slot removes the item and still reports an error.
         fail_delete_named: RefCell<Option<PathBuf>>,
+        /// Deleting this slot reports an error and removes nothing.
+        refuse_delete_named: RefCell<Option<PathBuf>>,
     }
 
     impl CredentialStore for FakeStore {
@@ -743,6 +753,9 @@ mod tests {
             Ok(())
         }
         fn delete_named(&self, config_dir: &Path) -> Result<()> {
+            if self.refuse_delete_named.borrow().as_deref() == Some(config_dir) {
+                return Err(AppError::Other("injected delete refusal".into()));
+            }
             self.named.borrow_mut().remove(config_dir);
             if self.fail_delete_named.borrow().as_deref() == Some(config_dir) {
                 Err(AppError::Other("injected delete failure".into()))
@@ -993,23 +1006,63 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_move_never_loses_the_credential() {
+    fn a_copy_that_cannot_be_deleted_does_not_block_the_switch() {
         let mut f = fixture();
         let work_login = stray_work_login(&mut f);
-        *f.store.fail_delete_named.borrow_mut() = Some(f.accounts[1].config_dir());
+        let holder = f.accounts[1].config_dir();
+        *f.store.refuse_delete_named.borrow_mut() = Some(holder.clone());
 
-        let error = switch(&f, "spare").unwrap_err();
-
+        // The credential reaches its owner and the switch goes on, with the
+        // undeletable copy left in the holder's slot.
         assert_eq!(
+            switch(&f, "spare").unwrap(),
+            CliSwitchOutcome::AlreadyActive
+        );
+        {
+            let named = f.store.named.borrow();
+            assert_eq!(named.get(&f.accounts[0].config_dir()), Some(&work_login));
+            assert_eq!(named.get(&holder), Some(&work_login));
+        }
+
+        // Once the slot can be deleted again, the next switch removes the copy.
+        *f.store.refuse_delete_named.borrow_mut() = None;
+        assert_eq!(
+            switch(&f, "spare").unwrap(),
+            CliSwitchOutcome::AlreadyActive
+        );
+        let named = f.store.named.borrow();
+        assert_eq!(named.get(&f.accounts[0].config_dir()), Some(&work_login));
+        assert!(!named.contains_key(&holder));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_home_file_that_cannot_be_written_restores_the_credentials_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let f = fixture();
+        let home_dir = f.home.parent().unwrap();
+        let before = std::fs::read(&f.home).unwrap();
+        // The lock file must exist before the directory stops taking new files.
+        std::fs::write(switch_lock_path(&f.home), b"").unwrap();
+        std::fs::set_permissions(home_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = switch(&f, "work");
+
+        std::fs::set_permissions(home_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = result.unwrap_err();
+        // Every slot is back and the file was never replaced, so nothing is
+        // left to recover.
+        assert_ne!(
             failure(&error),
-            Some(AccountFailure::StorageUnavailable),
+            Some(AccountFailure::RecoveryRequired),
             "{error}"
         );
-        // It reached its owner before the failure and is not taken back.
-        assert_eq!(
-            f.store.named.borrow().get(&f.accounts[0].config_dir()),
-            Some(&work_login)
-        );
+        assert_eq!(f.store.default.borrow().as_deref(), Some(PERSONAL_LIVE));
+        let named = f.store.named.borrow();
+        assert_eq!(named[&f.accounts[0].config_dir()], WORK_SAVED);
+        assert_eq!(named[&f.accounts[1].config_dir()], PERSONAL_STALE);
+        assert_eq!(std::fs::read(&f.home).unwrap(), before);
     }
 
     #[test]

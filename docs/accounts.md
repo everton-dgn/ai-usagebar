@@ -63,6 +63,7 @@ rótulo o token pertence é o identificador gravado nele.
 | A sessão em uso não informa a conta | A estrela não aparece e a troca é cancelada, sem alterar nada |
 | A sessão salva de uma conta não informa a conta | O cartão avisa e não mostra consumo; a troca para essa conta é recusada |
 | Dois rótulos apontam a mesma conta | Nenhum dos dois é tratado como dono até a duplicidade ser desfeita |
+| Um login novo é gravado enquanto o token anterior é renovado | O login novo fica intacto; o cartão mostra a última leitura e lê o login novo na atualização seguinte |
 
 Uma conta sem sessão própria precisa de um novo login no Claude Code. Para um
 rótulo passar a representar outra conta, cadastre um rótulo novo: o registro
@@ -72,11 +73,11 @@ criado a partir de um login já errado, remova o arquivo
 recriado com a identidade que a pasta tiver naquele momento.
 
 A renovação de token e a troca de conta usam o mesmo bloqueio. Uma troca pedida
-enquanto um token é renovado espera a renovação terminar, por até 30 segundos,
-com a estrela girando.
+enquanto um token é renovado espera essa renovação terminar, por até 30
+segundos, com a estrela girando. As renovações seguintes esperam a troca.
 
 Uma conta sem nenhuma sessão salva, no Chaves ou em arquivo, aparece como
-sessão expirada, com o aviso de que precisa de uma sessão do Claude Code.
+**Sem sessão salva**, com o aviso de que precisa de uma sessão do Claude Code.
 
 ## Tipos de fonte
 

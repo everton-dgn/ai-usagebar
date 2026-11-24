@@ -340,52 +340,73 @@ fn merge_oauth(existing: Option<&str>, new_oauth: &OauthCreds) -> Result<serde_j
 /// CLI might have added. Following the read source keeps a single shared
 /// source of truth with Claude Code — refreshing Keychain-read tokens into a
 /// stale shadow file would rotate the refresh token out from under it.
-pub fn write_back_to(source: &CredsSource, new_oauth: &OauthCreds) -> Result<()> {
+pub fn write_back_to(source: &CredsSource, new_oauth: &OauthCreds) -> Result<WriteBack> {
     match source {
         CredsSource::File(path) => write_back(path, new_oauth),
         CredsSource::Keychain => {
             let existing = keychain::read_raw()?;
-            keychain::write_raw(&refreshed_slot(existing.as_deref(), new_oauth)?)
+            let Some(doc) = refreshed_document(existing.as_deref(), new_oauth)? else {
+                return Ok(WriteBack::LoginChanged);
+            };
+            keychain::write_raw(&serde_json::to_string(&doc).map_err(AppError::Json)?)?;
+            Ok(WriteBack::Saved)
         }
         CredsSource::NamedKeychain(config_dir) => {
             let existing = keychain::read_raw_for(config_dir)?;
-            keychain::write_raw_for(config_dir, &refreshed_slot(existing.as_deref(), new_oauth)?)
+            let Some(doc) = refreshed_document(existing.as_deref(), new_oauth)? else {
+                return Ok(WriteBack::LoginChanged);
+            };
+            let json = serde_json::to_string(&doc).map_err(AppError::Json)?;
+            keychain::write_raw_for(config_dir, &json)?;
+            Ok(WriteBack::Saved)
         }
-        CredsSource::Desktop(writeback) => writeback.write(new_oauth),
+        CredsSource::Desktop(writeback) => writeback.write(new_oauth).map(|()| WriteBack::Saved),
     }
 }
 
-/// What a Keychain slot holding `existing` is rewritten to after a refresh.
-fn refreshed_slot(existing: Option<&str>, new_oauth: &OauthCreds) -> Result<String> {
-    refuse_another_accounts_slot(existing, new_oauth)?;
-    serde_json::to_string(&merge_oauth(existing, new_oauth)?).map_err(AppError::Json)
+/// What a refresh write-back did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteBack {
+    Saved,
+    /// Nothing was written: what is stored now is a different login from the
+    /// one that was read. A sign-in or an account switch got there first, and
+    /// that login is the current one.
+    LoginChanged,
 }
 
-/// A Keychain slot can change hands between a read and its write-back: an
+/// What a store holding `existing` is rewritten to after a refresh, or `None`
+/// when it now holds a different login and must be left alone.
+fn refreshed_document(
+    existing: Option<&str>,
+    new_oauth: &OauthCreds,
+) -> Result<Option<serde_json::Value>> {
+    if holds_a_different_login(existing, new_oauth) {
+        return Ok(None);
+    }
+    merge_oauth(existing, new_oauth).map(Some)
+}
+
+/// A credential store can change hands between a read and its write-back: an
 /// account switch, or a sign-in. Refreshed tokens are written only over a
-/// slot that is empty, names nobody, or names the account they were issued to.
-fn refuse_another_accounts_slot(existing: Option<&str>, new_oauth: &OauthCreds) -> Result<()> {
-    let in_slot = existing.and_then(super::cli_account::blob_account_uuid);
+/// store that is empty, names nobody, or names the account they were issued to.
+fn holds_a_different_login(existing: Option<&str>, new_oauth: &OauthCreds) -> bool {
+    let stored = existing.and_then(super::cli_account::blob_account_uuid);
     let ours = new_oauth
         .account_uuid
         .as_deref()
         .filter(|uuid| !uuid.is_empty());
-    match in_slot.as_deref() {
-        Some(slot) if ours != Some(slot) => Err(AppError::Credentials(
-            "the credential slot now holds a different login, so the refreshed token was not \
-             written over it"
-                .into(),
-        )),
-        _ => Ok(()),
-    }
+    stored.as_deref().is_some_and(|stored| ours != Some(stored))
 }
 
-/// Persist updated credentials to a file, preserving unknown top-level fields.
-pub fn write_back(path: &Path, new_oauth: &OauthCreds) -> Result<()> {
+/// Persist updated credentials to a file, preserving unknown fields.
+pub fn write_back(path: &Path, new_oauth: &OauthCreds) -> Result<WriteBack> {
     let existing = std::fs::read_to_string(path).ok();
-    let doc = merge_oauth(existing.as_deref(), new_oauth)?;
+    let Some(doc) = refreshed_document(existing.as_deref(), new_oauth)? else {
+        return Ok(WriteBack::LoginChanged);
+    };
     let bytes = serde_json::to_vec_pretty(&doc).map_err(AppError::Json)?;
-    atomic_write(path, &bytes)
+    atomic_write(path, &bytes)?;
+    Ok(WriteBack::Saved)
 }
 
 #[cfg(test)]
@@ -785,7 +806,7 @@ mod tests {
             account_uuid: None,
             organization_uuid: None,
         };
-        write_back(&path, &new_oauth).unwrap();
+        assert_eq!(write_back(&path, &new_oauth).unwrap(), WriteBack::Saved);
         // Re-read & verify the unknown field survived.
         let raw = std::fs::read_to_string(&path).unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -811,14 +832,13 @@ mod tests {
         oauth.refresh_token = "NEW_RT".into();
         oauth.expires_at_ms = 2000;
 
-        let written = refreshed_slot(Some(REAL_SHAPED), &oauth).unwrap();
+        let written = refreshed_document(Some(REAL_SHAPED), &oauth).unwrap();
 
-        let written: serde_json::Value = serde_json::from_str(&written).unwrap();
         let mut expected: serde_json::Value = serde_json::from_str(REAL_SHAPED).unwrap();
         expected["claudeAiOauth"]["accessToken"] = "NEW".into();
         expected["claudeAiOauth"]["refreshToken"] = "NEW_RT".into();
         expected["claudeAiOauth"]["expiresAt"] = 2000.into();
-        assert_eq!(written, expected);
+        assert_eq!(written, Some(expected));
     }
 
     #[test]
@@ -830,11 +850,13 @@ mod tests {
         unnamed.account_uuid = None;
         unnamed.organization_uuid = None;
 
-        // A Keychain slot is not written at all.
-        let error = refreshed_slot(Some(REAL_SHAPED), &unnamed).unwrap_err();
-        assert!(error.to_string().contains("a different login"), "{error}");
+        // The store is left alone.
+        assert_eq!(
+            refreshed_document(Some(REAL_SHAPED), &unnamed).unwrap(),
+            None
+        );
 
-        // A file is, without the account it used to name.
+        // The merge itself never inherits the account, whoever calls it.
         let doc = merge_oauth(Some(REAL_SHAPED), &unnamed).unwrap();
         assert_eq!(doc["claudeAiOauth"]["refreshToken"], "NEW_RT");
         assert!(doc["claudeAiOauth"].get("accountUuid").is_none());
@@ -858,18 +880,38 @@ mod tests {
             format!(r#"{{"claudeAiOauth":{{"accessToken":"x","accountUuid":"{uuid}"}}}}"#)
         };
 
-        let error = refreshed_slot(Some(&slot("uuid-personal")), &work).unwrap_err();
-        assert!(error.to_string().contains("a different login"), "{error}");
+        assert_eq!(
+            refreshed_document(Some(&slot("uuid-personal")), &work).unwrap(),
+            None
+        );
 
         // Its own slot, an emptied one, and one that names nobody are
         // rewritten with the new tokens, still naming the account.
         let unnamed = r#"{"claudeAiOauth":{"accessToken":"x"}}"#.to_string();
         for existing in [Some(slot("uuid-work")), None, Some(unnamed)] {
-            let written = refreshed_slot(existing.as_deref(), &work).unwrap();
-            let doc: serde_json::Value = serde_json::from_str(&written).unwrap();
+            let doc = refreshed_document(existing.as_deref(), &work)
+                .unwrap()
+                .expect("the same login is written");
             assert_eq!(doc["claudeAiOauth"]["refreshToken"], "NEW_RT");
             assert_eq!(doc["claudeAiOauth"]["accountUuid"], "uuid-work");
         }
+    }
+
+    #[test]
+    fn a_file_that_now_holds_another_login_is_left_alone() {
+        const SIGNED_IN: &str =
+            r#"{"claudeAiOauth":{"accessToken":"theirs","accountUuid":"uuid-personal"}}"#;
+        let (_dir, path) = write_creds_closed(SIGNED_IN);
+        let mut work = parse(REAL_SHAPED, "fixture").unwrap().claude_ai_oauth;
+        work.refresh_token = "NEW_RT".into();
+
+        assert_eq!(write_back(&path, &work).unwrap(), WriteBack::LoginChanged);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), SIGNED_IN);
+        assert_eq!(
+            write_back_to(&CredsSource::File(path.clone()), &work).unwrap(),
+            WriteBack::LoginChanged
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), SIGNED_IN);
     }
 
     #[test]
@@ -885,7 +927,7 @@ mod tests {
         let mut oauth = read_from(&path).unwrap().claude_ai_oauth;
         oauth.access_token = "NEW".into();
         oauth.refresh_token = "NEW_RT".into();
-        write_back(&path, &oauth).unwrap();
+        assert_eq!(write_back(&path, &oauth).unwrap(), WriteBack::Saved);
 
         let raw = std::fs::read_to_string(&path).unwrap();
         assert_eq!(

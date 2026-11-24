@@ -64,6 +64,11 @@ pub async fn fetch_snapshot(
 pub const WRONG_ACCOUNT_MESSAGE: &str =
     "the Claude Code login saved for this account belongs to another account";
 
+/// What an entry with no reading to fall back on reports when its saved
+/// login changed during a refresh. The popover shows it as a diagnosis, under
+/// "Couldn't update": it names no sign-in and no connection problem.
+pub const LOGIN_CHANGED_MESSAGE: &str = "the saved login changed while its token was being renewed; it is read again on the next update";
+
 /// The same refusal for a credential that does not say whose it is. The
 /// popover classifies it by "does not say which account".
 pub const UNIDENTIFIED_ACCOUNT_MESSAGE: &str =
@@ -150,17 +155,34 @@ pub async fn fetch_snapshot_as(
                 }
                 creds.claude_ai_oauth.expires_at_ms =
                     Utc::now().timestamp_millis() + (rr.expires_in as i64) * 1000;
-                // When only the access token changed, a failed write loses
-                // nothing — the next run just refreshes again — so carry on.
-                if let Err(e) = creds::write_back_to(&creds_source, &creds.claude_ai_oauth)
-                    && rotated
-                {
-                    cache.write_last_error(0, &rotated_token_lost_message(&e));
-                    note_refused_snapshot(cache, &creds_source);
-                    return with_oauth_plan(
-                        &plan_label,
-                        handle_auth_failure(cache, plan_label.clone(), false),
-                    );
+                match creds::write_back_to(&creds_source, &creds.claude_ai_oauth) {
+                    Ok(creds::WriteBack::Saved) => {}
+                    // WHY: a sign-in or an account switch stored a login after
+                    // this one was read. That login is the current one and the
+                    // next update reads it. Asking for a new sign-in here would
+                    // be wrong, and so would usage read with tokens that are no
+                    // longer the stored ones.
+                    Ok(creds::WriteBack::LoginChanged) => {
+                        return with_oauth_plan(
+                            &plan_label,
+                            fallback_to_cache_silent(
+                                cache,
+                                plan_label.clone(),
+                                AppError::Other(LOGIN_CHANGED_MESSAGE.into()),
+                            ),
+                        );
+                    }
+                    Err(e) if rotated => {
+                        cache.write_last_error(0, &rotated_token_lost_message(&e));
+                        note_refused_snapshot(cache, &creds_source);
+                        return with_oauth_plan(
+                            &plan_label,
+                            handle_auth_failure(cache, plan_label.clone(), false),
+                        );
+                    }
+                    // When only the access token changed, a failed write loses
+                    // nothing — the next run just refreshes again — so carry on.
+                    Err(_) => {}
                 }
             }
             Ok(Err(AppError::Http { status, body })) => {
@@ -257,28 +279,47 @@ async fn acquire_credential_lock(
     target: &creds::CredsTarget,
     timeout: Duration,
 ) -> Result<Option<LockGuard>> {
-    let path = credential_lock_path(target, || super::cli_account::home_claude_json().ok());
-    match path {
-        Some(path) => acquire_lock_async(&path, timeout).await.map(Some),
+    let lock = credential_lock(target, || super::cli_account::home_claude_json().ok());
+    acquire(lock, timeout).await
+}
+
+async fn acquire(lock: Option<CredentialLock>, timeout: Duration) -> Result<Option<LockGuard>> {
+    match lock {
+        Some(CredentialLock::Desktop(path)) => acquire_lock_async(&path, timeout).await.map(Some),
+        Some(CredentialLock::Cli(path)) => {
+            tokio::task::spawn_blocking(move || super::cli_account::lock_for_fetch(&path, timeout))
+                .await
+                .map_err(|e| AppError::Other(format!("credential lock task failed: {e}")))?
+                .map(Some)
+        }
         None => Ok(None),
     }
 }
 
-/// The lock that guards `target` against a concurrent account switch. `home`
-/// resolves the home `.claude.json`, beside which the CLI switch lock lives.
-fn credential_lock_path(
+/// Which lock guards a credential against a concurrent account switch.
+#[derive(Debug, PartialEq, Eq)]
+enum CredentialLock {
+    /// The Desktop profile store's own lock.
+    Desktop(std::path::PathBuf),
+    /// The CLI slots' lock, taken behind the switch queue.
+    Cli(std::path::PathBuf),
+}
+
+/// The lock that guards `target`. `home` resolves the home `.claude.json`,
+/// beside which the CLI switch lock lives.
+fn credential_lock(
     target: &creds::CredsTarget,
     home: impl FnOnce() -> Option<std::path::PathBuf>,
-) -> Option<std::path::PathBuf> {
+) -> Option<CredentialLock> {
     match target {
         creds::CredsTarget::Desktop(desktop) => desktop
             .coordination_lock()
-            .map(std::path::Path::to_path_buf),
+            .map(|path| CredentialLock::Desktop(path.to_path_buf())),
         // The CLI's own slots. An account switch moves them under this lock;
         // without it a refresh in flight wrote one account's new tokens into
         // a slot the switch had just given to another.
         creds::CredsTarget::Default(_) | creds::CredsTarget::Named { .. } => {
-            home().map(|home| super::cli_account::switch_lock_path(&home))
+            home().map(|home| CredentialLock::Cli(super::cli_account::switch_lock_path(&home)))
         }
         creds::CredsTarget::Explicit(_) => None,
     }
@@ -723,8 +764,10 @@ mod tests {
     #[test]
     fn the_cli_slots_are_read_under_the_account_switch_lock() {
         let home = || Some(std::path::PathBuf::from("/fixture-home/.claude.json"));
-        let switch_lock = Some(crate::anthropic::cli_account::switch_lock_path(
-            std::path::Path::new("/fixture-home/.claude.json"),
+        let switch_lock = Some(CredentialLock::Cli(
+            crate::anthropic::cli_account::switch_lock_path(std::path::Path::new(
+                "/fixture-home/.claude.json",
+            )),
         ));
 
         let default = creds::CredsTarget::Default("/fixture-home/.claude/c.json".into());
@@ -732,13 +775,108 @@ mod tests {
             path: "/accounts/work/.credentials.json".into(),
             config_dir: "/accounts/work".into(),
         };
-        assert_eq!(credential_lock_path(&default, home), switch_lock);
-        assert_eq!(credential_lock_path(&named, home), switch_lock);
+        assert_eq!(credential_lock(&default, home), switch_lock);
+        assert_eq!(credential_lock(&named, home), switch_lock);
         // A file the user pointed at is no slot a switch moves.
         let explicit = creds::CredsTarget::Explicit("/elsewhere/c.json".into());
-        assert_eq!(credential_lock_path(&explicit, home), None);
+        assert_eq!(credential_lock(&explicit, home), None);
         // Without a home there is no lock to take, and the fetch goes on.
-        assert_eq!(credential_lock_path(&default, || None), None);
+        assert_eq!(credential_lock(&default, || None), None);
+        // The Desktop store has its own lock and no queue.
+        let desktop_lock = std::path::PathBuf::from("/profiles/.account-switch.lock");
+        let desktop = creds::CredsTarget::Desktop(
+            crate::anthropic::desktop_creds::source_for(
+                std::path::Path::new("/profiles/config.json"),
+                std::path::Path::new("/profiles/work"),
+                false,
+                [0; 16],
+            )
+            .with_coordination_lock(desktop_lock.clone()),
+        );
+        assert_eq!(
+            credential_lock(&desktop, home),
+            Some(CredentialLock::Desktop(desktop_lock))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cli_refresh_lines_up_behind_a_waiting_switch() {
+        // The switch holds the queue while it waits; the fetch must not reach
+        // the credential lock, free as it is, until the queue lets it through.
+        let tmp = TempDir::new().unwrap();
+        let lock_path = tmp.path().join(".ai-usagebar-account-switch.lock");
+        let queue = crate::cache::acquire_lock(
+            &tmp.path().join(".ai-usagebar-account-switch.queue"),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let waiter = tokio::spawn(async move {
+            acquire(Some(CredentialLock::Cli(lock_path)), Duration::from_secs(2))
+                .await
+                .unwrap()
+                .is_some()
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!waiter.is_finished(), "the fetch went around the queue");
+
+        drop(queue);
+        assert!(waiter.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_during_a_refresh_is_left_alone_and_asks_for_nothing() {
+        // The token endpoint stands in for the moment a sign-in lands: it
+        // rewrites the credential file while this refresh is in flight.
+        const NEW_LOGIN: &str = r#"{"claudeAiOauth":{"accessToken":"signed-in-at","refreshToken":"signed-in-rt","expiresAt":99999999999999,"accountUuid":"uuid-personal"}}"#;
+        let (_dir, path) = crate::cache::closed_temp_file(
+            "creds.json",
+            Some(
+                r#"{"claudeAiOauth":{"accessToken":"old-at","refreshToken":"old-rt","expiresAt":1,"accountUuid":"uuid-work"}}"#,
+            ),
+        );
+        let mut server = mockito::Server::new_async().await;
+        let stored = path.clone();
+        server
+            .mock("POST", "/token")
+            .with_status(200)
+            .with_body_from_request(move |_| {
+                std::fs::write(&stored, NEW_LOGIN).unwrap();
+                br#"{"access_token":"new-at","refresh_token":"new-rt","expires_in":3600}"#.to_vec()
+            })
+            .create_async()
+            .await;
+        let usage = server
+            .mock("GET", "/api/oauth/usage")
+            .expect(0)
+            .create_async()
+            .await;
+        let (_td, cache) = cache_fixture();
+        cache
+            .write_payload(br#"{"five_hour":{"utilization":42},"seven_day":{"utilization":15}}"#)
+            .unwrap();
+        let endpoints = Endpoints {
+            usage: format!("{}/api/oauth/usage", server.url()),
+            token: format!("{}/token", server.url()),
+        };
+
+        let outcome = fetch_snapshot_as(
+            &reqwest::Client::new(),
+            &creds::CredsTarget::Explicit(path.clone()),
+            Some("uuid-work"),
+            &cache,
+            &endpoints,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+
+        // The last good reading, with nothing recorded against the account and
+        // the new login untouched.
+        assert_eq!(outcome.snapshot.session.utilization_pct, 42);
+        assert_eq!(cache.read_last_error(), None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), NEW_LOGIN);
+        usage.assert_async().await;
     }
 
     #[tokio::test]

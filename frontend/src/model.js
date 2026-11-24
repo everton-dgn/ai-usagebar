@@ -1607,6 +1607,10 @@ export function explainError(text, entry) {
       hint: retry ? "Retrying automatically in " + retry[1] + "." : "Try Refresh in a minute.",
     };
   }
+  // An account with no login here never had one to expire.
+  if (/no saved Claude Code login/i.test(raw)) {
+    return { title: "No saved sign-in", hint: signInHint(entry) };
+  }
   // The slot holds a working login, just not this account's: "expired" would
   // send the user to renew the wrong thing.
   if (/belongs to another account/i.test(raw)) {

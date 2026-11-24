@@ -296,6 +296,28 @@ assert.equal(claudeCards[0].rows.length, 0);
       signIn,
     );
   }
+  // An account that never had a login here is not an expired one either.
+  {
+    const signIn = 'Needs a saved Claude Code sign-in on this Mac. Signing in is not available in this app.';
+    const explained = explainError(
+      'credentials error: no saved Claude Code login for this account; a Claude Code sign-in is needed, which this app cannot do', // anthropic/creds.rs
+      { signIn },
+    );
+    assert.equal(explained.title, 'No saved sign-in');
+    assert.equal(explained.hint, signIn);
+    assert.equal(explained.action, undefined);
+  }
+  // A login that changed while its token was being renewed is read again:
+  // no sign-in to ask for, no connection to check. Text from anthropic/fetch.rs.
+  {
+    const explained = explainError(
+      'the saved login changed while its token was being renewed; it is read again on the next update',
+      { signIn: 'unused' },
+    );
+    assert.equal(explained.title, "Couldn't update");
+    assert.equal(explained.hint, 'the saved login changed while its token was being renewed; it is read again on the next update');
+    assert.equal(explained.action, undefined);
+  }
   // A working login filed under the wrong account is not an expired one.
   {
     const error = 'credentials error: the Claude Code login saved for this account belongs to another account';
@@ -341,7 +363,6 @@ assert.equal(claudeCards[0].rows.length, 0);
       'credentials error: Grok Build login file not found; a new Grok Build sign-in is needed, which this app cannot do', // supergrok/direct.rs
       'credentials error: GitHub Copilot: no token. A GitHub CLI sign-in with Copilot access is needed, which this app cannot do.', // copilot/credentials.rs
       'credentials error: could not parse Keychain: bad json. A new Claude Code sign-in is needed, which this app cannot do.', // anthropic/creds.rs
-      'credentials error: no saved Claude Code login for this account; a Claude Code sign-in is needed, which this app cannot do', // anthropic/creds.rs
       'credentials error: Cursor session token is empty. Sign in to the Cursor IDE again.', // cursor/db.rs
       'credentials error: Grok Bot token refresh was rejected; sign in to the Grok Bot desktop app again', // grokbot/fetch.rs
       "credentials error: Antigravity's saved Google session expired; open Antigravity to sign in again", // antigravity/cloud.rs

@@ -143,6 +143,7 @@ const portuguese: Record<string, string> = {
   "Resets": "Redefinições",
   "Session": "Sessão",
   "Sign-in expired": "Sessão expirada",
+  "No saved sign-in": "Sem sessão salva",
   "Saved sign-in is for another account": "A sessão salva é de outra conta",
   "Saved sign-in names no account": "A sessão salva não informa a conta",
   "This account needs its own Claude Code sign-in. Signing in is not available in this app.": "Esta conta precisa de uma sessão própria do Claude Code. O login não está disponível neste aplicativo.",

@@ -49,9 +49,16 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 - A troca de conta espera uma renovação de token em andamento terminar, por
   até 30 segundos. Antes, desistia em 2 segundos com o aviso de acesso
   reservado.
-- Conta Claude sem nenhuma sessão salva mostra que precisa de uma sessão do
-  Claude Code. Antes, o cartão dizia que não foi possível ler os arquivos
-  locais.
+- Conta Claude sem nenhuma sessão salva aparece como **Sem sessão salva** e
+  mostra que precisa de uma sessão do Claude Code. Antes, o cartão dizia que
+  não foi possível ler os arquivos locais.
+- Uma troca de conta à espera do bloqueio passa à frente das renovações de
+  token seguintes: elas entram numa fila atrás da troca. Antes, renovações em
+  sequência podiam retomar o bloqueio e a troca esperava por todas.
+- Um login novo gravado enquanto o token anterior era renovado fica intacto,
+  no Chaves e também em arquivo de credenciais, e o cartão mostra a última
+  leitura sem pedir outro login. Antes, o cartão pedia um novo login, e o
+  arquivo de credenciais era regravado com os tokens antigos.
 - Falha na troca de conta pela estrela do card mostra o motivo dentro do
   próprio card, nas vistas de lista e de abas. Antes, a estrela só ficava
   vermelha e o motivo aparecia apenas ao passar o cursor. Para uma conta sem

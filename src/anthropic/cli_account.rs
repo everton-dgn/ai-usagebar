@@ -32,10 +32,11 @@
 //! against a fake store, so the logic stays under CI's linter on Linux.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 
+use crate::cache::{LockGuard, acquire_lock};
 use crate::config::AnthropicAccount;
 use crate::error::{AccountFailure, AppError, Result};
 
@@ -43,7 +44,8 @@ use crate::error::{AccountFailure, AppError, Result};
 /// `oauthAccount` identity marker (uuid, email, org) — never a token.
 const CLAUDE_JSON: &str = ".claude.json";
 
-/// How long a switch waits for the credential lock.
+/// How long a switch or an adoption waits for the credential lock, queue
+/// included.
 ///
 /// WHY: a usage fetch holds that lock while it refreshes a token. A shorter
 /// wait refused every switch asked for during a refresh.
@@ -58,6 +60,41 @@ pub fn switch_lock_path(home_claude_json: &Path) -> std::path::PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(".ai-usagebar-account-switch.lock")
+}
+
+/// Where usage fetches line up behind a switch that is waiting for the lock.
+fn switch_queue_path(lock_path: &Path) -> std::path::PathBuf {
+    lock_path.with_extension("queue")
+}
+
+/// The locks a credential mutation holds until it ends: the queue, then the
+/// credential lock, both within one [`SWITCH_LOCK_WAIT`].
+///
+/// WHY: the credential lock is retried every 50 ms, and a fetch that refreshes
+/// one account after another takes it back within microseconds, so a switch
+/// could wait out every refresh in a row. While the switch holds the queue the
+/// next fetch lines up behind it, and the switch waits for one refresh at most.
+fn lock_for_mutation(home_claude_json: &Path) -> Result<(LockGuard, LockGuard)> {
+    let lock_path = switch_lock_path(home_claude_json);
+    let deadline = Instant::now() + SWITCH_LOCK_WAIT;
+    let queue = acquire_lock(&switch_queue_path(&lock_path), SWITCH_LOCK_WAIT)?;
+    let lock = acquire_lock(
+        &lock_path,
+        deadline.saturating_duration_since(Instant::now()),
+    )?;
+    Ok((queue, lock))
+}
+
+/// The lock a usage fetch holds on the CLI's credential slots, from reading a
+/// credential until its refreshed tokens are written back. The fetch passes
+/// through the queue first and never holds both: see [`lock_for_mutation`].
+pub fn lock_for_fetch(lock_path: &Path, timeout: Duration) -> Result<LockGuard> {
+    let deadline = Instant::now() + timeout;
+    drop(acquire_lock(&switch_queue_path(lock_path), timeout)?);
+    acquire_lock(
+        lock_path,
+        deadline.saturating_duration_since(Instant::now()),
+    )
 }
 
 /// Read/write access to the credential slots. Abstracted so the switch logic
@@ -297,8 +334,7 @@ pub fn switch_cli_account(
     opts: CliSwitchOpts,
     store: &dyn CredentialStore,
 ) -> Result<CliSwitchOutcome> {
-    let lock_path = switch_lock_path(home_claude_json);
-    let _lock = crate::cache::acquire_lock(&lock_path, SWITCH_LOCK_WAIT)
+    let _locks = lock_for_mutation(home_claude_json)
         .map_err(|error| error.for_account(AccountFailure::LockUnavailable))?;
 
     let target = accounts
@@ -553,8 +589,7 @@ pub fn adopt_current(
 ) -> Result<()> {
     // The same lock as `switch_cli_account`, so an adoption and a switch
     // cannot interleave and both see the same live login.
-    let lock_path = switch_lock_path(home_claude_json);
-    let _lock = crate::cache::acquire_lock(&lock_path, Duration::from_secs(2))?;
+    let _locks = lock_for_mutation(home_claude_json)?;
 
     // The login adopted is the one in the default slot, named by its own
     // credential.
@@ -1050,21 +1085,20 @@ mod tests {
         let f = fixture();
         let home_dir = f.home.parent().unwrap();
         let before = std::fs::read(&f.home).unwrap();
-        // The lock file must exist before the directory stops taking new files.
-        std::fs::write(switch_lock_path(&f.home), b"").unwrap();
+        // Both lock files must exist before the directory stops taking new
+        // files, so the switch gets as far as writing the home file.
+        let lock_path = switch_lock_path(&f.home);
+        std::fs::write(switch_queue_path(&lock_path), b"").unwrap();
+        std::fs::write(&lock_path, b"").unwrap();
         std::fs::set_permissions(home_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let result = switch(&f, "work");
 
         std::fs::set_permissions(home_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         let error = result.unwrap_err();
-        // Every slot is back and the file was never replaced, so nothing is
-        // left to recover.
-        assert_ne!(
-            failure(&error),
-            Some(AccountFailure::RecoveryRequired),
-            "{error}"
-        );
+        // The write itself failed. Every slot is back and the file was never
+        // replaced, so there is nothing left to recover.
+        assert!(matches!(error, AppError::Io { .. }), "{error}");
         assert_eq!(f.store.default.borrow().as_deref(), Some(PERSONAL_LIVE));
         let named = f.store.named.borrow();
         assert_eq!(named[&f.accounts[0].config_dir()], WORK_SAVED);
@@ -1180,6 +1214,44 @@ mod tests {
         assert!(
             started.elapsed() >= Duration::from_secs(2),
             "the switch did not wait for the lock"
+        );
+    }
+
+    #[test]
+    fn a_switch_is_not_starved_by_refreshes_taking_the_lock_back_to_back() {
+        // Two usage fetches refresh one after the other: the second takes the
+        // lock the instant the first lets go, long before a waiting switch
+        // looks again.
+        let f = fixture();
+        let lock_path = switch_lock_path(&f.home);
+        let (first_held, ready) = std::sync::mpsc::channel();
+        let fetches = std::thread::spawn(move || {
+            let first = lock_for_fetch(&lock_path, Duration::from_secs(1)).unwrap();
+            first_held.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+            drop(first);
+            let second = lock_for_fetch(&lock_path, Duration::from_secs(10)).unwrap();
+            std::thread::sleep(Duration::from_millis(1500));
+            drop(second);
+        });
+        ready.recv().unwrap();
+        let started = std::time::Instant::now();
+
+        let outcome = switch(&f, "work");
+        let waited = started.elapsed();
+
+        fetches.join().unwrap();
+        assert_eq!(
+            outcome.unwrap(),
+            CliSwitchOutcome::Switched {
+                outgoing: Some("personal".into())
+            }
+        );
+        // It waited for the first refresh and went ahead of the second.
+        assert!(waited >= Duration::from_millis(300), "{waited:?}");
+        assert!(
+            waited < Duration::from_millis(1200),
+            "the switch waited for both refreshes: {waited:?}"
         );
     }
 

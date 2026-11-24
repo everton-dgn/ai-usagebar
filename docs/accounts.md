@@ -60,17 +60,27 @@ rótulo o token pertence é o identificador gravado nele.
 | A sessão em uso pertence a outra conta cadastrada | A troca guarda essa sessão na conta dona dela, nunca na que o arquivo apontava |
 | Uma sessão salva está na pasta de outra conta | Na próxima troca ela volta para a conta dona, desde que essa conta esteja sem sessão |
 | A sessão salva de uma conta pertence a outra e não tem para onde ir | O cartão informa que a sessão é de outra conta e não mostra consumo; a troca para essa conta é recusada |
-| A sessão em uso não informa a conta | A estrela não aparece e a troca é cancelada, sem alterar nada |
+| A sessão em uso não informa a conta | A estrela não aparece e a troca é cancelada, sem substituir essa sessão. Uma sessão salva na pasta errada ainda pode voltar para a conta dona |
 | A sessão salva de uma conta não informa a conta | O cartão avisa e não mostra consumo; a troca para essa conta é recusada |
 | Dois rótulos apontam a mesma conta | Nenhum dos dois é tratado como dono até a duplicidade ser desfeita |
-| Um login novo é gravado enquanto o token anterior é renovado | O login novo fica intacto; o cartão mostra a última leitura e lê o login novo na atualização seguinte |
+| Um login novo é gravado enquanto o token anterior é renovado | O login novo fica no lugar, seja de outra conta ou da mesma; o cartão mostra a última leitura e lê o login novo na atualização seguinte |
+| Uma conta cadastrada não tem identidade registrada nem login feito na própria pasta | O cartão informa **Conta sem identidade registrada** e não mostra consumo, mesmo com uma sessão salva |
+| O Chaves nega a leitura da sessão de uma conta que não participa da troca | A troca entre as outras contas segue; o reparo daquela sessão fica para uma troca seguinte. A troca só é recusada se ela fosse gravar por cima da única cópia conhecida da sessão de outra conta |
 
 Uma conta sem sessão própria precisa de um novo login no Claude Code. Para um
 rótulo passar a representar outra conta, cadastre um rótulo novo: o registro
 existente mantém o rótulo antigo na conta original. Se o registro tiver sido
-criado a partir de um login já errado, remova o arquivo
-`.ai-usagebar-identity.json` da pasta da conta com o aplicativo fechado; ele é
-recriado com a identidade que a pasta tiver naquele momento.
+criado a partir de um login já errado, feche o aplicativo, entre na conta certa
+pelo Claude Code usando a pasta desse rótulo, remova o arquivo
+`.ai-usagebar-identity.json` dessa pasta e só então abra o aplicativo de novo.
+O registro é recriado com a identidade que a pasta tiver naquele momento, então
+removê-lo antes do login certo recria o mesmo erro.
+
+O Claude Code e o aplicativo não compartilham bloqueio. A proteção do login
+novo cobre o que foi gravado até a conferência feita logo antes da regravação
+do token; um login gravado no instante entre a conferência e a regravação ainda
+é substituído. Uma troca que falha desfaz só a conta que ela tinha anotado em
+`~/.claude.json` e mantém o que o Claude Code gravou nesse arquivo depois.
 
 A renovação de token e a troca de conta usam o mesmo bloqueio. Uma troca pedida
 enquanto um token é renovado espera essa renovação terminar, por até 30

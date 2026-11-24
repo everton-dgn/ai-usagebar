@@ -55,12 +55,28 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 - Uma troca de conta à espera do bloqueio passa à frente das renovações de
   token seguintes: elas entram numa fila atrás da troca. Antes, renovações em
   sequência podiam retomar o bloqueio e a troca esperava por todas.
+- Um login novo da mesma conta, gravado enquanto o token anterior era
+  renovado, deixa de ser substituído pelos tokens da renovação. A comparação
+  usava só a conta; agora usa também o token de renovação lido no início.
+- Uma sessão do Chaves que não pode ser lida, de uma conta que não participa
+  da troca, não impede mais a troca entre as outras contas.
+- Uma troca de conta que falha desfaz só a conta que tinha anotado em
+  `~/.claude.json`. Antes regravava o arquivo inteiro e descartava o que o
+  Claude Code tinha gravado nele depois.
+- Um arquivo de sessão que não pode ser lido deixa de ser tratado como vazio
+  na regravação do token.
+- Conta cadastrada sem identidade registrada mostra **Conta sem identidade
+  registrada** em vez do consumo da sessão que estiver na pasta dela.
+- O cartão da sessão padrão mostra o e-mail da conta dona da sessão em uso, e
+  não mais o do arquivo `~/.claude.json`. Quando a sessão muda durante uma
+  renovação, esse cartão avisa em vez de mostrar a leitura anterior.
 - Quando uma operação de conta segura o bloqueio das sessões por mais de 45
   segundos, os cartões das contas cadastradas e dos perfis do Claude Desktop
   mostram a última leitura, e o da sessão padrão avisa que as sessões estão em
   uso. Antes, todos mostravam um erro de conexão, embora a rede estivesse
   normal.
-- Um login novo gravado enquanto o token anterior era renovado fica intacto,
+- Um login novo de outra conta, gravado enquanto o token anterior era
+  renovado, não é substituído pelos tokens da renovação,
   no Chaves e também em arquivo de credenciais, e o cartão mostra a última
   leitura sem pedir outro login. Antes, o cartão pedia um novo login, e o
   arquivo de credenciais era regravado com os tokens antigos.

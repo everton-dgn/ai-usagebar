@@ -83,11 +83,13 @@ async fn build_outcome(client: &Client, config: &Config, tab: &TabId) -> Result<
             // Only a CLI account entry is tied to one account whose identity
             // its credential can be checked against.
             let mut account_uuid = None;
+            let mut named = false;
             let (creds_target, cache) = match tab.account.as_deref() {
                 Some(label) if tab.desktop => {
                     crate::anthropic::desktop_creds::account_target(config, label)?
                 }
                 Some(label) => {
+                    named = true;
                     account_uuid = config.anthropic.account(label).ok().and_then(|account| {
                         crate::anthropic::cli_account::account_identity(&account)
                     });
@@ -103,11 +105,16 @@ async fn build_outcome(client: &Client, config: &Config, tab: &TabId) -> Result<
                     (target, crate::cache::Cache::for_vendor("anthropic")?)
                 }
             };
+            let owner = match account_uuid.as_deref() {
+                Some(uuid) => crate::anthropic::Owner::Account(uuid),
+                None if named => crate::anthropic::Owner::Unrecorded,
+                None => crate::anthropic::Owner::Unchecked,
+            };
             let endpoints = crate::anthropic::fetch::Endpoints::default();
             let outcome = crate::anthropic::fetch_snapshot_as(
                 client,
                 &creds_target,
-                account_uuid.as_deref(),
+                owner,
                 &cache,
                 &endpoints,
                 DEFAULT_TTL,

@@ -1619,6 +1619,12 @@ export function explainError(text, entry) {
       hint: "This account needs its own Claude Code sign-in. Signing in is not available in this app.",
     };
   }
+  if (/no recorded identity/i.test(raw)) {
+    return {
+      title: "Account not identified",
+      hint: "This account needs its own Claude Code sign-in. Signing in is not available in this app.",
+    };
+  }
   if (/does not say which account/i.test(raw)) {
     return {
       title: "Saved sign-in names no account",

@@ -585,6 +585,25 @@ fn account_emails(config: &Config) -> std::collections::BTreeMap<String, String>
     emails
 }
 
+/// Give the default login's card the e-mail of the account its credential
+/// belongs to (`active`).
+///
+/// WHY: `account_emails` takes it from the home marker, which every running
+/// Claude Code session rewrites and which named one account while the default
+/// slot held another. With no managed account live, the marker is all there is.
+fn default_card_follows_the_live_login(
+    emails: &mut std::collections::BTreeMap<String, String>,
+    active: Option<&str>,
+) {
+    let Some(label) = active else {
+        return;
+    };
+    match emails.get(&format!("anthropic@{label}")).cloned() {
+        Some(email) => emails.insert("anthropic".to_string(), email),
+        None => emails.remove("anthropic"),
+    };
+}
+
 /// Replace identities and account facts, preserving pending switches/errors.
 fn refresh_account_facts(facts: &SharedFacts) {
     let config = Config::load().unwrap_or_default();
@@ -592,7 +611,12 @@ fn refresh_account_facts(facts: &SharedFacts) {
         crate::anthropic::cli_account::record_identities(&config.anthropic.all_accounts());
     }
     let fresh = account_facts(&config, true);
-    let emails = account_emails(&config);
+    let mut emails = account_emails(&config);
+    let active = fresh
+        .iter()
+        .find(|fact| fact.vendor == "anthropic")
+        .and_then(|fact| fact.active.as_deref());
+    default_card_follows_the_live_login(&mut emails, active);
     with_facts(facts, |f| {
         f.account_emails = emails;
         f.accounts = fresh
@@ -3130,5 +3154,36 @@ mod presentation_tests {
             .body(String::new())
             .unwrap();
         assert!(!ipc::trusted_origin(&foreign.uri().to_string()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_card_names_the_account_its_credential_belongs_to() {
+        let emails = || {
+            std::collections::BTreeMap::from([
+                ("anthropic".to_string(), "stale@marker.test".to_string()),
+                ("anthropic@work".to_string(), "me@work.test".to_string()),
+            ])
+        };
+
+        // The home marker still names someone else, but the default slot
+        // holds `work`'s login.
+        let mut shown = emails();
+        default_card_follows_the_live_login(&mut shown, Some("work"));
+        assert_eq!(shown["anthropic"], "me@work.test");
+
+        // The live account has no e-mail on record: none beats a wrong one.
+        let mut shown = emails();
+        default_card_follows_the_live_login(&mut shown, Some("personal"));
+        assert_eq!(shown.get("anthropic"), None);
+
+        // A login that belongs to no account here: the marker is all there is.
+        let mut shown = emails();
+        default_card_follows_the_live_login(&mut shown, None);
+        assert_eq!(shown["anthropic"], "stale@marker.test");
     }
 }

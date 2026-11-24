@@ -15,7 +15,7 @@ try {
   const { LanguageProvider, translateUsage } = await server.ssrLoadModule('/src/lib/i18n.tsx');
   assert.equal(translateUsage('pt-BR', '0% elapsed · on track'), '0% do período transcorrido · dentro do ritmo');
   assert.equal(translateUsage('en', '0% elapsed · on track'), '0% elapsed · on track');
-  const { emptyLayout, emptyPayload, layoutForProviderView, parseHostPayload, projectCards, providerLinks } = await server.ssrLoadModule('/src/model.js');
+  const { accountSwitchFor, emptyLayout, emptyPayload, layoutForProviderView, parseHostPayload, projectCards, providerLinks } = await server.ssrLoadModule('/src/model.js');
   const nowMs = Date.parse('2026-09-24T11:00:00Z');
   const card = {
     id: 'anthropic', title: 'Claude', plan: '', stale: false, error: '', rows: [{
@@ -297,6 +297,54 @@ try {
     })));
   assert.match(tabsAccount('anthropic@work'), /aria-label="Use Claude \(switches Claude Code and the VS Code extension\)"/);
   assert.match(tabsAccount('anthropic@home'), /aria-label="Claude · 2 is the active account"/);
+  // A failed switch spells its reason out inside the card. Before, the star only turned red and
+  // the reason lived in its tooltip, so these match element text, never the aria-label/title copy.
+  const missingLogin = 'Esta conta está sem uma sessão salva, e conectar contas ainda não está disponível na interface.';
+  const failedAccounts = parseHostPayload({
+    accounts: {
+      anthropic: {
+        active: 'work', labels: ['work', 'conta2', 'home'], target: 'conta2', switching: false,
+        error: `${missingLogin}\u0007‮\n<b>x</b>`,
+      },
+    },
+  }).accounts;
+  const shownReason = `${missingLogin} &lt;b&gt;x&lt;/b&gt;`;
+  const failureNote = (html) => html.match(/<p[^>]*data-switch-failure=""[^>]*>[\s\S]*?<\/p>/)?.[0] ?? '';
+  const failedPayload = {
+    ...payload,
+    entries: ['work', 'conta2', 'home'].map((label) => ({ id: `anthropic@${label}`, shortName: 'cld', status: 'ready' })),
+    primary: 'anthropic@work',
+    accounts: failedAccounts,
+  };
+  const listFor = (id, accounts = failedAccounts) => renderToStaticMarkup(React.createElement(TooltipProvider, {},
+    React.createElement(LanguageProvider, { language: 'pt-BR' },
+      React.createElement(ProviderSection, {
+        account: accountSwitchFor(id, accounts), card: { ...card, id, title: 'Claude · 2' },
+        layout: emptyLayout(), nowMs, onSwitchAccount() {},
+      }))));
+  for (const html of [
+    listFor('anthropic@conta2'),
+    renderToStaticMarkup(React.createElement(LanguageProvider, { language: 'pt-BR' },
+      React.createElement(MacDashboard, {
+        cards: [{ ...card, id: 'anthropic@conta2', title: 'Claude · 2' }],
+        layout: emptyLayout(), nowMs, payload: failedPayload, focusId: 'anthropic@conta2',
+        onOpenCustomize() {}, onSwitchAccount() {},
+      }))),
+  ]) {
+    const note = failureNote(html);
+    assert.match(note, /role="alert"/);
+    assert.ok(note.includes(`>Não foi possível trocar para esta conta: ${shownReason}</span>`), note || html);
+    // Control, bidi and line-break characters never reach the card; markup stays text.
+    assert.doesNotMatch(note, /[\u0000-\u001f\u007f‪-‮⁦-⁩]|<b>/);
+    // No sign-in exists in this app, so the note names no command, terminal or button.
+    assert.doesNotMatch(note, /<button|terminal|`/i);
+  }
+  // Only the failed target says so: not the account in use, another login, or a running switch.
+  assert.equal(failureNote(listFor('anthropic@work')), '');
+  assert.equal(failureNote(listFor('anthropic@home')), '');
+  const running = { anthropic: { ...failedAccounts.anthropic, switching: true } };
+  assert.equal(failureNote(listFor('anthropic@conta2', running)), '');
+  assert.equal(failureNote(listFor('anthropic@conta2', { anthropic: { ...failedAccounts.anthropic, error: '' } })), '');
   // The card's error row shows the hint projectCards chose from the host's
   // sign_in; it used to re-explain the error from the card id alone, which
   // dropped every provider hint for the generic sentence.

@@ -23,6 +23,53 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 
 ### Corrigido
 
+- A conta Claude em uso passa a ser a dona da sessão guardada no Chaves, lida
+  do identificador de conta gravado no próprio token. Antes valia o arquivo
+  `~/.claude.json`, que as sessões abertas do Claude Code regravam: a estrela
+  apontava uma conta enquanto os terminais usavam outra, e a troca seguinte
+  guardava a sessão no rótulo errado e deixava a conta dona sem sessão.
+- Cada conta Claude ganha um registro próprio da conta a que o rótulo pertence
+  (`.ai-usagebar-identity.json`). Um login autorizado por outra conta no
+  navegador não muda mais a conta do rótulo: a sessão volta para a conta dona
+  na próxima troca ou o cartão avisa que ela é de outra conta, sem mostrar o
+  consumo alheio.
+- A renovação de token feita pelo aplicativo preserva o identificador de conta
+  da sessão. Antes ele era apagado a cada renovação.
+- A troca recusa guardar ou ativar uma sessão que não informa a conta e recusa
+  ativar uma conta cuja sessão salva pertence a outra, com o motivo no cartão.
+- A renovação de token das sessões do Claude Code passa a usar o mesmo bloqueio
+  da troca de conta e não grava mais por cima de uma sessão que pertence a
+  outra conta. Antes, uma renovação em andamento durante a troca podia deixar a
+  conta escolhida sem sessão.
+- A troca relê o arquivo `~/.claude.json` imediatamente antes de gravá-lo, para
+  não descartar o que as sessões abertas do Claude Code gravaram no intervalo.
+- A renovação de token preserva os campos da sessão que o aplicativo não usa,
+  como a data de validade do login (`refreshTokenExpiresAt`). Antes, cada
+  renovação apagava esses campos.
+- A troca de conta espera uma renovação de token em andamento terminar, por
+  até 30 segundos. Antes, desistia em 2 segundos com o aviso de acesso
+  reservado.
+- Conta Claude sem nenhuma sessão salva aparece como **Sem sessão salva** e
+  mostra que precisa de uma sessão do Claude Code. Antes, o cartão dizia que
+  não foi possível ler os arquivos locais.
+- Uma troca de conta à espera do bloqueio passa à frente das renovações de
+  token seguintes: elas entram numa fila atrás da troca. Antes, renovações em
+  sequência podiam retomar o bloqueio e a troca esperava por todas.
+- Quando uma operação de conta segura o bloqueio das sessões por mais de 45
+  segundos, os cartões das contas cadastradas e dos perfis do Claude Desktop
+  mostram a última leitura, e o da sessão padrão avisa que as sessões estão em
+  uso. Antes, todos mostravam um erro de conexão, embora a rede estivesse
+  normal.
+- Um login novo gravado enquanto o token anterior era renovado fica intacto,
+  no Chaves e também em arquivo de credenciais, e o cartão mostra a última
+  leitura sem pedir outro login. Antes, o cartão pedia um novo login, e o
+  arquivo de credenciais era regravado com os tokens antigos.
+- Falha na troca de conta pela estrela do card mostra o motivo dentro do
+  próprio card, nas vistas de lista e de abas. Antes, a estrela só ficava
+  vermelha e o motivo aparecia apenas ao passar o cursor. Para uma conta sem
+  sessão salva, o aviso informa que conectar contas ainda não está disponível
+  na interface.
+
 - Conta Claude salva com o mesmo rótulo no Claude Desktop e no Claude Code
   volta a mostrar o consumo real quando o servidor recusa a renovação do
   perfil do Desktop. Antes, o card ficava até 7 dias com a última leitura em

@@ -80,11 +80,19 @@ async fn build_outcome(client: &Client, config: &Config, tab: &TabId) -> Result<
             // The default tab keeps the pre-existing resolution: config
             // `credentials_path` is an explicit strict read, and only the
             // platform default gets the macOS Keychain fallback.
+            // Only a CLI account entry is tied to one account whose identity
+            // its credential can be checked against.
+            let mut account_uuid = None;
             let (creds_target, cache) = match tab.account.as_deref() {
                 Some(label) if tab.desktop => {
                     crate::anthropic::desktop_creds::account_target(config, label)?
                 }
-                Some(label) => config.anthropic.account_target(label)?,
+                Some(label) => {
+                    account_uuid = config.anthropic.account(label).ok().and_then(|account| {
+                        crate::anthropic::cli_account::account_identity(&account)
+                    });
+                    config.anthropic.account_target(label)?
+                }
                 None => {
                     let target = match config.anthropic.credentials_path.clone() {
                         Some(p) => crate::anthropic::creds::CredsTarget::Explicit(p),
@@ -96,9 +104,10 @@ async fn build_outcome(client: &Client, config: &Config, tab: &TabId) -> Result<
                 }
             };
             let endpoints = crate::anthropic::fetch::Endpoints::default();
-            let outcome = crate::anthropic::fetch_snapshot(
+            let outcome = crate::anthropic::fetch_snapshot_as(
                 client,
                 &creds_target,
+                account_uuid.as_deref(),
                 &cache,
                 &endpoints,
                 DEFAULT_TTL,

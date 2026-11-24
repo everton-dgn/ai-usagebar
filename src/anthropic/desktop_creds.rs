@@ -345,6 +345,8 @@ fn entry_to_oauth(entry: &Value, allow_refresh: bool) -> Result<OauthCreds> {
         subscription_type: get_str("subscriptionType"),
         rate_limit_tier: get_str("rateLimitTier"),
         scopes: None,
+        account_uuid: None,
+        organization_uuid: None,
     })
 }
 

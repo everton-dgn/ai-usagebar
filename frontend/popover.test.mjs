@@ -296,6 +296,52 @@ assert.equal(claudeCards[0].rows.length, 0);
       signIn,
     );
   }
+  // An account that never had a login here is not an expired one either.
+  {
+    const signIn = 'Needs a saved Claude Code sign-in on this Mac. Signing in is not available in this app.';
+    const explained = explainError(
+      'credentials error: no saved Claude Code login for this account; a Claude Code sign-in is needed, which this app cannot do', // anthropic/creds.rs
+      { signIn },
+    );
+    assert.equal(explained.title, 'No saved sign-in');
+    assert.equal(explained.hint, signIn);
+    assert.equal(explained.action, undefined);
+  }
+  // A login that changed while its token was being renewed is read again:
+  // no sign-in to ask for, no connection to check. Text from anthropic/fetch.rs.
+  {
+    const explained = explainError(
+      'the saved login changed while its token was being renewed; it is read again on the next update',
+      { signIn: 'unused' },
+    );
+    assert.equal(explained.title, "Couldn't update");
+    assert.equal(explained.hint, 'the saved login changed while its token was being renewed; it is read again on the next update');
+    assert.equal(explained.action, undefined);
+  }
+  // An account operation holding the saved logins is no connection problem
+  // and no sign-in problem. Text from anthropic/fetch.rs.
+  {
+    const busy = 'the saved logins are held by an account operation that has not finished; this account is read again on the next update';
+    const explained = explainError(busy, { signIn: 'unused' });
+    assert.equal(explained.title, "Couldn't update");
+    assert.equal(explained.hint, busy);
+    assert.equal(explained.action, undefined);
+  }
+  // A working login filed under the wrong account is not an expired one.
+  {
+    const error = 'credentials error: the Claude Code login saved for this account belongs to another account';
+    const explained = explainError(error, { signIn: 'unused' });
+    assert.equal(explained.title, 'Saved sign-in is for another account');
+    assert.match(explained.hint, /needs its own Claude Code sign-in/);
+    assert.equal(explained.action, undefined);
+    assert.doesNotMatch(explained.hint, TERMINAL);
+    const unnamed = explainError(
+      'credentials error: the Claude Code login saved for this account does not say which account it belongs to',
+      { signIn: 'unused' },
+    );
+    assert.equal(unnamed.title, 'Saved sign-in names no account');
+    assert.equal(unnamed.hint, explained.hint);
+  }
   // The rotated-token messages from anthropic::fetch and openai::fetch reach
   // the card as a warning. They name no command and still read as a sign-in.
   for (const [signIn, error] of [

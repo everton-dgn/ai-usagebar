@@ -483,21 +483,25 @@ fn run_detection(force: bool) {
 fn host_facts(config: &Config) -> HostFacts {
     let mut facts = HostFacts::new(env!("CARGO_PKG_VERSION"), startup::is_enabled());
     facts.refresh_secs = config.tray.refresh_minutes() * 60;
-    facts.accounts = account_facts(config);
+    // WHY: this runs on the window thread, and reading the Keychain there
+    // would hang the launch behind a macOS access prompt. The refresh worker
+    // fills in the active accounts with its first report.
+    facts.accounts = account_facts(config, false);
     facts.account_emails = account_emails(config);
     facts
 }
 
 /// Which Claude CLI and Codex logins are active, for the switch control on
 /// each account's card. Read fresh on every report, so a switch made from the
-/// terminal shows up too.
-fn account_facts(config: &Config) -> Vec<AccountSwitchFact> {
+/// terminal shows up too. `live` reads the Claude login from the Keychain;
+/// without it the Claude account in use is left unknown.
+fn account_facts(config: &Config, live: bool) -> Vec<AccountSwitchFact> {
     let mut out = Vec::new();
     let claude = config.anthropic.all_accounts();
     if config.anthropic.enabled && !claude.is_empty() {
-        let active = crate::anthropic::cli_account::home_claude_json()
-            .ok()
-            .and_then(|home| crate::anthropic::cli_account::resolve_active_label(&home, &claude));
+        let active = live
+            .then(|| crate::anthropic::cli_account::active_label(&claude))
+            .flatten();
         out.push(AccountSwitchFact {
             vendor: "anthropic".into(),
             active,
@@ -548,31 +552,22 @@ fn account_emails(config: &Config) -> std::collections::BTreeMap<String, String>
     }
     if config.anthropic.enabled {
         let mut by_uuid = std::collections::BTreeMap::new();
-        let markers = std::iter::once((
-            "anthropic".to_string(),
-            cli_account::home_claude_json().ok(),
-        ))
-        .chain(
-            config
-                .anthropic
-                .all_accounts()
-                .iter()
-                .map(|account| {
-                    (
-                        format!("anthropic@{}", account.label),
-                        Some(cli_account::marker_path(&account.config_dir())),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        );
-        for (id, marker) in markers {
-            if let Some(marker) = marker
-                && let Some(email) = cli_account::account_email_in(&marker)
-            {
-                if let Some(uuid) = cli_account::account_uuid_in(&marker) {
+        if let Ok(home) = cli_account::home_claude_json()
+            && let Some(email) = cli_account::account_email_in(&home)
+        {
+            if let Some(uuid) = cli_account::account_uuid_in(&home) {
+                by_uuid.insert(uuid, email.clone());
+            }
+            emails.insert("anthropic".to_string(), email);
+        }
+        // A named account shows the e-mail of the account it is recorded as,
+        // which a later sign-in in its directory cannot change.
+        for account in config.anthropic.all_accounts() {
+            if let Some(email) = cli_account::account_email(&account) {
+                if let Some(uuid) = cli_account::account_identity(&account) {
                     by_uuid.insert(uuid, email.clone());
                 }
-                emails.insert(id, email);
+                emails.insert(format!("anthropic@{}", account.label), email);
             }
         }
         if let Ok(paths) = crate::claude_desktop::Paths::resolve(&config.anthropic) {
@@ -593,7 +588,10 @@ fn account_emails(config: &Config) -> std::collections::BTreeMap<String, String>
 /// Replace identities and account facts, preserving pending switches/errors.
 fn refresh_account_facts(facts: &SharedFacts) {
     let config = Config::load().unwrap_or_default();
-    let fresh = account_facts(&config);
+    if config.anthropic.enabled {
+        crate::anthropic::cli_account::record_identities(&config.anthropic.all_accounts());
+    }
+    let fresh = account_facts(&config, true);
     let emails = account_emails(&config);
     with_facts(facts, |f| {
         f.account_emails = emails;

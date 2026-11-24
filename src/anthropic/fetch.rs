@@ -21,7 +21,7 @@ pub const USAGE_BETA_HEADER: &str = "oauth-2025-04-20";
 /// `claude-code/<version>` (what the official client sends) is fine.
 pub const USAGE_USER_AGENT: &str = "claude-code/2.1.183";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
-const REFRESH_TIMEOUT: Duration = Duration::from_secs(25);
+pub(super) const REFRESH_TIMEOUT: Duration = Duration::from_secs(25);
 const LOCK_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Endpoints (parameterized for tests).
@@ -55,19 +55,162 @@ pub async fn fetch_snapshot(
     endpoints: &Endpoints,
     cache_ttl: Duration,
 ) -> Result<FetchOutcome> {
+    fetch_snapshot_as(client, creds_target, None, cache, endpoints, cache_ttl).await
+}
+
+/// What a managed account's entry reports when the credential in its slot was
+/// issued to someone else. The popover classifies it by "belongs to another
+/// account".
+pub const WRONG_ACCOUNT_MESSAGE: &str =
+    "the Claude Code login saved for this account belongs to another account";
+
+/// What an entry with no reading to fall back on reports when its saved
+/// login changed during a refresh. The popover shows it as a diagnosis, under
+/// "Couldn't update": it names no sign-in and no connection problem.
+pub const LOGIN_CHANGED_MESSAGE: &str = "the saved login changed while its token was being renewed; it is read again on the next update";
+
+/// What an entry with no reading to fall back on reports while an account
+/// operation keeps the credential lock. The popover shows it as a diagnosis,
+/// under "Couldn't update": it names no sign-in and no connection problem.
+pub const CREDENTIALS_BUSY_MESSAGE: &str = "the saved logins are held by an account operation that has not finished; this account is read again on the next update";
+
+/// The same refusal for a credential that does not say whose it is. The
+/// popover classifies it by "does not say which account".
+pub const UNIDENTIFIED_ACCOUNT_MESSAGE: &str =
+    "the Claude Code login saved for this account does not say which account it belongs to";
+
+/// [`fetch_snapshot`] for an entry that is one known account (`account_uuid`).
+/// A credential not proven to be that account's is refused before the cache is
+/// read or the token refreshed, so the entry never shows another account's
+/// usage.
+pub async fn fetch_snapshot_as(
+    client: &reqwest::Client,
+    creds_target: &creds::CredsTarget,
+    account_uuid: Option<&str>,
+    cache: &Cache,
+    endpoints: &Endpoints,
+    cache_ttl: Duration,
+) -> Result<FetchOutcome> {
+    fetch_within(
+        client,
+        creds_target,
+        account_uuid,
+        cache,
+        endpoints,
+        cache_ttl,
+        LOCK_TIMEOUT,
+    )
+    .await
+}
+
+/// [`fetch_snapshot_as`] with the wait for the credential lock given, so a
+/// held lock can be tested without waiting out [`LOCK_TIMEOUT`].
+async fn fetch_within(
+    client: &reqwest::Client,
+    creds_target: &creds::CredsTarget,
+    account_uuid: Option<&str>,
+    cache: &Cache,
+    endpoints: &Endpoints,
+    cache_ttl: Duration,
+    credential_lock_wait: Duration,
+) -> Result<FetchOutcome> {
+    let result = fetch_locked(
+        client,
+        creds_target,
+        account_uuid,
+        cache,
+        endpoints,
+        cache_ttl,
+        credential_lock_wait,
+    )
+    .await;
+    if let Ok(outcome) = &result {
+        remember_plan(cache, &outcome.snapshot.plan);
+    }
+    result
+}
+
+/// The plan each cache's last returned reading came with, by cache lock path.
+///
+/// WHY: the plan is read from the credential, and [`credentials_busy`] has to
+/// show a reading without reading one. In memory only: after a restart there
+/// is nothing to show until the first fetch gets through.
+static PLANS: std::sync::Mutex<std::collections::BTreeMap<std::path::PathBuf, String>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn remember_plan(cache: &Cache, plan: &str) {
+    if let Ok(mut plans) = PLANS.lock() {
+        plans.insert(cache.lock_path(), plan.to_string());
+    }
+}
+
+/// The last reading of an entry whose credential lock an account operation
+/// would not let go of, typically a switch waiting on a Keychain prompt.
+///
+/// The credential is not read here, so the reading is shown only when
+/// `tied_to_an_account` says the cache can hold no one else's.
+fn credentials_busy(cache: &Cache, tied_to_an_account: bool) -> Result<FetchOutcome> {
+    let busy = || AppError::Other(CREDENTIALS_BUSY_MESSAGE.into());
+    let plan = PLANS
+        .lock()
+        .ok()
+        .and_then(|plans| plans.get(&cache.lock_path()).cloned());
+    match plan {
+        Some(plan) if tied_to_an_account => {
+            with_oauth_plan(&plan, fallback_to_cache_silent(cache, plan.clone(), busy()))
+        }
+        _ => Err(busy()),
+    }
+}
+
+/// Whether an entry's cache can only hold readings of one account: a named
+/// account whose identity is known, checked before every write to its cache,
+/// or a Desktop profile, cached under its account's own id.
+///
+/// WHY: the default login's cache follows the slot, not an account. While a
+/// switch holds the lock, its last reading is the outgoing account's.
+fn tied_to_an_account(target: &creds::CredsTarget, account_uuid: Option<&str>) -> bool {
+    account_uuid.is_some() || matches!(target, creds::CredsTarget::Desktop(_))
+}
+
+async fn fetch_locked(
+    client: &reqwest::Client,
+    creds_target: &creds::CredsTarget,
+    account_uuid: Option<&str>,
+    cache: &Cache,
+    endpoints: &Endpoints,
+    cache_ttl: Duration,
+    credential_lock_wait: Duration,
+) -> Result<FetchOutcome> {
     cache.ensure_dir()?;
     let _lock = acquire_lock_async(&cache.lock_path(), LOCK_TIMEOUT).await?;
     // Desktop snapshots and account switching can mutate the same rotating
     // credential. Hold their shared lock from source resolution through any
     // refresh write-back; the live config source is read-only but also uses the
     // lock so it cannot be read halfway through our own switch transaction.
-    let credential_lock = acquire_credential_lock(creds_target, LOCK_TIMEOUT).await?;
+    let credential_lock = match acquire_credential_lock(creds_target, credential_lock_wait).await {
+        Ok(lock) => lock,
+        // WHY: the lock is held, not broken. The error read as a connection
+        // problem, and the numbers on the card were still this account's.
+        Err(error) if crate::cache::is_lock_timeout(&error) => {
+            return credentials_busy(cache, tied_to_an_account(creds_target, account_uuid));
+        }
+        Err(error) => return Err(error),
+    };
 
     // Fast path: cache is fresh, no work needed. We still need creds for the
     // plan label though, so read them either way. `resolve` also reports where
     // the creds actually came from (file vs macOS Keychain) so the refresh
     // write-back follows the same source instead of forking a stale copy.
     let (mut creds, creds_source) = creds::resolve(creds_target)?;
+    if let Some(expected) = account_uuid {
+        let named = creds.claude_ai_oauth.account_uuid.as_deref();
+        match named.filter(|uuid| !uuid.is_empty()) {
+            Some(actual) if actual == expected => {}
+            Some(_) => return Err(AppError::Credentials(WRONG_ACCOUNT_MESSAGE.into())),
+            None => return Err(AppError::Credentials(UNIDENTIFIED_ACCOUNT_MESSAGE.into())),
+        }
+    }
     let plan_label = creds.claude_ai_oauth.plan_label();
 
     // Corrupt fresh cache falls through to a live fetch rather than returning
@@ -116,17 +259,34 @@ pub async fn fetch_snapshot(
                 }
                 creds.claude_ai_oauth.expires_at_ms =
                     Utc::now().timestamp_millis() + (rr.expires_in as i64) * 1000;
-                // When only the access token changed, a failed write loses
-                // nothing — the next run just refreshes again — so carry on.
-                if let Err(e) = creds::write_back_to(&creds_source, &creds.claude_ai_oauth)
-                    && rotated
-                {
-                    cache.write_last_error(0, &rotated_token_lost_message(&e));
-                    note_refused_snapshot(cache, &creds_source);
-                    return with_oauth_plan(
-                        &plan_label,
-                        handle_auth_failure(cache, plan_label.clone(), false),
-                    );
+                match creds::write_back_to(&creds_source, &creds.claude_ai_oauth) {
+                    Ok(creds::WriteBack::Saved) => {}
+                    // WHY: a sign-in or an account switch stored a login after
+                    // this one was read. That login is the current one and the
+                    // next update reads it. Asking for a new sign-in here would
+                    // be wrong, and so would usage read with tokens that are no
+                    // longer the stored ones.
+                    Ok(creds::WriteBack::LoginChanged) => {
+                        return with_oauth_plan(
+                            &plan_label,
+                            fallback_to_cache_silent(
+                                cache,
+                                plan_label.clone(),
+                                AppError::Other(LOGIN_CHANGED_MESSAGE.into()),
+                            ),
+                        );
+                    }
+                    Err(e) if rotated => {
+                        cache.write_last_error(0, &rotated_token_lost_message(&e));
+                        note_refused_snapshot(cache, &creds_source);
+                        return with_oauth_plan(
+                            &plan_label,
+                            handle_auth_failure(cache, plan_label.clone(), false),
+                        );
+                    }
+                    // When only the access token changed, a failed write loses
+                    // nothing — the next run just refreshes again — so carry on.
+                    Err(_) => {}
                 }
             }
             Ok(Err(AppError::Http { status, body })) => {
@@ -223,13 +383,50 @@ async fn acquire_credential_lock(
     target: &creds::CredsTarget,
     timeout: Duration,
 ) -> Result<Option<LockGuard>> {
-    let creds::CredsTarget::Desktop(desktop) = target else {
-        return Ok(None);
-    };
-    let Some(path) = desktop.coordination_lock() else {
-        return Ok(None);
-    };
-    acquire_lock_async(path, timeout).await.map(Some)
+    let lock = credential_lock(target, || super::cli_account::home_claude_json().ok());
+    acquire(lock, timeout).await
+}
+
+async fn acquire(lock: Option<CredentialLock>, timeout: Duration) -> Result<Option<LockGuard>> {
+    match lock {
+        Some(CredentialLock::Desktop(path)) => acquire_lock_async(&path, timeout).await.map(Some),
+        Some(CredentialLock::Cli(path)) => {
+            tokio::task::spawn_blocking(move || super::cli_account::lock_for_fetch(&path, timeout))
+                .await
+                .map_err(|e| AppError::Other(format!("credential lock task failed: {e}")))?
+                .map(Some)
+        }
+        None => Ok(None),
+    }
+}
+
+/// Which lock guards a credential against a concurrent account switch.
+#[derive(Debug, PartialEq, Eq)]
+enum CredentialLock {
+    /// The Desktop profile store's own lock.
+    Desktop(std::path::PathBuf),
+    /// The CLI slots' lock, taken behind the switch queue.
+    Cli(std::path::PathBuf),
+}
+
+/// The lock that guards `target`. `home` resolves the home `.claude.json`,
+/// beside which the CLI switch lock lives.
+fn credential_lock(
+    target: &creds::CredsTarget,
+    home: impl FnOnce() -> Option<std::path::PathBuf>,
+) -> Option<CredentialLock> {
+    match target {
+        creds::CredsTarget::Desktop(desktop) => desktop
+            .coordination_lock()
+            .map(|path| CredentialLock::Desktop(path.to_path_buf())),
+        // The CLI's own slots. An account switch moves them under this lock;
+        // without it a refresh in flight wrote one account's new tokens into
+        // a slot the switch had just given to another.
+        creds::CredsTarget::Default(_) | creds::CredsTarget::Named { .. } => {
+            home().map(|home| CredentialLock::Cli(super::cli_account::switch_lock_path(&home)))
+        }
+        creds::CredsTarget::Explicit(_) => None,
+    }
 }
 
 fn reuse_cache(
@@ -410,8 +607,12 @@ mod tests {
     }
 
     fn cache_fixture() -> (TempDir, Cache) {
+        cache_fixture_named("anthropic")
+    }
+
+    fn cache_fixture_named(name: &str) -> (TempDir, Cache) {
         let td = TempDir::new().unwrap();
-        let cache = Cache::at(td.path().join("anthropic"));
+        let cache = Cache::at(td.path().join(name));
         cache.ensure_dir().unwrap();
         (td, cache)
     }
@@ -623,6 +824,343 @@ mod tests {
         assert_eq!(outcome.snapshot.session.utilization_pct, 42);
         assert_ne!(outcome.snapshot.plan, "Unknown");
         assert!(!outcome.stale);
+    }
+
+    #[tokio::test]
+    async fn a_credential_issued_to_another_account_reports_no_usage() {
+        // The entry is `uuid-work`; its slot holds `uuid-personal`'s login and
+        // its cache holds a fresh reading. Neither may be shown as `work`'s.
+        let (_td, cache) = cache_fixture();
+        cache
+            .write_payload(br#"{"five_hour":{"utilization":42},"seven_day":{"utilization":15}}"#)
+            .unwrap();
+        let mut creds = NamedTempFile::new().unwrap();
+        creds
+            .write_all(
+                br#"{"claudeAiOauth":{"accessToken":"AT","refreshToken":"RT",
+                    "expiresAt":99999999999999,"accountUuid":"uuid-personal"}}"#,
+            )
+            .unwrap();
+        creds.flush().unwrap();
+        let target = creds::CredsTarget::Explicit(creds.path().to_path_buf());
+        let client = reqwest::Client::new();
+        let endpoints = Endpoints {
+            usage: "http://localhost:1/should-not-be-called".into(),
+            token: "http://localhost:1/should-not-be-called".into(),
+        };
+        let fetch = |account: Option<&'static str>| {
+            fetch_snapshot_as(
+                &client,
+                &target,
+                account,
+                &cache,
+                &endpoints,
+                Duration::from_secs(3600),
+            )
+        };
+
+        let error = fetch(Some("uuid-work")).await.unwrap_err();
+        assert!(error.to_string().contains(WRONG_ACCOUNT_MESSAGE), "{error}");
+
+        // Its own account, and an entry tied to no account, read as before.
+        for account in [Some("uuid-personal"), None] {
+            let outcome = fetch(account).await.unwrap();
+            assert_eq!(outcome.snapshot.session.utilization_pct, 42);
+        }
+    }
+
+    #[test]
+    fn the_cli_slots_are_read_under_the_account_switch_lock() {
+        let home = || Some(std::path::PathBuf::from("/fixture-home/.claude.json"));
+        let switch_lock = Some(CredentialLock::Cli(
+            crate::anthropic::cli_account::switch_lock_path(std::path::Path::new(
+                "/fixture-home/.claude.json",
+            )),
+        ));
+
+        let default = creds::CredsTarget::Default("/fixture-home/.claude/c.json".into());
+        let named = creds::CredsTarget::Named {
+            path: "/accounts/work/.credentials.json".into(),
+            config_dir: "/accounts/work".into(),
+        };
+        assert_eq!(credential_lock(&default, home), switch_lock);
+        assert_eq!(credential_lock(&named, home), switch_lock);
+        // A file the user pointed at is no slot a switch moves.
+        let explicit = creds::CredsTarget::Explicit("/elsewhere/c.json".into());
+        assert_eq!(credential_lock(&explicit, home), None);
+        // Without a home there is no lock to take, and the fetch goes on.
+        assert_eq!(credential_lock(&default, || None), None);
+        // The Desktop store has its own lock and no queue.
+        let desktop_lock = std::path::PathBuf::from("/profiles/.account-switch.lock");
+        let desktop = creds::CredsTarget::Desktop(
+            crate::anthropic::desktop_creds::source_for(
+                std::path::Path::new("/profiles/config.json"),
+                std::path::Path::new("/profiles/work"),
+                false,
+                [0; 16],
+            )
+            .with_coordination_lock(desktop_lock.clone()),
+        );
+        assert_eq!(
+            credential_lock(&desktop, home),
+            Some(CredentialLock::Desktop(desktop_lock))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cli_refresh_lines_up_behind_a_waiting_switch() {
+        // The switch holds the queue while it waits; the fetch must not reach
+        // the credential lock, free as it is, until the queue lets it through.
+        let tmp = TempDir::new().unwrap();
+        let lock_path = tmp.path().join(".ai-usagebar-account-switch.lock");
+        let queue = crate::cache::acquire_lock(
+            &tmp.path().join(".ai-usagebar-account-switch.queue"),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let waiter = tokio::spawn(async move {
+            acquire(Some(CredentialLock::Cli(lock_path)), Duration::from_secs(2))
+                .await
+                .unwrap()
+                .is_some()
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!waiter.is_finished(), "the fetch went around the queue");
+
+        drop(queue);
+        assert!(waiter.await.unwrap());
+    }
+
+    /// A Desktop account whose credential lock lives at `lock_path`. The
+    /// profile itself is never read: these fetches stop at the lock.
+    fn desktop_behind(lock_path: &std::path::Path) -> creds::CredsTarget {
+        let root = lock_path.parent().unwrap();
+        creds::CredsTarget::Desktop(
+            crate::anthropic::desktop_creds::source_for(
+                &root.join("config.json"),
+                &root.join("profile"),
+                false,
+                [0; 16],
+            )
+            .with_coordination_lock(lock_path.to_path_buf()),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_held_credential_lock_shows_the_last_reading_instead_of_an_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/oauth/usage")
+            .with_status(200)
+            .with_body(r#"{"five_hour":{"utilization":50},"seven_day":{"utilization":25}}"#)
+            .create_async()
+            .await;
+        let client = reqwest::Client::new();
+        let endpoints = Endpoints {
+            usage: format!("{}/api/oauth/usage", server.url()),
+            token: format!("{}/token", server.url()),
+        };
+        // A real fetch leaves this cache its reading and the plan it came with.
+        let (_td, cache) = cache_fixture();
+        let login = future_creds();
+        fetch_snapshot(
+            &client,
+            &creds::CredsTarget::Explicit(login.path().to_path_buf()),
+            &cache,
+            &endpoints,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+
+        // An account switch waiting on the user keeps the lock.
+        let tmp = TempDir::new().unwrap();
+        let lock_path = tmp.path().join(".account-switch.lock");
+        let _switch = crate::cache::acquire_lock(&lock_path, Duration::from_secs(1)).unwrap();
+        let target = desktop_behind(&lock_path);
+        let wait = Duration::from_millis(200);
+        let started = std::time::Instant::now();
+
+        let outcome = fetch_within(
+            &client,
+            &target,
+            None,
+            &cache,
+            &endpoints,
+            Duration::ZERO,
+            wait,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            started.elapsed() >= wait,
+            "the fetch did not wait for the lock"
+        );
+        assert_eq!(outcome.snapshot.session.utilization_pct, 50);
+        assert_eq!(outcome.snapshot.plan, "Max 5x");
+        assert!(outcome.stale);
+        assert_eq!(cache.read_last_error(), None);
+
+        // A reading that is gone leaves the plan on the message.
+        cache.forget_after_fetch();
+        let error = fetch_within(
+            &client,
+            &target,
+            None,
+            &cache,
+            &endpoints,
+            Duration::ZERO,
+            wait,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains(CREDENTIALS_BUSY_MESSAGE),
+            "{error}"
+        );
+        assert_eq!(error.plan(), Some("Claude Max 5x"));
+
+        // An entry with no reading yet says what is going on.
+        let (_empty_td, empty) = cache_fixture_named("anthropic-empty");
+        let error = fetch_within(
+            &client,
+            &target,
+            None,
+            &empty,
+            &endpoints,
+            Duration::ZERO,
+            wait,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains(CREDENTIALS_BUSY_MESSAGE),
+            "{error}"
+        );
+
+        // A lock that cannot even be created is a different failure and keeps
+        // its own error, reading or no reading.
+        let blocker = tmp.path().join("a-file");
+        std::fs::write(&blocker, b"").unwrap();
+        let unreachable = desktop_behind(&blocker.join("nested").join(".account-switch.lock"));
+        let error = fetch_within(
+            &client,
+            &unreachable,
+            None,
+            &cache,
+            &endpoints,
+            Duration::ZERO,
+            wait,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Io { .. }), "{error}");
+    }
+
+    #[test]
+    fn only_a_cache_tied_to_one_account_stands_in_for_a_held_lock() {
+        let desktop = desktop_behind(std::path::Path::new("/profiles/.account-switch.lock"));
+        let default = creds::CredsTarget::Default("/home/.claude/c.json".into());
+        let named = creds::CredsTarget::Named {
+            path: "/accounts/work/.credentials.json".into(),
+            config_dir: "/accounts/work".into(),
+        };
+
+        assert!(tied_to_an_account(&desktop, None));
+        assert!(tied_to_an_account(&named, Some("uuid-work")));
+        // The default login follows the slot, and a label with no known
+        // identity is not checked against anything.
+        assert!(!tied_to_an_account(&default, None));
+        assert!(!tied_to_an_account(&named, None));
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_during_a_refresh_is_left_alone_and_asks_for_nothing() {
+        // The token endpoint stands in for the moment a sign-in lands: it
+        // rewrites the credential file while this refresh is in flight.
+        const NEW_LOGIN: &str = r#"{"claudeAiOauth":{"accessToken":"signed-in-at","refreshToken":"signed-in-rt","expiresAt":99999999999999,"accountUuid":"uuid-personal"}}"#;
+        let (_dir, path) = crate::cache::closed_temp_file(
+            "creds.json",
+            Some(
+                r#"{"claudeAiOauth":{"accessToken":"old-at","refreshToken":"old-rt","expiresAt":1,"accountUuid":"uuid-work"}}"#,
+            ),
+        );
+        let mut server = mockito::Server::new_async().await;
+        let stored = path.clone();
+        server
+            .mock("POST", "/token")
+            .with_status(200)
+            .with_body_from_request(move |_| {
+                std::fs::write(&stored, NEW_LOGIN).unwrap();
+                br#"{"access_token":"new-at","refresh_token":"new-rt","expires_in":3600}"#.to_vec()
+            })
+            .create_async()
+            .await;
+        let usage = server
+            .mock("GET", "/api/oauth/usage")
+            .expect(0)
+            .create_async()
+            .await;
+        let (_td, cache) = cache_fixture();
+        cache
+            .write_payload(br#"{"five_hour":{"utilization":42},"seven_day":{"utilization":15}}"#)
+            .unwrap();
+        let endpoints = Endpoints {
+            usage: format!("{}/api/oauth/usage", server.url()),
+            token: format!("{}/token", server.url()),
+        };
+
+        let outcome = fetch_snapshot_as(
+            &reqwest::Client::new(),
+            &creds::CredsTarget::Explicit(path.clone()),
+            Some("uuid-work"),
+            &cache,
+            &endpoints,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+
+        // The last good reading, with nothing recorded against the account and
+        // the new login untouched.
+        assert_eq!(outcome.snapshot.session.utilization_pct, 42);
+        assert_eq!(cache.read_last_error(), None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), NEW_LOGIN);
+        usage.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_credential_that_names_no_account_reports_no_usage_for_one() {
+        let (_td, cache) = cache_fixture();
+        cache
+            .write_payload(br#"{"five_hour":{"utilization":42},"seven_day":{"utilization":15}}"#)
+            .unwrap();
+        // `future_creds` carries no account: the shape older builds left.
+        let creds = future_creds();
+        let target = creds::CredsTarget::Explicit(creds.path().to_path_buf());
+        let client = reqwest::Client::new();
+        let endpoints = Endpoints {
+            usage: "http://localhost:1/should-not-be-called".into(),
+            token: "http://localhost:1/should-not-be-called".into(),
+        };
+
+        let error = fetch_snapshot_as(
+            &client,
+            &target,
+            Some("uuid-work"),
+            &cache,
+            &endpoints,
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains(UNIDENTIFIED_ACCOUNT_MESSAGE),
+            "{error}"
+        );
     }
 
     #[tokio::test]

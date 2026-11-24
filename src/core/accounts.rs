@@ -82,6 +82,8 @@ pub(crate) enum Failure {
     UnmanagedLogin,
     MissingLogin,
     InvalidAccountState,
+    WrongAccount,
+    UnidentifiedLogin,
     SwitchFailed,
     WorkerUnavailable,
     InvalidResponse,
@@ -95,6 +97,8 @@ impl Failure {
                 AccountFailure::UnmanagedLogin => Self::UnmanagedLogin,
                 AccountFailure::MissingLogin => Self::MissingLogin,
                 AccountFailure::InvalidState => Self::InvalidAccountState,
+                AccountFailure::WrongAccount => Self::WrongAccount,
+                AccountFailure::UnidentifiedLogin => Self::UnidentifiedLogin,
                 AccountFailure::StorageUnavailable => Self::StorageUnavailable,
                 AccountFailure::LockUnavailable => Self::LockUnavailable,
             },
@@ -132,6 +136,12 @@ impl Failure {
             }
             Self::InvalidAccountState => {
                 "A identidade salva desta conta está inválida ou duplicada. Confira as contas conectadas antes de trocar."
+            }
+            Self::WrongAccount => {
+                "A sessão salva nesta conta pertence a outra conta. Esta conta precisa de um novo login no Claude Code, e conectar contas ainda não está disponível na interface."
+            }
+            Self::UnidentifiedLogin => {
+                "Uma sessão do Claude Code envolvida nesta troca não informa a qual conta pertence. A troca foi cancelada para não guardar nem ativar uma sessão na conta errada. Um novo login no Claude Code regrava essa informação."
             }
             Self::SwitchFailed => {
                 "Não foi possível concluir a troca. Confira a conta ativa e o armazenamento das contas."
@@ -326,11 +336,16 @@ mod tests {
                 credentials_path: named.join("unused-fixture.json"),
             });
         let store = MemoryStore::default();
-        *store.default.borrow_mut() = Some("unmanaged-live".into());
+        let blob = |uuid: &str, secret: &str| {
+            format!(r#"{{"claudeAiOauth":{{"accessToken":"{secret}","accountUuid":"{uuid}"}}}}"#)
+        };
+        let unmanaged_live = blob("fixture-stranger", "unmanaged-live");
+        let work_saved = blob("fixture-work", "work-saved");
+        *store.default.borrow_mut() = Some(unmanaged_live.clone());
         store
             .named
             .borrow_mut()
-            .insert(named.clone(), "work-saved".into());
+            .insert(named.clone(), work_saved.clone());
         let request = SwitchRequest::new(Provider::ClaudeCli, "work".into()).unwrap();
         let run = || {
             switch_at(
@@ -343,9 +358,16 @@ mod tests {
         };
 
         assert_eq!(run(), Err(Failure::UnmanagedLogin));
-        assert_eq!(store.default.borrow().as_deref(), Some("unmanaged-live"));
-        assert_eq!(store.named.borrow()[&named], "work-saved");
+        assert_eq!(store.default.borrow().as_deref(), Some(&*unmanaged_live));
+        assert_eq!(store.named.borrow()[&named], work_saved);
         assert!(!marker.exists());
+
+        // A login that names no account is refused the same way: it could
+        // only be saved under a guess.
+        *store.default.borrow_mut() = Some("opaque-live".into());
+        assert_eq!(run(), Err(Failure::UnidentifiedLogin));
+        assert_eq!(store.default.borrow().as_deref(), Some("opaque-live"));
+        assert_eq!(store.named.borrow()[&named], work_saved);
 
         // Make the fixture's in-memory default empty. The real Keychain is
         // never read or written by this test.
@@ -362,13 +384,21 @@ mod tests {
         store
             .named
             .borrow_mut()
-            .insert(named.clone(), "work-saved".into());
+            .insert(named.clone(), work_saved.clone());
         assert_eq!(run(), Ok(Effect::Switched));
-        assert_eq!(store.default.borrow().as_deref(), Some("work-saved"));
+        assert_eq!(store.default.borrow().as_deref(), Some(&*work_saved));
         assert!(store.named.borrow().is_empty());
         assert_eq!(
-            cli_account::resolve_active_label(&marker, &config.anthropic.accounts).as_deref(),
+            cli_account::resolve_active_label(
+                store.default.borrow().as_deref(),
+                &config.anthropic.accounts
+            )
+            .as_deref(),
             Some("work")
+        );
+        assert_eq!(
+            cli_account::account_uuid_in(&marker).as_deref(),
+            Some("fixture-work")
         );
         assert_eq!(run(), Ok(Effect::AlreadyActive));
     }

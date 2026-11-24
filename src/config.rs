@@ -295,11 +295,7 @@ impl AnthropicConfig {
     /// apply. Plus an `anthropic/<label>` cache subdir, so every consumer of an
     /// account entry (#14, #17) resolves it identically.
     pub fn account_target(&self, label: &str) -> Result<(CredsTarget, Cache)> {
-        let active = crate::anthropic::cli_account::home_claude_json()
-            .ok()
-            .and_then(|path| {
-                crate::anthropic::cli_account::resolve_active_label(&path, &self.all_accounts())
-            });
+        let active = crate::anthropic::cli_account::active_label(&self.all_accounts());
         self.account_target_with(label, active.as_deref())
     }
 

@@ -340,12 +340,17 @@ fn merge_oauth(existing: Option<&str>, new_oauth: &OauthCreds) -> Result<serde_j
 /// CLI might have added. Following the read source keeps a single shared
 /// source of truth with Claude Code — refreshing Keychain-read tokens into a
 /// stale shadow file would rotate the refresh token out from under it.
-pub fn write_back_to(source: &CredsSource, new_oauth: &OauthCreds) -> Result<WriteBack> {
+pub fn write_back_to(
+    source: &CredsSource,
+    new_oauth: &OauthCreds,
+    started_from: &str,
+) -> Result<WriteBack> {
     match source {
-        CredsSource::File(path) => write_back(path, new_oauth),
+        CredsSource::File(path) => write_back(path, new_oauth, started_from),
         CredsSource::Keychain => {
             let existing = keychain::read_raw()?;
-            let Some(doc) = refreshed_document(existing.as_deref(), new_oauth)? else {
+            let Some(doc) = refreshed_document(existing.as_deref(), new_oauth, started_from)?
+            else {
                 return Ok(WriteBack::LoginChanged);
             };
             keychain::write_raw(&serde_json::to_string(&doc).map_err(AppError::Json)?)?;
@@ -353,7 +358,8 @@ pub fn write_back_to(source: &CredsSource, new_oauth: &OauthCreds) -> Result<Wri
         }
         CredsSource::NamedKeychain(config_dir) => {
             let existing = keychain::read_raw_for(config_dir)?;
-            let Some(doc) = refreshed_document(existing.as_deref(), new_oauth)? else {
+            let Some(doc) = refreshed_document(existing.as_deref(), new_oauth, started_from)?
+            else {
                 return Ok(WriteBack::LoginChanged);
             };
             let json = serde_json::to_string(&doc).map_err(AppError::Json)?;
@@ -369,8 +375,8 @@ pub fn write_back_to(source: &CredsSource, new_oauth: &OauthCreds) -> Result<Wri
 pub enum WriteBack {
     Saved,
     /// Nothing was written: what is stored now is a different login from the
-    /// one that was read. A sign-in or an account switch got there first, and
-    /// that login is the current one.
+    /// one that was read, of another account or of the same one. A sign-in or
+    /// an account switch got there first, and that login is the current one.
     LoginChanged,
 }
 
@@ -379,29 +385,56 @@ pub enum WriteBack {
 fn refreshed_document(
     existing: Option<&str>,
     new_oauth: &OauthCreds,
+    started_from: &str,
 ) -> Result<Option<serde_json::Value>> {
-    if holds_a_different_login(existing, new_oauth) {
+    if holds_a_different_login(existing, new_oauth, started_from) {
         return Ok(None);
     }
     merge_oauth(existing, new_oauth).map(Some)
 }
 
 /// A credential store can change hands between a read and its write-back: an
-/// account switch, or a sign-in. Refreshed tokens are written only over a
-/// store that is empty, names nobody, or names the account they were issued to.
-fn holds_a_different_login(existing: Option<&str>, new_oauth: &OauthCreds) -> bool {
-    let stored = existing.and_then(super::cli_account::blob_account_uuid);
+/// account switch, or a sign-in. Refreshed tokens are written only over the
+/// login the refresh started from, known by the refresh token it had then
+/// (`started_from`), or over a store with no login in it.
+///
+/// NOTE: Claude Code shares no lock with this app. A login it saves between
+/// this check and the write that follows is still replaced.
+fn holds_a_different_login(
+    existing: Option<&str>,
+    new_oauth: &OauthCreds,
+    started_from: &str,
+) -> bool {
+    let Some(stored) = existing
+        .and_then(|blob| serde_json::from_str::<serde_json::Value>(blob).ok())
+        .and_then(|document| document.get("claudeAiOauth").cloned())
+        .filter(serde_json::Value::is_object)
+    else {
+        return false;
+    };
+    let text = |key: &str| stored.get(key).and_then(serde_json::Value::as_str);
     let ours = new_oauth
         .account_uuid
         .as_deref()
         .filter(|uuid| !uuid.is_empty());
-    stored.as_deref().is_some_and(|stored| ours != Some(stored))
+    let named = text("accountUuid").filter(|uuid| !uuid.is_empty());
+    if named.is_some_and(|named| ours != Some(named)) {
+        return true;
+    }
+    // WHY: a second sign-in to the same account is another grant under the
+    // same account id. Only the refresh token tells the two apart.
+    text("refreshToken").unwrap_or_default() != started_from
 }
 
 /// Persist updated credentials to a file, preserving unknown fields.
-pub fn write_back(path: &Path, new_oauth: &OauthCreds) -> Result<WriteBack> {
-    let existing = std::fs::read_to_string(path).ok();
-    let Some(doc) = refreshed_document(existing.as_deref(), new_oauth)? else {
+pub fn write_back(path: &Path, new_oauth: &OauthCreds, started_from: &str) -> Result<WriteBack> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        // What it holds is unknown, and may be a login saved a moment ago.
+        Err(error) => return Err(AppError::io_at(path, error)),
+    };
+    let Some(doc) = refreshed_document(existing.as_deref(), new_oauth, started_from)? else {
         return Ok(WriteBack::LoginChanged);
     };
     let bytes = serde_json::to_vec_pretty(&doc).map_err(AppError::Json)?;
@@ -806,7 +839,11 @@ mod tests {
             account_uuid: None,
             organization_uuid: None,
         };
-        assert_eq!(write_back(&path, &new_oauth).unwrap(), WriteBack::Saved);
+        let started_from = creds.claude_ai_oauth.refresh_token.clone();
+        assert_eq!(
+            write_back(&path, &new_oauth, &started_from).unwrap(),
+            WriteBack::Saved
+        );
         // Re-read & verify the unknown field survived.
         let raw = std::fs::read_to_string(&path).unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -829,10 +866,10 @@ mod tests {
     fn a_refresh_keeps_the_fields_this_app_does_not_model() {
         let mut oauth = parse(REAL_SHAPED, "fixture").unwrap().claude_ai_oauth;
         oauth.access_token = "NEW".into();
-        oauth.refresh_token = "NEW_RT".into();
+        let started_from = std::mem::replace(&mut oauth.refresh_token, "NEW_RT".into());
         oauth.expires_at_ms = 2000;
 
-        let written = refreshed_document(Some(REAL_SHAPED), &oauth).unwrap();
+        let written = refreshed_document(Some(REAL_SHAPED), &oauth, &started_from).unwrap();
 
         let mut expected: serde_json::Value = serde_json::from_str(REAL_SHAPED).unwrap();
         expected["claudeAiOauth"]["accessToken"] = "NEW".into();
@@ -846,13 +883,13 @@ mod tests {
         // The credential that was read named nobody; what is stored now names
         // an account. The refreshed tokens are not proven to be that account's.
         let mut unnamed = parse(REAL_SHAPED, "fixture").unwrap().claude_ai_oauth;
-        unnamed.refresh_token = "NEW_RT".into();
+        let started_from = std::mem::replace(&mut unnamed.refresh_token, "NEW_RT".into());
         unnamed.account_uuid = None;
         unnamed.organization_uuid = None;
 
         // The store is left alone.
         assert_eq!(
-            refreshed_document(Some(REAL_SHAPED), &unnamed).unwrap(),
+            refreshed_document(Some(REAL_SHAPED), &unnamed, &started_from).unwrap(),
             None
         );
 
@@ -877,19 +914,22 @@ mod tests {
             organization_uuid: None,
         };
         let slot = |uuid: &str| {
-            format!(r#"{{"claudeAiOauth":{{"accessToken":"x","accountUuid":"{uuid}"}}}}"#)
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"x","refreshToken":"OLD_RT","accountUuid":"{uuid}"}}}}"#
+            )
         };
 
         assert_eq!(
-            refreshed_document(Some(&slot("uuid-personal")), &work).unwrap(),
+            refreshed_document(Some(&slot("uuid-personal")), &work, "OLD_RT").unwrap(),
             None
         );
 
         // Its own slot, an emptied one, and one that names nobody are
         // rewritten with the new tokens, still naming the account.
-        let unnamed = r#"{"claudeAiOauth":{"accessToken":"x"}}"#.to_string();
+        let unnamed =
+            r#"{"claudeAiOauth":{"accessToken":"x","refreshToken":"OLD_RT"}}"#.to_string();
         for existing in [Some(slot("uuid-work")), None, Some(unnamed)] {
-            let doc = refreshed_document(existing.as_deref(), &work)
+            let doc = refreshed_document(existing.as_deref(), &work, "OLD_RT")
                 .unwrap()
                 .expect("the same login is written");
             assert_eq!(doc["claudeAiOauth"]["refreshToken"], "NEW_RT");
@@ -898,17 +938,84 @@ mod tests {
     }
 
     #[test]
+    fn a_new_sign_in_to_the_same_account_is_a_different_login() {
+        let work = OauthCreds {
+            access_token: "NEW".into(),
+            refresh_token: "NEW_RT".into(),
+            expires_at_ms: 1,
+            subscription_type: String::new(),
+            rate_limit_tier: String::new(),
+            scopes: None,
+            account_uuid: Some("uuid-work".into()),
+            organization_uuid: None,
+        };
+        let stored = |refresh_token: &str| {
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"x","refreshToken":"{refresh_token}","accountUuid":"uuid-work"}}}}"#
+            )
+        };
+
+        // The login the refresh started from takes its rotated token.
+        let doc = refreshed_document(Some(&stored("OLD_RT")), &work, "OLD_RT")
+            .unwrap()
+            .expect("the same login is written");
+        assert_eq!(doc["claudeAiOauth"]["refreshToken"], "NEW_RT");
+
+        // A sign-in to the same account since then is another grant: writing
+        // over it would put this refresh's tokens in place of the new ones.
+        assert_eq!(
+            refreshed_document(Some(&stored("SIGNED_IN_RT")), &work, "OLD_RT").unwrap(),
+            None
+        );
+        // So is a login Claude Code keeps without a refresh token.
+        let tokenless = r#"{"claudeAiOauth":{"accessToken":"x","accountUuid":"uuid-work"}}"#;
+        assert_eq!(
+            refreshed_document(Some(tokenless), &work, "OLD_RT").unwrap(),
+            None
+        );
+        // A store with no login in it is free to take the tokens.
+        assert!(
+            refreshed_document(Some(r#"{"mcpOAuth":{}}"#), &work, "OLD_RT")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_credential_file_that_cannot_be_read_is_not_taken_for_an_empty_one() {
+        const UNREADABLE: [u8; 3] = [0xff, 0xfe, 0x00];
+        let (dir, path) = write_creds_closed("{}");
+        std::fs::write(&path, UNREADABLE).unwrap();
+        let mut work = parse(REAL_SHAPED, "fixture").unwrap().claude_ai_oauth;
+        let started_from = std::mem::replace(&mut work.refresh_token, "NEW_RT".into());
+
+        // What it holds is unknown, so it may be a login saved a moment ago.
+        assert!(write_back(&path, &work, &started_from).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), UNREADABLE);
+
+        // A file that is not there is the empty store.
+        let absent = dir.path().join("absent.json");
+        assert_eq!(
+            write_back(&absent, &work, &started_from).unwrap(),
+            WriteBack::Saved
+        );
+    }
+
+    #[test]
     fn a_file_that_now_holds_another_login_is_left_alone() {
         const SIGNED_IN: &str =
             r#"{"claudeAiOauth":{"accessToken":"theirs","accountUuid":"uuid-personal"}}"#;
         let (_dir, path) = write_creds_closed(SIGNED_IN);
         let mut work = parse(REAL_SHAPED, "fixture").unwrap().claude_ai_oauth;
-        work.refresh_token = "NEW_RT".into();
+        let started_from = std::mem::replace(&mut work.refresh_token, "NEW_RT".into());
 
-        assert_eq!(write_back(&path, &work).unwrap(), WriteBack::LoginChanged);
+        assert_eq!(
+            write_back(&path, &work, &started_from).unwrap(),
+            WriteBack::LoginChanged
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), SIGNED_IN);
         assert_eq!(
-            write_back_to(&CredsSource::File(path.clone()), &work).unwrap(),
+            write_back_to(&CredsSource::File(path.clone()), &work, &started_from).unwrap(),
             WriteBack::LoginChanged
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), SIGNED_IN);
@@ -926,8 +1033,11 @@ mod tests {
         // read, then the whole struct back to where it came from.
         let mut oauth = read_from(&path).unwrap().claude_ai_oauth;
         oauth.access_token = "NEW".into();
-        oauth.refresh_token = "NEW_RT".into();
-        assert_eq!(write_back(&path, &oauth).unwrap(), WriteBack::Saved);
+        let started_from = std::mem::replace(&mut oauth.refresh_token, "NEW_RT".into());
+        assert_eq!(
+            write_back(&path, &oauth, &started_from).unwrap(),
+            WriteBack::Saved
+        );
 
         let raw = std::fs::read_to_string(&path).unwrap();
         assert_eq!(

@@ -327,6 +327,15 @@ assert.equal(claudeCards[0].rows.length, 0);
     assert.equal(explained.hint, busy);
     assert.equal(explained.action, undefined);
   }
+  // A label nobody has identified: its saved login cannot be shown as its own.
+  {
+    const error = 'credentials error: this account has no recorded identity, so the Claude Code login saved for it cannot be checked';
+    const explained = explainError(error, { signIn: 'unused' });
+    assert.equal(explained.title, 'Account not identified');
+    assert.match(explained.hint, /needs its own Claude Code sign-in/);
+    assert.equal(explained.action, undefined);
+    assert.doesNotMatch(explained.hint, TERMINAL);
+  }
   // A working login filed under the wrong account is not an expired one.
   {
     const error = 'credentials error: the Claude Code login saved for this account belongs to another account';

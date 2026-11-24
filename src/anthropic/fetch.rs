@@ -55,7 +55,15 @@ pub async fn fetch_snapshot(
     endpoints: &Endpoints,
     cache_ttl: Duration,
 ) -> Result<FetchOutcome> {
-    fetch_snapshot_as(client, creds_target, None, cache, endpoints, cache_ttl).await
+    fetch_snapshot_as(
+        client,
+        creds_target,
+        Owner::Unchecked,
+        cache,
+        endpoints,
+        cache_ttl,
+    )
+    .await
 }
 
 /// What a managed account's entry reports when the credential in its slot was
@@ -79,14 +87,30 @@ pub const CREDENTIALS_BUSY_MESSAGE: &str = "the saved logins are held by an acco
 pub const UNIDENTIFIED_ACCOUNT_MESSAGE: &str =
     "the Claude Code login saved for this account does not say which account it belongs to";
 
-/// [`fetch_snapshot`] for an entry that is one known account (`account_uuid`).
+/// What a named account nobody has identified reports instead of usage. The
+/// popover classifies it by "no recorded identity".
+pub const UNRECORDED_ACCOUNT_MESSAGE: &str = "this account has no recorded identity, so the Claude Code login saved for it cannot be checked";
+
+/// Whose login an entry may show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owner<'a> {
+    /// The default login or a Desktop profile: whoever is signed in there.
+    Unchecked,
+    /// A named account, by the id its credential has to carry.
+    Account(&'a str),
+    /// A named account nobody has identified yet: nothing saved for it can be
+    /// proven its own.
+    Unrecorded,
+}
+
+/// [`fetch_snapshot`] for an entry that is one known account (`owner`).
 /// A credential not proven to be that account's is refused before the cache is
 /// read or the token refreshed, so the entry never shows another account's
 /// usage.
 pub async fn fetch_snapshot_as(
     client: &reqwest::Client,
     creds_target: &creds::CredsTarget,
-    account_uuid: Option<&str>,
+    owner: Owner<'_>,
     cache: &Cache,
     endpoints: &Endpoints,
     cache_ttl: Duration,
@@ -94,7 +118,7 @@ pub async fn fetch_snapshot_as(
     fetch_within(
         client,
         creds_target,
-        account_uuid,
+        owner,
         cache,
         endpoints,
         cache_ttl,
@@ -108,7 +132,7 @@ pub async fn fetch_snapshot_as(
 async fn fetch_within(
     client: &reqwest::Client,
     creds_target: &creds::CredsTarget,
-    account_uuid: Option<&str>,
+    owner: Owner<'_>,
     cache: &Cache,
     endpoints: &Endpoints,
     cache_ttl: Duration,
@@ -117,7 +141,7 @@ async fn fetch_within(
     let result = fetch_locked(
         client,
         creds_target,
-        account_uuid,
+        owner,
         cache,
         endpoints,
         cache_ttl,
@@ -169,14 +193,14 @@ fn credentials_busy(cache: &Cache, tied_to_an_account: bool) -> Result<FetchOutc
 ///
 /// WHY: the default login's cache follows the slot, not an account. While a
 /// switch holds the lock, its last reading is the outgoing account's.
-fn tied_to_an_account(target: &creds::CredsTarget, account_uuid: Option<&str>) -> bool {
-    account_uuid.is_some() || matches!(target, creds::CredsTarget::Desktop(_))
+fn tied_to_an_account(target: &creds::CredsTarget, owner: Owner<'_>) -> bool {
+    matches!(owner, Owner::Account(_)) || matches!(target, creds::CredsTarget::Desktop(_))
 }
 
 async fn fetch_locked(
     client: &reqwest::Client,
     creds_target: &creds::CredsTarget,
-    account_uuid: Option<&str>,
+    owner: Owner<'_>,
     cache: &Cache,
     endpoints: &Endpoints,
     cache_ttl: Duration,
@@ -193,7 +217,7 @@ async fn fetch_locked(
         // WHY: the lock is held, not broken. The error read as a connection
         // problem, and the numbers on the card were still this account's.
         Err(error) if crate::cache::is_lock_timeout(&error) => {
-            return credentials_busy(cache, tied_to_an_account(creds_target, account_uuid));
+            return credentials_busy(cache, tied_to_an_account(creds_target, owner));
         }
         Err(error) => return Err(error),
     };
@@ -203,7 +227,10 @@ async fn fetch_locked(
     // the creds actually came from (file vs macOS Keychain) so the refresh
     // write-back follows the same source instead of forking a stale copy.
     let (mut creds, creds_source) = creds::resolve(creds_target)?;
-    if let Some(expected) = account_uuid {
+    if owner == Owner::Unrecorded {
+        return Err(AppError::Credentials(UNRECORDED_ACCOUNT_MESSAGE.into()));
+    }
+    if let Owner::Account(expected) = owner {
         let named = creds.claude_ai_oauth.account_uuid.as_deref();
         match named.filter(|uuid| !uuid.is_empty()) {
             Some(actual) if actual == expected => {}
@@ -253,13 +280,14 @@ async fn fetch_locked(
                 // the old token on disk is already spent: the next run cannot
                 // refresh and the user is silently logged out. That is a hard
                 // failure, not a best-effort detail.
+                let started_from = creds.claude_ai_oauth.refresh_token.clone();
                 let rotated = rr.refresh_token.is_some();
                 if let Some(new_rt) = rr.refresh_token {
                     creds.claude_ai_oauth.refresh_token = new_rt;
                 }
                 creds.claude_ai_oauth.expires_at_ms =
                     Utc::now().timestamp_millis() + (rr.expires_in as i64) * 1000;
-                match creds::write_back_to(&creds_source, &creds.claude_ai_oauth) {
+                match creds::write_back_to(&creds_source, &creds.claude_ai_oauth, &started_from) {
                     Ok(creds::WriteBack::Saved) => {}
                     // WHY: a sign-in or an account switch stored a login after
                     // this one was read. That login is the current one and the
@@ -267,13 +295,15 @@ async fn fetch_locked(
                     // be wrong, and so would usage read with tokens that are no
                     // longer the stored ones.
                     Ok(creds::WriteBack::LoginChanged) => {
+                        let changed = AppError::Other(LOGIN_CHANGED_MESSAGE.into());
+                        // The last reading of a cache that follows the slot
+                        // may be the replaced login's, and so may the plan.
+                        if !tied_to_an_account(creds_target, owner) {
+                            return Err(changed);
+                        }
                         return with_oauth_plan(
                             &plan_label,
-                            fallback_to_cache_silent(
-                                cache,
-                                plan_label.clone(),
-                                AppError::Other(LOGIN_CHANGED_MESSAGE.into()),
-                            ),
+                            fallback_to_cache_silent(cache, plan_label.clone(), changed),
                         );
                     }
                     Err(e) if rotated => {
@@ -848,7 +878,7 @@ mod tests {
             usage: "http://localhost:1/should-not-be-called".into(),
             token: "http://localhost:1/should-not-be-called".into(),
         };
-        let fetch = |account: Option<&'static str>| {
+        let fetch = |account: Owner<'static>| {
             fetch_snapshot_as(
                 &client,
                 &target,
@@ -859,11 +889,11 @@ mod tests {
             )
         };
 
-        let error = fetch(Some("uuid-work")).await.unwrap_err();
+        let error = fetch(Owner::Account("uuid-work")).await.unwrap_err();
         assert!(error.to_string().contains(WRONG_ACCOUNT_MESSAGE), "{error}");
 
         // Its own account, and an entry tied to no account, read as before.
-        for account in [Some("uuid-personal"), None] {
+        for account in [Owner::Account("uuid-personal"), Owner::Unchecked] {
             let outcome = fetch(account).await.unwrap();
             assert_eq!(outcome.snapshot.session.utilization_pct, 42);
         }
@@ -985,7 +1015,7 @@ mod tests {
         let outcome = fetch_within(
             &client,
             &target,
-            None,
+            Owner::Unchecked,
             &cache,
             &endpoints,
             Duration::ZERO,
@@ -1008,7 +1038,7 @@ mod tests {
         let error = fetch_within(
             &client,
             &target,
-            None,
+            Owner::Unchecked,
             &cache,
             &endpoints,
             Duration::ZERO,
@@ -1027,7 +1057,7 @@ mod tests {
         let error = fetch_within(
             &client,
             &target,
-            None,
+            Owner::Unchecked,
             &empty,
             &endpoints,
             Duration::ZERO,
@@ -1048,7 +1078,7 @@ mod tests {
         let error = fetch_within(
             &client,
             &unreachable,
-            None,
+            Owner::Unchecked,
             &cache,
             &endpoints,
             Duration::ZERO,
@@ -1068,19 +1098,25 @@ mod tests {
             config_dir: "/accounts/work".into(),
         };
 
-        assert!(tied_to_an_account(&desktop, None));
-        assert!(tied_to_an_account(&named, Some("uuid-work")));
+        assert!(tied_to_an_account(&desktop, Owner::Unchecked));
+        assert!(tied_to_an_account(&named, Owner::Account("uuid-work")));
         // The default login follows the slot, and a label with no known
         // identity is not checked against anything.
-        assert!(!tied_to_an_account(&default, None));
-        assert!(!tied_to_an_account(&named, None));
+        assert!(!tied_to_an_account(&default, Owner::Unchecked));
+        assert!(!tied_to_an_account(&named, Owner::Unrecorded));
     }
 
-    #[tokio::test]
-    async fn a_sign_in_during_a_refresh_is_left_alone_and_asks_for_nothing() {
-        // The token endpoint stands in for the moment a sign-in lands: it
-        // rewrites the credential file while this refresh is in flight.
-        const NEW_LOGIN: &str = r#"{"claudeAiOauth":{"accessToken":"signed-in-at","refreshToken":"signed-in-rt","expiresAt":99999999999999,"accountUuid":"uuid-personal"}}"#;
+    /// A refresh of `uuid-work`'s login during which a sign-in as
+    /// `signed_in_as` lands in the credential file. Whatever the card shows,
+    /// the new login is untouched, nothing is recorded against the account and
+    /// no usage is read with tokens that are no longer the stored ones.
+    async fn refresh_interrupted_by_a_sign_in(
+        signed_in_as: &str,
+        owner: Owner<'_>,
+    ) -> Result<FetchOutcome> {
+        let new_login = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"signed-in-at","refreshToken":"signed-in-rt","expiresAt":99999999999999,"accountUuid":"{signed_in_as}"}}}}"#
+        );
         let (_dir, path) = crate::cache::closed_temp_file(
             "creds.json",
             Some(
@@ -1088,12 +1124,14 @@ mod tests {
             ),
         );
         let mut server = mockito::Server::new_async().await;
+        // The token endpoint stands in for the moment the sign-in lands.
         let stored = path.clone();
+        let written = new_login.clone();
         server
             .mock("POST", "/token")
             .with_status(200)
             .with_body_from_request(move |_| {
-                std::fs::write(&stored, NEW_LOGIN).unwrap();
+                std::fs::write(&stored, &written).unwrap();
                 br#"{"access_token":"new-at","refresh_token":"new-rt","expires_in":3600}"#.to_vec()
             })
             .create_async()
@@ -1112,23 +1150,147 @@ mod tests {
             token: format!("{}/token", server.url()),
         };
 
-        let outcome = fetch_snapshot_as(
+        let result = fetch_snapshot_as(
             &reqwest::Client::new(),
             &creds::CredsTarget::Explicit(path.clone()),
-            Some("uuid-work"),
+            owner,
             &cache,
             &endpoints,
             Duration::ZERO,
         )
-        .await
-        .unwrap();
+        .await;
 
-        // The last good reading, with nothing recorded against the account and
-        // the new login untouched.
-        assert_eq!(outcome.snapshot.session.utilization_pct, 42);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            new_login,
+            "{signed_in_as}"
+        );
         assert_eq!(cache.read_last_error(), None);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), NEW_LOGIN);
         usage.assert_async().await;
+        result
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_during_a_refresh_is_left_alone_and_asks_for_nothing() {
+        // To another account, or to the same one again: either is a login
+        // this refresh did not start from. The card keeps its last reading.
+        for signed_in_as in ["uuid-personal", "uuid-work"] {
+            let outcome =
+                refresh_interrupted_by_a_sign_in(signed_in_as, Owner::Account("uuid-work"))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                outcome.snapshot.session.utilization_pct, 42,
+                "{signed_in_as}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_login_change_shows_no_reading_on_a_card_tied_to_no_account() {
+        // The default login's cache follows the slot: its last reading may be
+        // the previous login's.
+        let error = refresh_interrupted_by_a_sign_in("uuid-personal", Owner::Unchecked)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(LOGIN_CHANGED_MESSAGE), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_refresh_of_an_unchanged_login_saves_the_rotated_token() {
+        let (_dir, path) = crate::cache::closed_temp_file(
+            "creds.json",
+            Some(
+                r#"{"claudeAiOauth":{"accessToken":"old-at","refreshToken":"old-rt","expiresAt":1,"accountUuid":"uuid-work"}}"#,
+            ),
+        );
+        let mut server = mockito::Server::new_async().await;
+        // The first refresh rotates the refresh token; the second, of the
+        // login the first one left, returns an access token alone.
+        let rotating = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::Regex("old-rt".into()))
+            .with_status(200)
+            .with_body(r#"{"access_token":"new-at","refresh_token":"new-rt","expires_in":0}"#)
+            .create_async()
+            .await;
+        let unrotating = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::Regex("new-rt".into()))
+            .with_status(200)
+            .with_body(r#"{"access_token":"newer-at","expires_in":3600}"#)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/oauth/usage")
+            .with_status(200)
+            .with_body(r#"{"five_hour":{"utilization":50},"seven_day":{"utilization":25}}"#)
+            .expect(2)
+            .create_async()
+            .await;
+        let (_td, cache) = cache_fixture();
+        let endpoints = Endpoints {
+            usage: format!("{}/api/oauth/usage", server.url()),
+            token: format!("{}/token", server.url()),
+        };
+
+        for (access_token, refresh_token) in [("new-at", "new-rt"), ("newer-at", "new-rt")] {
+            let outcome = fetch_snapshot_as(
+                &reqwest::Client::new(),
+                &creds::CredsTarget::Explicit(path.clone()),
+                Owner::Account("uuid-work"),
+                &cache,
+                &endpoints,
+                Duration::ZERO,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(outcome.snapshot.session.utilization_pct, 50);
+            let saved: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(saved["claudeAiOauth"]["refreshToken"], refresh_token);
+            assert_eq!(saved["claudeAiOauth"]["accessToken"], access_token);
+            assert_eq!(saved["claudeAiOauth"]["accountUuid"], "uuid-work");
+        }
+        rotating.assert_async().await;
+        unrotating.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn an_account_with_no_recorded_identity_reports_no_usage() {
+        // The login in its slot is a working one with a fresh reading cached,
+        // but nothing says this label is that account.
+        let (_dir, path) = crate::cache::closed_temp_file(
+            "creds.json",
+            Some(
+                r#"{"claudeAiOauth":{"accessToken":"at","refreshToken":"rt","expiresAt":99999999999999,"accountUuid":"uuid-work"}}"#,
+            ),
+        );
+        let (_td, cache) = cache_fixture();
+        cache
+            .write_payload(br#"{"five_hour":{"utilization":42},"seven_day":{"utilization":15}}"#)
+            .unwrap();
+        let endpoints = Endpoints {
+            usage: "http://localhost:1/should-not-be-called".into(),
+            token: "http://localhost:1/should-not-be-called".into(),
+        };
+
+        let error = fetch_snapshot_as(
+            &reqwest::Client::new(),
+            &creds::CredsTarget::Explicit(path),
+            Owner::Unrecorded,
+            &cache,
+            &endpoints,
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains(UNRECORDED_ACCOUNT_MESSAGE),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -1149,7 +1311,7 @@ mod tests {
         let error = fetch_snapshot_as(
             &client,
             &target,
-            Some("uuid-work"),
+            Owner::Account("uuid-work"),
             &cache,
             &endpoints,
             Duration::from_secs(3600),

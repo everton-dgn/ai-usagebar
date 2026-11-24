@@ -369,10 +369,11 @@ pub fn switch_cli_account(
 
     // Stray credentials go home first, so the checks below see every account's
     // own slot. This is the one write a refused switch can leave behind.
+    let mut every_slot_was_read = true;
     if !opts.dry_run {
         let live = store.read_default().map_err(storage)?;
         let live_owner = resolve_active_label(live.as_deref(), accounts);
-        rehome_misfiled(accounts, store, live_owner.as_deref())?;
+        every_slot_was_read = rehome_misfiled(accounts, store, live_owner.as_deref());
     }
 
     // Read every piece needed for both the move and its rollback before the
@@ -427,11 +428,19 @@ pub fn switch_cli_account(
         .read_named(&target.config_dir())
         .map_err(storage)?
         .ok_or_else(|| {
-            AppError::Credentials(format!(
-                "no stored credential for {label:?}; that account has never been signed in \
-             here"
-            ))
-            .for_account(AccountFailure::MissingLogin)
+            if every_slot_was_read {
+                AppError::Credentials(format!(
+                    "no stored credential for {label:?}; that account has never been signed \
+                     in here"
+                ))
+                .for_account(AccountFailure::MissingLogin)
+            } else {
+                // Its login may be the one filed in a slot that was skipped.
+                AppError::Credentials(format!(
+                    "no stored credential for {label:?}, and a saved login could not be read"
+                ))
+                .for_account(AccountFailure::StorageUnavailable)
+            }
         })?;
     // Installing it makes it the live login, so it must be proven the
     // target's: a blob that does not say would leave the default slot naming
@@ -475,6 +484,24 @@ pub fn switch_cli_account(
         return Ok(CliSwitchOutcome::WouldSwitch { outgoing: active });
     }
 
+    // WHY: saving the outgoing login overwrites its named slot. A login of
+    // another account still there, which the repair above could not move, is
+    // the only copy unless its owner holds one of its own.
+    if let (Some(outgoing), Some(held)) = (outgoing_account, original_outgoing_named.as_deref())
+        && let Some(owner) = blob_account_uuid(held)
+            .as_deref()
+            .and_then(|uuid| owner_of(uuid, accounts))
+        && owner.label != outgoing.label
+        && !matches!(store.read_named(&owner.config_dir()), Ok(Some(_)))
+    {
+        return Err(AppError::Credentials(format!(
+            "the slot of {:?} holds a login of {:?} that could not be moved to its own slot; \
+             switching to {label:?} would overwrite it",
+            outgoing.label, owner.label
+        ))
+        .for_account(AccountFailure::StorageUnavailable));
+    }
+
     let credentials = RollbackState {
         target,
         target_blob: &target_blob,
@@ -512,7 +539,11 @@ pub fn switch_cli_account(
         return Err(with_rollback(error, rollback_switch(store, &credentials)));
     }
     let rollback = RollbackState {
-        marker: Some((home_claude_json, original_marker.as_deref())),
+        marker: Some(MarkerWrite {
+            path: home_claude_json,
+            before: original_marker.as_deref(),
+            written: &merged_marker,
+        }),
         ..credentials
     };
     if let Err(error) = store.delete_named(&target.config_dir()) {
@@ -533,19 +564,28 @@ pub fn switch_cli_account(
 /// a second copy would put one rotating refresh token in two places. Anything
 /// else stays put and the holder's card reports it.
 ///
-/// Deleting the holder's copy is best-effort. Once the credential is with its
-/// owner, a copy that cannot be deleted must not refuse every switch; it is
+/// Best-effort throughout: this is a repair of slots the requested switch may
+/// not touch, and a slot that cannot be read, written or cleared must not
+/// refuse a switch between other accounts. The switch reads the slots it
+/// needs itself and fails on those. A copy that could not be deleted is
 /// removed by a later switch while the owner's copy is still the same.
+///
+/// Returns whether every slot could be read and every move made.
 fn rehome_misfiled(
     accounts: &[AnthropicAccount],
     store: &dyn CredentialStore,
     live_owner: Option<&str>,
-) -> Result<()> {
-    let storage = |error: AppError| error.for_account(AccountFailure::StorageUnavailable);
+) -> bool {
+    let mut complete = true;
     for holder in accounts {
         let holder_dir = holder.config_dir();
-        let Some(blob) = store.read_named(&holder_dir).map_err(storage)? else {
-            continue;
+        let blob = match store.read_named(&holder_dir) {
+            Ok(Some(blob)) => blob,
+            Ok(None) => continue,
+            Err(_) => {
+                complete = false;
+                continue;
+            }
         };
         let Some(owner) = blob_account_uuid(&blob)
             .as_deref()
@@ -557,20 +597,26 @@ fn rehome_misfiled(
             continue;
         }
         let owner_dir = owner.config_dir();
-        match store.read_named(&owner_dir).map_err(storage)? {
+        match store.read_named(&owner_dir) {
             // The copy an earlier move could not delete.
-            Some(owned) if owned == blob => {
+            Ok(Some(owned)) if owned == blob => {
                 let _ = store.delete_named(&holder_dir);
             }
-            Some(_) => {}
-            None if live_owner == Some(owner.label.as_str()) => {}
-            None => {
-                store.write_named(&owner_dir, &blob).map_err(storage)?;
-                let _ = store.delete_named(&holder_dir);
+            Ok(Some(_)) => {}
+            // The owner may have a login of its own: a slot that cannot be
+            // read is never written.
+            Err(_) => complete = false,
+            Ok(None) if live_owner == Some(owner.label.as_str()) => {}
+            Ok(None) => {
+                if store.write_named(&owner_dir, &blob).is_ok() {
+                    let _ = store.delete_named(&holder_dir);
+                } else {
+                    complete = false;
+                }
             }
         }
     }
-    Ok(())
+    complete
 }
 
 /// Register the login plain `claude` is signed into as `account`, without a
@@ -638,8 +684,17 @@ struct RollbackState<'a> {
     outgoing: Option<&'a AnthropicAccount>,
     original_outgoing_named: Option<&'a str>,
     original_default: Option<&'a str>,
-    /// The home marker and what it held, once the switch has rewritten it.
-    marker: Option<(&'a Path, Option<&'a [u8]>)>,
+    /// The home file, once the switch has rewritten it.
+    marker: Option<MarkerWrite<'a>>,
+}
+
+/// What a switch did to the home file: what it held before and what the
+/// switch left in it.
+#[derive(Clone, Copy)]
+struct MarkerWrite<'a> {
+    path: &'a Path,
+    before: Option<&'a [u8]>,
+    written: &'a [u8],
 }
 
 fn rollback_switch(store: &dyn CredentialStore, state: &RollbackState<'_>) -> Result<()> {
@@ -658,8 +713,8 @@ fn rollback_switch(store: &dyn CredentialStore, state: &RollbackState<'_>) -> Re
     {
         failures.push(format!("outgoing credential: {error}"));
     }
-    if let Some((path, original)) = state.marker
-        && let Err(error) = restore_marker(path, original)
+    if let Some(write) = state.marker
+        && let Err(error) = restore_marker(&write)
     {
         failures.push(format!("identity marker: {error}"));
     }
@@ -684,16 +739,44 @@ fn restore_named(store: &dyn CredentialStore, path: &Path, original: Option<&str
     }
 }
 
-fn restore_marker(path: &Path, original: Option<&[u8]>) -> Result<()> {
-    if let Some(bytes) = original {
-        crate::cache::atomic_write(path, bytes)
-    } else {
-        match std::fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(AppError::io_at(path, error)),
-        }
+/// Undo the home-file write of a failed switch.
+///
+/// WHY: every running Claude Code session rewrites this file. Only the
+/// `oauthAccount` the switch installed is the switch's to take back, and only
+/// while it is still there: a sign-in may have replaced it since.
+fn restore_marker(write: &MarkerWrite<'_>) -> Result<()> {
+    let path = write.path;
+    let Some(current) = read_optional(path)? else {
+        return Ok(());
+    };
+    if current == write.written {
+        return match write.before {
+            Some(bytes) => crate::cache::atomic_write(path, bytes),
+            None => match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(AppError::io_at(path, error)),
+            },
+        };
     }
+    // By account, not by content: a session may have refreshed the profile
+    // fields of the marker the switch wrote.
+    let account = |claude_json: &[u8]| {
+        let marker = oauth_account_of(claude_json)?;
+        uuid_of(&marker).map(str::to_string)
+    };
+    if account(&current) != account(write.written) {
+        return Ok(());
+    }
+    let before = write.before.and_then(oauth_account_of);
+    crate::cache::atomic_write(path, &merge_oauth_account(&current, before.as_ref())?)
+}
+
+fn oauth_account_of(claude_json: &[u8]) -> Option<Value> {
+    serde_json::from_slice::<Value>(claude_json)
+        .ok()?
+        .get("oauthAccount")
+        .cloned()
 }
 
 fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
@@ -771,6 +854,8 @@ mod tests {
         fail_delete_named: RefCell<Option<PathBuf>>,
         /// Deleting this slot reports an error and removes nothing.
         refuse_delete_named: RefCell<Option<PathBuf>>,
+        /// Reading this slot reports an error.
+        fail_read_named: RefCell<Option<PathBuf>>,
     }
 
     impl CredentialStore for FakeStore {
@@ -786,6 +871,9 @@ mod tests {
             Ok(())
         }
         fn read_named(&self, config_dir: &Path) -> Result<Option<String>> {
+            if self.fail_read_named.borrow().as_deref() == Some(config_dir) {
+                return Err(AppError::Other("injected read failure".into()));
+            }
             Ok(self.named.borrow().get(config_dir).cloned())
         }
         fn write_named(&self, config_dir: &Path, blob: &str) -> Result<()> {
@@ -1253,6 +1341,181 @@ mod tests {
             waited < Duration::from_millis(1200),
             "the switch waited for both refreshes: {waited:?}"
         );
+    }
+
+    /// The fixture's accounts plus `spare`, whose Keychain item cannot be read.
+    fn with_an_unreadable_spare(f: &Fixture) -> Vec<AnthropicAccount> {
+        let accounts_dir = f.accounts[0].config_dir().parent().unwrap().to_path_buf();
+        let spare = AnthropicAccount {
+            label: "spare".into(),
+            credentials_path: accounts_dir.join("spare").join(".credentials.json"),
+        };
+        write(
+            &spare.config_dir().join(CLAUDE_JSON),
+            &marker("uuid-spare", "me@spare.test"),
+        );
+        *f.store.fail_read_named.borrow_mut() = Some(spare.config_dir());
+        let mut accounts = f.accounts.clone();
+        accounts.push(spare);
+        accounts
+    }
+
+    #[test]
+    fn a_slot_that_cannot_be_read_does_not_stop_a_switch_between_other_accounts() {
+        let f = fixture();
+        let accounts = with_an_unreadable_spare(&f);
+
+        let outcome = switch_cli_account(
+            &f.home,
+            &accounts,
+            "work",
+            CliSwitchOpts::default(),
+            &f.store,
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            CliSwitchOutcome::Switched {
+                outgoing: Some("personal".into())
+            }
+        );
+        assert_eq!(f.store.default.borrow().as_deref(), Some(WORK_SAVED));
+    }
+
+    #[test]
+    fn a_stray_login_with_nowhere_to_go_is_not_overwritten_by_the_switch() {
+        // The live account's slot holds a login issued to `spare`. Whether
+        // `spare` has one of its own is unknown, so nothing is written there,
+        // and saving the live login over the stray one could destroy the only
+        // copy.
+        let f = fixture();
+        let accounts = with_an_unreadable_spare(&f);
+        let stray = blob("uuid-spare", "stray");
+        f.store
+            .named
+            .borrow_mut()
+            .insert(accounts[1].config_dir(), stray.clone());
+
+        let error = switch_cli_account(
+            &f.home,
+            &accounts,
+            "work",
+            CliSwitchOpts::default(),
+            &f.store,
+        )
+        .unwrap_err();
+
+        assert_eq!(failure(&error), Some(AccountFailure::StorageUnavailable));
+        let named = f.store.named.borrow();
+        assert_eq!(named.get(&accounts[1].config_dir()), Some(&stray));
+        assert!(!named.contains_key(&accounts[2].config_dir()));
+        assert_eq!(f.store.default.borrow().as_deref(), Some(PERSONAL_LIVE));
+    }
+
+    #[test]
+    fn a_target_whose_login_may_be_in_an_unreadable_slot_is_not_called_never_signed_in() {
+        // `work` has nothing in its own slot, and one slot could not be read:
+        // its login may be the one sitting there.
+        let f = fixture();
+        let accounts = with_an_unreadable_spare(&f);
+        f.store.named.borrow_mut().remove(&accounts[0].config_dir());
+
+        let error = switch_cli_account(
+            &f.home,
+            &accounts,
+            "work",
+            CliSwitchOpts::default(),
+            &f.store,
+        )
+        .unwrap_err();
+
+        assert_eq!(failure(&error), Some(AccountFailure::StorageUnavailable));
+        assert_eq!(f.store.default.borrow().as_deref(), Some(PERSONAL_LIVE));
+    }
+
+    /// A store whose delete of the target's slot fails, after something else
+    /// has rewritten the home file to `written`.
+    struct HomeRewrittenBeforeTheLastStepFails<'a> {
+        inner: &'a FakeStore,
+        home: &'a Path,
+        written: &'a str,
+    }
+    impl CredentialStore for HomeRewrittenBeforeTheLastStepFails<'_> {
+        fn read_default(&self) -> Result<Option<String>> {
+            self.inner.read_default()
+        }
+        fn write_default(&self, blob: &str) -> Result<()> {
+            self.inner.write_default(blob)
+        }
+        fn delete_default(&self) -> Result<()> {
+            self.inner.delete_default()
+        }
+        fn read_named(&self, dir: &Path) -> Result<Option<String>> {
+            self.inner.read_named(dir)
+        }
+        fn write_named(&self, dir: &Path, blob: &str) -> Result<()> {
+            self.inner.write_named(dir, blob)
+        }
+        fn delete_named(&self, _dir: &Path) -> Result<()> {
+            std::fs::write(self.home, self.written).unwrap();
+            Err(AppError::Other("injected delete refusal".into()))
+        }
+    }
+
+    /// The home file after a switch to `work` that fails at its last step,
+    /// with the file rewritten to `written` just before.
+    fn home_after_a_failed_switch(written: &str) -> Value {
+        let f = fixture();
+        let store = HomeRewrittenBeforeTheLastStepFails {
+            inner: &f.store,
+            home: &f.home,
+            written,
+        };
+        switch_cli_account(
+            &f.home,
+            &f.accounts,
+            "work",
+            CliSwitchOpts::default(),
+            &store,
+        )
+        .unwrap_err();
+        // The credentials are back where they were either way.
+        assert_eq!(f.store.default.borrow().as_deref(), Some(PERSONAL_LIVE));
+        serde_json::from_slice(&std::fs::read(&f.home).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn undoing_a_switch_keeps_what_was_written_to_the_home_file_since() {
+        // Claude Code saved a counter after the switch wrote its marker.
+        let home = home_after_a_failed_switch(
+            r#"{"oauthAccount":{"accountUuid":"uuid-work","emailAddress":"me@work.test"},"numStartups":7}"#,
+        );
+
+        assert_eq!(home["oauthAccount"]["accountUuid"], "uuid-personal");
+        assert_eq!(home["oauthAccount"]["emailAddress"], "me@personal.test");
+        assert_eq!(home["numStartups"], 7);
+    }
+
+    #[test]
+    fn undoing_a_switch_takes_back_its_marker_even_after_a_session_added_to_it() {
+        // A session refreshed the profile fields of the account the switch
+        // had just written. It is still the switch's marker.
+        let home = home_after_a_failed_switch(
+            r#"{"oauthAccount":{"accountUuid":"uuid-work","emailAddress":"me@work.test","displayName":"Work"}}"#,
+        );
+
+        assert_eq!(home["oauthAccount"]["accountUuid"], "uuid-personal");
+    }
+
+    #[test]
+    fn undoing_a_switch_leaves_a_marker_someone_else_installed() {
+        // A sign-in replaced the marker the switch had written.
+        let home = home_after_a_failed_switch(
+            r#"{"oauthAccount":{"accountUuid":"uuid-other","emailAddress":"me@other.test"}}"#,
+        );
+
+        assert_eq!(home["oauthAccount"]["accountUuid"], "uuid-other");
     }
 
     #[test]

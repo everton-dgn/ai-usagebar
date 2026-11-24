@@ -318,6 +318,15 @@ assert.equal(claudeCards[0].rows.length, 0);
     assert.equal(explained.hint, 'the saved login changed while its token was being renewed; it is read again on the next update');
     assert.equal(explained.action, undefined);
   }
+  // An account operation holding the saved logins is no connection problem
+  // and no sign-in problem. Text from anthropic/fetch.rs.
+  {
+    const busy = 'the saved logins are held by an account operation that has not finished; this account is read again on the next update';
+    const explained = explainError(busy, { signIn: 'unused' });
+    assert.equal(explained.title, "Couldn't update");
+    assert.equal(explained.hint, busy);
+    assert.equal(explained.action, undefined);
+  }
   // A working login filed under the wrong account is not an expired one.
   {
     const error = 'credentials error: the Claude Code login saved for this account belongs to another account';

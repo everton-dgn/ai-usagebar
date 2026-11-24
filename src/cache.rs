@@ -388,6 +388,14 @@ pub async fn acquire_lock_async(path: &Path, timeout: Duration) -> Result<LockGu
         .map_err(|e| AppError::Other(format!("cache lock task failed: {e}")))?
 }
 
+const LOCK_TIMEOUT_TEXT: &str = "cache lock timeout";
+
+/// Whether `error` is [`acquire_lock`] giving up on a lock someone else holds,
+/// as opposed to failing to open the lock file.
+pub fn is_lock_timeout(error: &AppError) -> bool {
+    matches!(error, AppError::Other(message) if message.starts_with(LOCK_TIMEOUT_TEXT))
+}
+
 pub fn acquire_lock(path: &Path, timeout: Duration) -> Result<LockGuard> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io_at(parent, e))?;
@@ -407,7 +415,7 @@ pub fn acquire_lock(path: &Path, timeout: Duration) -> Result<LockGuard> {
             Err(_) => {
                 if std::time::Instant::now() >= deadline {
                     return Err(AppError::Other(format!(
-                        "cache lock timeout after {:?}",
+                        "{LOCK_TIMEOUT_TEXT} after {:?}",
                         timeout
                     )));
                 }

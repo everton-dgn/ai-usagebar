@@ -76,6 +76,14 @@ A renovação de token e a troca de conta usam o mesmo bloqueio. Uma troca pedid
 enquanto um token é renovado espera essa renovação terminar, por até 30
 segundos, com a estrela girando. As renovações seguintes esperam a troca.
 
+Se uma operação de conta segurar esse bloqueio por mais tempo, por exemplo uma
+troca parada num pedido de acesso do Chaves, os cartões das contas cadastradas
+e dos perfis do aplicativo Claude Desktop seguem mostrando a última leitura.
+Logo depois de abrir o aplicativo ainda não há leitura a mostrar, e o cartão
+informa que as sessões estão em uso por outra operação. O cartão da sessão
+padrão, sem conta cadastrada, mostra sempre esse aviso: a última leitura dele
+pode ser da conta que está saindo.
+
 Uma conta sem nenhuma sessão salva, no Chaves ou em arquivo, aparece como
 **Sem sessão salva**, com o aviso de que precisa de uma sessão do Claude Code.
 

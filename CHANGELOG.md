@@ -55,6 +55,11 @@ reescrita. As referências a plataformas antigas pertencem àquele histórico.
 - Uma troca de conta à espera do bloqueio passa à frente das renovações de
   token seguintes: elas entram numa fila atrás da troca. Antes, renovações em
   sequência podiam retomar o bloqueio e a troca esperava por todas.
+- Quando uma operação de conta segura o bloqueio das sessões por mais de 45
+  segundos, os cartões das contas cadastradas e dos perfis do Claude Desktop
+  mostram a última leitura, e o da sessão padrão avisa que as sessões estão em
+  uso. Antes, todos mostravam um erro de conexão, embora a rede estivesse
+  normal.
 - Um login novo gravado enquanto o token anterior era renovado fica intacto,
   no Chaves e também em arquivo de credenciais, e o cartão mostra a última
   leitura sem pedir outro login. Antes, o cartão pedia um novo login, e o
